@@ -1,54 +1,49 @@
 # LP TERMINAL
 
-Terminal-style frontend for LPs on Robinhood Chain (chainId 4663): UP33
-(ve(3,3) DEX) plus the official **Uniswap v2 + v3** deployments. POSITIONS shows
-and manages UP33 + univ3, POOLS browses/adds liquidity across all three,
-distinguished by protocol badges (brand mark + colored label). Discovery runs on
-a self-hosted **pool indexer** (see below) with a client-side fallback.
-Terminal *style* — full-bleed layout, not a boxed console.
-Every contract address the app touches lives in `src/config/addresses.ts`, each
-one verified against Blockscout's verified source — check them yourself before
-you trust this with funds.
-
-**Status**: v1, built for personal use and opened up as-is. See
-[Known v1 limits](#known-v1-limits). MIT licensed — see [Disclaimer](#disclaimer)
-before you point it at real money.
+Personal terminal-style frontend for LPs on Robinhood Chain (chainId 4663):
+UP33 (ve(3,3) DEX) plus the official **Uniswap v2 + v3** deployments. POSITIONS
+shows and manages UP33 + univ3, POOLS browses/adds liquidity across all three,
+distinguished by protocol badges (brand mark + colored label). Discovery runs
+on a self-hosted **pool indexer** (see below) with a client-side fallback.
+UI is branded **LP TERMINAL** (general LP terminal, terminal *style* — full-bleed
+layout, not a boxed console); domain will eventually move to `lp-terminal.xyz`,
+`up33-terminal.xyz` serves it for now. (Repo dir keeps the historical name.)
+Contract reference: `docs/up33-contract-map.md`.
 
 ## Run
 
 ```bash
 npm install
-cp .env.example .env   # every key is optional; defaults hit public endpoints
-npm run smoke          # optional: live-chain read-layer validation (TickMath, ABIs, quotes)
-npm run indexer        # pool indexer on :8787 (first boot backfills ~10 min; optional but
-                       # recommended — without it POOLS falls back to dexscreener discovery)
-npm run dev            # http://localhost:5173 (proxies /api -> :8787)
+npm run smoke     # optional: live-chain read-layer validation (TickMath, ABIs, quotes)
+npm run indexer   # pool indexer on :8787 (first boot backfills ~10 min; optional but
+                  # recommended — without it POOLS falls back to dexscreener discovery)
+npm run dev       # http://localhost:5173 (proxies /api -> :8787)
 ```
 
-Environment comes from the **repo-root `.env`** (via vite `envDir`) — see
-`.env.example` for the annotated template:
+Local environment comes from the repo-root **`.env`** (via Vite `envDir`;
+copy `.env.example` to get started):
 
 | key | use |
 |---|---|
-| `RPC` | private Robinhood Chain RPC (**secret** — personal/local builds only; leave unset for public builds, see [Chain reads](#chain-reads)) |
-| `KYBERSWAP_AGGREGATOR_API_BASE_URL` | kyber aggregator base |
-| `KYBERSWAP_CHAIN` | chain slug (`robinhood`) |
-| `KYBERSWAP_ROUTER_ADDRESS` | **whitelist** — swap calldata is only ever sent to this address |
-| `KYBERSWAP_FEE_BPS` | optional platform fee in bps on kyber swaps (e.g. `10` = 0.1%); off when unset |
-| `KYBERSWAP_FEE_RECEIVER` | optional; address that receives the fee (both must be set to activate) |
+| `RPC` | private Robinhood Chain RPC (**secret** — personal/local builds only; leave unset for public builds, see Deploy) |
+| `KYBERSWAP_FEE_RECEIVER` | required build-time address that receives the fixed 9 bps terminal output fee (legacy env name) |
+| `KYBERSWAP_AGGREGATOR_API_BASE_URL` | Kyber API used for read-only USD valuation; MARKET and ZAP do not call it |
+| `KYBERSWAP_CHAIN` | Kyber valuation chain slug (`robinhood`) |
+| `VITE_SOLVER_URL` | optional override for the swap-solver quote API (defaults to the hosted public instance) |
 | `VITE_WALLETCONNECT_PROJECT_ID` | optional; only needed for WalletConnect QR pairing (injected wallets work without it) |
 
-KyberSwap platform fees are **verified working on this chain**: the fee rides the
-routes request (`feeAmount`/`chargeFeeBy=currency_out`/`isInBps`/`feeReceiver`),
-is echoed in `routeSummary.extraFee`, deducted from the quoted output, and encoded
-into the swap calldata by `route/build` — the router pays the receiver on-chain.
-Price displays (UP price in the add-LP sims) always quote fee-free.
+MARKET and ZAP charge the same **9 bps terminal output fee**. Direct swaps send
+their gross output to the selected router and complete the swap plus fee sweep in
+one transaction; displayed output and minimum-output checks are net of the fee.
+Fee policy and slippage stay independent. Non-transactional valuation (UP rewards,
+APR, positions and add-LP simulations) uses a fee-free Kyber quote; that display
+price never enters route selection, Zap sizing, minimum output or execution.
 
 Signing is browser-wallet only (RainbowKit / injected EIP-6963). No private keys anywhere.
 
 **i18n (en/zh)**: react-i18next with typed keys — catalogs in `src/i18n/en.ts` (source of
 truth) + `zh.ts` (`typeof en` enforces identical key structure at compile time). Language:
-footer `lang:` switcher, persisted (`up33.lang.v1`), `?lang=` view-only override
+header `lang:` switcher, persisted (`up33.lang.v1`), `?lang=` view-only override
 (screenshots), `<html lang>` + RainbowKit modal locale follow. Non-React modules
 (tx step labels, zap planner) import the singleton `t` from `src/i18n`; revert hints
 resolve lazily so they follow the active language at error time. Number/date formats
@@ -60,10 +55,15 @@ The `#lab` dev page stays English.
 Keyboard: `1–3` switch tabs, `4` opens LIMIT, `/` focuses the pool filter. Tabs
 are hash-routed (`#pools`, `#swap`, …) so reloads and deep links keep your
 place. `#lab` renders the component lab (synthetic data) for visual tweaking.
+(The old DASH tab was removed with the LP-terminal refocus. The header carries
+the block number, the `lang:` switcher and the wallet; the contract directory
+lives in `docs/up33-contract-map.md`. Epoch/flip were dropped from the header —
+an LP reads them off the emissions columns, and the countdown was re-rendering
+the header every second to show it.)
 
-- **[1] POOLS** — one table, three protocols, sorted by TVL by default. UP33 v2 + CL pools come from live factory enumeration; **Uniswap v2 + v3 pools** come from the pool indexer (`/api` — the FULL catalog built from factory events — six figures and growing ~20k pools/day, launchpads mint univ3 pools continuously — chain-derived TVL, GeckoTerminal 24h stats). Columns: fee rate, reserves/price (auto-oriented quote/base), **TVL / VOL 24H / FEES 24H** (UP33: DexScreener + Goldsky v2 subgraph; uniswap: indexer), **FEE APR / EMIT APR**, UP/wk emissions, vote share; all numeric headers sortable; `● MY POOLS` filter marks pools you're in. The `UNISWAP ⌕` row searches the whole catalog — token address / pool address / symbol / `sym0/sym1` pair, empty = everything by TVL — with a `HIDE <$1K` dust chip (on by default: 95% of the catalog is dust meme pools); if the indexer is down it falls back to DexScreener discovery with on-chain `factory.getPool` verification (v3 top 30, amber notice). Inline add-liquidity everywhere: v2 auto-ratio (UP33 Solidly router or vanilla Router02, per pool); CL/univ3 with the full range picker — symmetric presets (±0.5/1/2/5/10/20/30%, FULL), custom ±%, **one-sided ↑ABOVE / ↓BELOW** (single-token deposits that start earning when price enters — sell-the-rise / buy-the-dip), **price-bounds input** (snapped to tick spacing), raw ticks — with a live range-bar preview; amounts rebalance automatically when the range changes. univ3 mints go through the official NPM (fee-keyed mint struct, no levy, no gauge — fee APR only).
+- **[1] POOLS** — one table, three protocols, sorted by 24h volume by default (where the trading actually is; TVL is one click away). UP33 v2 + CL pools come from live factory enumeration; **Uniswap v2 + v3 pools** come from the pool indexer (`/api` — the FULL catalog built from factory events — six figures and growing ~20k pools/day, launchpads mint univ3 pools continuously — chain-derived TVL, GeckoTerminal 24h stats). Columns: fee rate, reserves/price (auto-oriented quote/base), **TVL / VOL 24H / FEES 24H** (UP33: DexScreener + Goldsky v2 subgraph; uniswap: indexer), **FEE APR / EMIT APR**, UP/wk emissions, vote share; all numeric headers sortable; `● MY POOLS` filter marks pools you're in. The `UNISWAP ⌕` row searches the whole catalog — token address / pool address / symbol / `sym0/sym1` pair, empty = everything by TVL — with a `HIDE <$1K` dust chip (on by default: 95% of the catalog is dust meme pools); if the indexer is down it falls back to DexScreener discovery with on-chain `factory.getPool` verification (v3 top 30, amber notice). Inline add-liquidity everywhere: v2 auto-ratio (UP33 Solidly router or vanilla Router02, per pool); CL/univ3 with the full range picker — symmetric presets (±0.5/1/2/5/10/20/30%, FULL), custom ±%, **one-sided ↑ABOVE / ↓BELOW** (single-token deposits that start earning when price enters — sell-the-rise / buy-the-dip), **price-bounds input** (snapped to tick spacing), raw ticks — with a live range-bar preview; amounts rebalance automatically when the range changes. univ3 mints go through the official NPM (fee-keyed mint struct, no levy, no gauge — fee APR only).
 
-  **⚡ ZAP — one-token add (all four pool kinds + increase)**: every add panel has a `FUND: PAIR | ⚡ ZAP` switch. ZAP funds the position with ONE token (either side, or native ETH when a side is WETH — wrapped as step 1): it solves how much to swap so the two piles match the deposit ratio the target needs (CL band math / v2 reserves; seeded at spot, refined over ≤2 kyber quotes since the execution rate moves the answer), previews the plan (`SPLIT / SWAP` with min-out + impact + route, `DEPOSIT` with est. dust, `PROJECTED` APRs), lists the exact tx sequence (numbered, live states), then runs it step by step: wrap? → approve → gated kyber swap → approve both sides → mint / increase / addLiquidity. The deposit uses the amounts that **actually arrived** (receipt Transfer logs), never the quote; any failure **halts** — every intermediate asset is a normal wallet balance, nothing strands. `REWARDS` column shows its full emissions sub-line only under the `UP33` filter (elsewhere it's a slim `—`/APR column).
+  **⚡ ZAP — one-token add (all four pool kinds + increase)**: every add panel has a `FUND: PAIR | ⚡ ZAP` switch. ZAP funds the position with ONE token (either side, or native ETH when a side is WETH — wrapped as step 1): it solves how much to swap so the two piles match the deposit ratio the target needs (CL band math / v2 reserves), then compares direct Uniswap and UP33 CL quotes for that swap. It previews the plan (`SPLIT / SWAP` with net min-out + impact + route, `DEPOSIT` with est. dust, `PROJECTED` APRs), lists the exact tx sequence (numbered, live states), then runs it step by step: wrap? → approve → direct swap with atomic 9 bps fee → approve both sides → mint / increase / addLiquidity. There is no aggregator allocation or route splitting. The displayed plan and its minimum are frozen when execution starts; the deposit uses the amounts that **actually arrived** (receipt Transfer logs), never the quote. Any failure **halts** — every intermediate asset is a normal wallet balance, nothing strands. `REWARDS` column shows its full emissions sub-line only under the `UP33` filter (elsewhere it's a slim `—`/APR column).
 
   APR semantics (ve(3,3): a position earns one or the other, never both):
   - `FEE APR` — **unstaked** LP net fee yield: `vol24h × feeRate × 365 / TVL`, CL further × (1 − unstaked levy). Staked LPs earn **zero** fees (theirs go to the pool's voters). CL number is the pool average — a concentrated in-range position earns proportionally more.
@@ -75,16 +75,17 @@ place. `#lab` renders the component lab (synthetic data) for visual tweaking.
   - after any claim (or CL unstake, which auto-claims) confirms, the log shows the exact UP received with a **SWAP → ETH** button — it jumps to SWAP prefilled with the claimed amount.
   - v2: wallet vs staked LP, underlying amounts, claimable pool fees, pending UP. Actions: stake all / unstake all / claim UP / claim fees / remove %.
 - **[3] SWAP** — two modes:
-  - **MARKET** — KyberSwap aggregator quote vs **UP33-native best** (v2 `getAmountsOut` + CL quoter across all matching pools), side-by-side with bps diff; executes whichever you select. ETH⇄WETH wrap/unwrap built in.
+  - **MARKET** — compares direct **Uniswap v2/v3** and **UP33 CL** quotes side-by-side and selects the best net output by default. The quote-derived price impact chooses 0.5% (green), 1% (amber), or 3% (red) slippage; users can override it with the same three explicit values. If the amount is too small for a distinct impact probe, AUTO stays unavailable and the user must choose a slippage explicitly. The selected route executes with an atomic 9 bps terminal output fee and no silent provider fallback. UP33 Solidly v2 is deliberately excluded because its router has no atomic fee-sweep path. ETH⇄WETH wrap/unwrap is built in.
   - **LIMIT · SELL VIA LP** (`#limit`, key `4`) — sell a token with a **one-sided CL range order**. The point is **maker-not-taker economics**: a market swap through the pool pays its fee (1% on WETH/UP); a range order pays none and *earns* fees while filling (the panel shows the comparison and an est. $/day while in-band). Pick sell/buy tokens (auto-picks the deepest CL pool; chips if several fee tiers), 25/50/75/MAX amount chips with USD estimate, choose a band: **TIGHT · 1 TICK** (default — one tick-spacing hugging market, fills on the first uptick) or +1→3% … +10→25% / custom, snapped to tick spacing; a `?` chip opens a structured band explainer (start/end/avg/grid rows). The panel renders as a structured **order ticket** (aligned key-value sections, no prose walls) phrased in the sell token's price: `ORDER` (fill-start / fully-sold / avg-fill premiums with exact prices — avg is the band's geometric mean, exact closed form — band ticks with a `≡ TIGHT` marker when a small custom band snaps onto the tight one, order-mode range bar), `PROJECTED · FULL FILL` (avg price vs market, exact proceeds + USD, est. fee income $/day while in band), `FEES · MAKER VS TAKER` (0% vs pool fee ≈ $ on your size), `MECHANICS` (fills / un-fills / after-fill withdraw / don't stake). Placing mints an out-of-range one-sided position (sell-side min ≈ 100% guards against the price having entered the band). Fills as the token appreciates through the band and earns pool fees while filling; **un-fills if price retreats** and nothing auto-executes — withdraw after fill to lock in.
 
 ## Safety rails
 
-- Kyber calldata is opaque → four gates before sending: the API's `routerAddress` must equal the `.env` whitelist (and the tx `to` is always the whitelist address, never the API's), `transactionValue` must match expectation exactly (0 for ERC-20 in, amountIn for native ETH), the built `amountIn` must equal the request, and the built `amountOut` must be ≥ the fresh quote minus the user's slippage (catches degraded/tampered builds). The gates live in ONE place (`lib/kyberExec.ts`) shared by SWAP and ZAP so they can never diverge.
-- ZAP adds two more on its swap leg: the fresh route's `tokenOut` must be the pool's counter-token, and the fresh output must still be within slippage (+0.5% grace) of the previewed plan — otherwise it halts before the wallet ever sees the tx. Deposits then use the received-amount ground truth from the receipt, and approvals stay exact-amount per step.
+- MARKET and ZAP swap commits share one `lib/swapExec.ts` sequence: fresh quote/build for the selected direct route → fixed router/asset/recipient/minimum gate → exact approval → re-prepare after a real approval → chain-pinned send → receipt → actual output check. A selected route failure always stops; it never falls through to another protocol. Kyber is exposed only as a fee-free USD valuation function; the codebase has no Kyber transaction builder or execution intent.
+- Uniswap v2/v3 and UP33 CL swaps execute the swap and 9 bps terminal output fee atomically in router multicalls. Minimum output is expressed net of the fee and converted to the required gross router minimum, so lowering slippage never substitutes for fee collection.
+- Auto slippage is a small deterministic policy over quote-derived price impact: 0.5% green, 1% amber, 3% red. A manual choice replaces the automatic tier. ZAP additionally requires the fresh route's `tokenOut` to be the pool's counter-token and never widens the frozen preview minimum during execution. Deposits then use the received-amount ground truth from the receipt, and approvals stay exact-amount per step.
 - Exact-amount approvals only (no infinite approvals).
 - All writes pinned to chainId 4663; wrong-network banner blocks confusion.
-- Everything reads live on-chain state each ~15s (protocol parameters are Safe-controlled and can change at any time). Pools hosting your range orders get a dedicated **4s slot0 feed** (single multicall) so fill %, holdings and the range bar track near-live; numeric updates flash **green ▲ / red ▼** by direction, and the range-bar marker glides so drift direction is visible.
+- Everything reads live on-chain state each ~15s (protocol went live 2026-07-16; parameters are Safe-controlled and can change anytime). Pools hosting your range orders get a dedicated **4s slot0 feed** (single multicall) so fill %, holdings and the range bar track near-live; numeric updates flash **green ▲ / red ▼** by direction, and the range-bar marker glides so drift direction is visible.
 
 ## Pool indexer (`indexer/`)
 
@@ -120,36 +121,33 @@ node ≥ 22.13). One process, four loops, a read-only HTTP API:
   `GET /api/health` (counts, cursors, rss).
 
 Data lives in `indexer/data/index.db` (WAL SQLite); delete it to re-backfill
-from scratch — the kv cursors make every loop resumable.
+from scratch — the kv cursors make every loop resumable. Measured context for
+the design (2026-07-16): ~100k+ univ3 pools **growing ~20k/day** (launchpad
+factories mint a pool per token; ⚠ an earlier Blockscout-paged count said
+21,979 — a silent-undercount artifact, the RPC-window scan is ground truth) +
+11,640 univ2 pairs, ≥95% dust, 100ms blocks (~862k/day), ~2.6M Swap events/day
+chain-wide — which is why volume comes from GT instead of self-indexed swaps
+(revisit with Envio HyperIndex, which supports chain 4663 natively, if
+self-computed fee/APR analytics are ever wanted). At this scale a full state
+sweep is ~1k multicall aggregates (~7 min hourly); the hot tier stays tiny
+because real TVL, not pool count, bounds it.
 
-The tuning above follows from the chain's scale, measured July 2026: ~100k+
-univ3 pools **growing ~20k/day** (launchpad factories mint a pool per token),
-11,640 univ2 pairs, ≥95% dust, 100ms blocks (~862k/day), and ~2.6M Swap
-events/day chain-wide — which is why volume comes from GeckoTerminal instead
-of self-indexed swaps (revisit with Envio HyperIndex, which supports chain 4663
-natively, if self-computed fee/APR analytics are ever wanted). At this scale a
-full state sweep is ~1k multicall aggregates (~7 min hourly); the hot tier stays
-tiny because real TVL, not pool count, bounds it. If you re-measure the pool
-count, use the RPC-window scan — Blockscout's paged `getLogs` silently
-undercounts.
+## Deploy
 
-## Chain reads
+The frontend remains a static SPA. Production adds a thin stateless reverse-proxy
+boundary for same-origin data/RPC calls and the pool-indexer process; wallet
+writes are still created and signed only in the browser. Limit-order tags remain
+device-local in `localStorage`.
 
-The app is a **fully static SPA — it has no backend of its own**. The browser talks
-directly to: the chain RPC (reads only; writes are signed and sent by the user's
-wallet), the KyberSwap aggregator, DexScreener, and the Goldsky subgraph. There is
-no database and no server-side state; limit-order tags live in each user's browser
-localStorage (device-local by design).
+Private RPC credentials are server concerns. Direct Uniswap and UP33 quotes are
+on-chain reads, so MARKET and ZAP need no aggregator API key. One frontend build
+serves every server deployment:
 
-The **only secret** is a private RPC URL (`RPC` in `.env`) — Vite bakes env values
-into the JS bundle, so a public build must never have it set. One build serves
-every mode; the read transport resolves at runtime:
-
-| mode | build | chain reads |
-|---|---|---|
-| personal / local | `.env` has `RPC` | that URL, baked (keep the build private) |
-| server + reverse proxy | `RPC` unset | same-origin `/rpc` → your proxy holds the key server-side |
-| plain static hosting | `RPC` unset | `/rpc` probe fails → falls back to the public RPC (keyless, slower) |
+| mode | chain reads |
+|---|---|
+| personal / local dev | `RPC` from `.env` or public RPC |
+| server (recommended) | same-origin `/rpc` |
+| plain static hosting | public RPC |
 
 Wallet-facing chain metadata (`wallet_addEthereumChain`) always advertises the
 **public** RPC — a private key-bearing URL never reaches users' wallets.
@@ -160,7 +158,7 @@ probe (must be 4663), stores it in that browser's localStorage and applies on
 reload. A user-set endpoint takes priority over everything above; RESET returns
 to the deployment default.
 
-## Deploy
+### Self-hosting
 
 `npm run build` produces a static `dist/` — hash routing needs no rewrite rules,
 so any static host works (CF Pages / Netlify / S3):
@@ -177,7 +175,6 @@ caddy / Cloudflare Worker will do:
 |---|---|---|
 | `/rpc` | your JSON-RPC upstream | key stays server-side; app auto-detects and uses it |
 | `/kyber` | `https://aggregator-api.kyberswap.com` | build with `KYBERSWAP_AGGREGATOR_API_BASE_URL=/kyber` |
-| `/kyber-setting` | `https://ks-setting.kyberswap.com` | token list |
 | `/dexscreener` | `https://api.dexscreener.com` | UP33 TVL/volume stats |
 | `/goldsky` | `https://api.goldsky.com` | UP33 v2 subgraph |
 | `/api` | your `indexer` process on :8787 | uniswap pool discovery (optional) |
@@ -211,20 +208,22 @@ Two constraints worth knowing before you touch the build config:
 Threat model researched against real dApp incidents (BadgerDAO injected-script
 approval drain, Curve/CoW DNS hijacks, Ledger Connect Kit npm supply chain) and
 the OWASP Web3 attack-vector list. Architecture principle: **static SPA + thin
-stateless reverse proxy = minimal attack surface** — no accounts, no database,
-no server-side keys; a heavier backend would add attack surface, not safety.
+stateless reverse proxy = minimal attack surface** — no accounts or application
+database; server-side credentials are limited to upstream RPC access.
 
 **Wallet-interaction safety (the money paths)**
 - browser-wallet signing only; no key material anywhere in app, server, or storage
-- exact-amount approvals; four gates on opaque kyber calldata (see Safety rails);
-  writes chainId-pinned with deadlines; native-route mins from fresh on-chain price
+- exact-amount approvals; selected direct router, route, assets, recipient and net
+  minimum are gated before signing; writes are chainId-pinned with deadlines
+- terminal fees execute atomically with the swap; native-route minimums come from
+  fresh on-chain quotes
 - token picker rows always show the contract address (anti symbol-spoofing);
   contract directory lists full addresses linked to the explorer
 
 **XSS / injected-drainer defenses**
-- ships with CSP `script-src 'self'` in mind: no inline scripts, no eval, no
-  third-party or CDN scripts — everything self-hosted and content-hashed. React
-  escaping only (no `dangerouslySetInnerHTML`), `noreferrer` on external links
+- CSP `script-src 'self'`: no inline scripts, no eval, no third-party or CDN
+  scripts — everything self-hosted and content-hashed. React escaping only
+  (no `dangerouslySetInnerHTML`), `noreferrer` on external links
 - recommended headers when self-hosting: `X-Frame-Options DENY` +
   `frame-ancestors 'none'` (clickjacking), `nosniff`, `Referrer-Policy`,
   `Permissions-Policy` (all sensors off), `Cross-Origin-Opener-Policy:
@@ -248,8 +247,12 @@ browser level even if HTML were tampered in transit.
 
 ## Known v1 limits
 
-- Native-path swaps are single-hop (direct pools); kyber path covers multi-hop routing.
-- UP33-native route with ETH input requires wrapping to WETH first (one click).
+- MARKET and ZAP consider direct single-pool Uniswap v2/v3 and UP33 CL routes only;
+  they do not split orders or use aggregator multi-hop routing.
+- UP33 Solidly v2 is excluded from swaps until it has an atomic terminal-fee path.
+  Its LP discovery and liquidity features are unaffected.
+- Kyber route quotes are used only for non-transactional USD valuation. Kyber is not
+  selected by MARKET or ZAP, and the codebase exposes no Kyber transaction builder.
 - veUP locking / voting / bribes are read-only concerns for later versions.
 - Uniswap v2/v3 long-tail pools outside GeckoTerminal's top-200 lists show
   chain-derived TVL but no 24h volume (blank VOL/FEES/APR columns) — computing
