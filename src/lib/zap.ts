@@ -1,9 +1,9 @@
 // ZAP: single-token add-liquidity. The user funds a position with ONE token
 // (or native ETH); we solve how much of it to swap into the counter-token so
-// the two piles match the deposit ratio the target needs, swap via the gated
-// Kyber path, then deposit — one flow, N wallet-signed txs, halting on any
-// failure (a halt never strands value: every intermediate asset is a normal
-// wallet balance).
+// the two piles match the deposit ratio the target needs, swap through the
+// best direct Uniswap/UP33 route, then deposit — one flow, N wallet-signed
+// txs, halting on any failure (a halt never strands value: every intermediate
+// asset is a normal wallet balance).
 //
 // Split solve: the needed ratio ρ (raw counter-units per raw kept-unit) comes
 // from CL band math (or v2 reserves); with quote rate q̂ (counter per swapped
@@ -13,11 +13,11 @@
 // mismatch (price impact shifting the band ratio) surfaces as DUST: a small
 // leftover the deposit doesn't pull, which stays in the wallet. Planning uses
 // floats (ratios only); every on-chain amount stays bigint.
-import type { Address } from 'viem'
-import { readContract, sendTransaction, writeContract } from 'wagmi/actions'
+import type { Address, PublicClient, TransactionReceipt } from 'viem'
+import { readContract, writeContract } from 'wagmi/actions'
 import { clPmAbi, uniV2PairAbi, uniV2RouterAbi, uniV3PmAbi, v2RouterAbi, wethAbi } from '../abi'
-import { ADDR, CHAIN_ID, UNI } from '../config/addresses'
-import { ENV } from '../config/env'
+import { ADDR, CHAIN_ID, NATIVE, UNI } from '../config/addresses'
+import { zapFee } from '../config/env'
 import { wagmiConfig } from '../config/wagmi'
 import { t } from '../i18n'
 import {
@@ -28,19 +28,46 @@ import {
   minAmountsForLiquidity,
   Q96,
 } from './clmath'
+import {
+  directRouteLabel,
+  isNative,
+  quoteDirectCandidates,
+  type DirectCandidate,
+  type DirectQuotes,
+  type DirectRoute,
+} from './directSwap'
 import { fmtAmount } from './format'
-import { kyberRoute, NATIVE, type KyberRouteData } from './kyber'
-import { buildGatedKyberTx } from './kyberExec'
-import { deadline, ensureAllowance, fetchSqrtPriceX96, receivedOf, step } from './tx'
+import { fetchSolverQuote, solverRouteLabel, solverVenueFeeBps } from './solver'
+import { stakeClNft, stakeV2Lp, mintedTokenId } from './stake'
+import { executeSolverSwap, executeSwap, SlippageError } from './swapExec'
+import { solveSwap, splitOutside } from './zapMath'
+import { deadline, ensureAllowance, fetchSqrtPriceX96, receivedOf, step, shortErr, type StepFailWhy } from './tx'
 import { txlog } from './txlog'
 import type { ClPool, Pool, TokenInfo, V2Pool } from '../types'
 
-const MINS_BPS = 100 // deposit mins: 1% band-edge, same as the PAIR flows
+/** deposit mins: 1% band-edge, same as the PAIR flows (panel copy quotes it) */
+export const DEPOSIT_MINS_BPS = 100
 
 export type ZapTarget =
   | { kind: 'cl-mint'; pool: ClPool; tickLower: number; tickUpper: number }
   | { kind: 'cl-increase'; pool: ClPool; tickLower: number; tickUpper: number; tokenId: bigint; npm: Address }
   | { kind: 'v2'; pool: V2Pool }
+
+/** the swap leg's venue: SHEEP CHOICE (solver-routed, fee charged server-side
+ *  inside the Settler tx) or a direct route (fee via the router's *WithFee) */
+export type ZapSwapVia =
+  | { via: 'direct'; route: DirectRoute }
+  | { via: 'solver'; routeLabel: string; venueFeeBps: number }
+
+/** one planned swap: a slice of the input bought into a pool side */
+export type ZapLeg = {
+  /** true → buys pool.token0; false → pool.token1 */
+  buyIs0: boolean
+  swapIn: bigint
+  via: ZapSwapVia
+  estOut: bigint
+  impactBps: number | null
+}
 
 export type ZapPlan = {
   /** what the user selected (NATIVE sentinel allowed) */
@@ -48,32 +75,27 @@ export type ZapPlan = {
   nativeIn: boolean
   /** erc20 actually spent (WETH when nativeIn) */
   erc20In: Address
-  inIs0: boolean
+  /** which pool side the input IS — null when it's an outside token
+   *  (WETH/USDG/anything), in which case BOTH sides come from swap legs */
+  inIs0: boolean | null
   amountIn: bigint
-  swapIn: bigint
+  /** input deposited as-is, no swap (pool-side input only; 0 otherwise) */
   keep: bigint
-  route: KyberRouteData | null // final planning quote (null = no swap needed)
-  estOut: bigint
+  /** swap legs acquiring whatever the input doesn't cover (0–2) */
+  legs: ZapLeg[]
   dep0: bigint
   dep1: bigint
   /** CL only: liquidity the planned deposit mints at the planning price */
   liquidity: bigint
   dust0: bigint
   dust1: bigint
-  impactBps: number | null // swap value lost to impact+lp fees (platform fee excluded)
-  routeLabel: string
+  /** worst leg's size impact versus a small executable quote; terminal fee excluded */
+  impactBps: number | null
 }
-
-function poolOf(tgt: ZapTarget): Pool {
-  return tgt.pool
-}
-
-const low = (a: string) => a.toLowerCase()
-const isNat = (a: Address) => low(a) === low(NATIVE)
 
 /** needed raw-unit ratio (counter per kept) + spot rate seed, by target */
-function needAndSpot(tgt: ZapTarget, inIs0: boolean): { rho: number; spot: number } {
-  const pool = poolOf(tgt)
+function needAndSpot(target: ZapTarget, inIs0: boolean): { rho: number; spot: number } {
+  const pool = target.pool
   if (pool.kind === 'v2') {
     const r0 = Number(pool.reserve0)
     const r1 = Number(pool.reserve1)
@@ -81,7 +103,7 @@ function needAndSpot(tgt: ZapTarget, inIs0: boolean): { rho: number; spot: numbe
     const rho = inIs0 ? r1 / r0 : r0 / r1
     return { rho, spot: rho } // marginal v2 price == reserve ratio
   }
-  const { tickLower, tickUpper } = tgt as Extract<ZapTarget, { kind: 'cl-mint' | 'cl-increase' }>
+  const { tickLower, tickUpper } = target as Extract<ZapTarget, { kind: 'cl-mint' | 'cl-increase' }>
   const p = Number(pool.sqrtPriceX96) / Number(Q96)
   const a = Number(getSqrtRatioAtTick(tickLower)) / Number(Q96)
   const b = Number(getSqrtRatioAtTick(tickUpper)) / Number(Q96)
@@ -96,60 +118,155 @@ function needAndSpot(tgt: ZapTarget, inIs0: boolean): { rho: number; spot: numbe
   return { rho: inIs0 ? rho1per0 : 1 / rho1per0, spot }
 }
 
-function solveSwap(amountIn: bigint, rho: number, rate: number): bigint {
-  if (rho === 0) return 0n
-  if (!Number.isFinite(rho)) return amountIn
-  const A = Number(amountIn)
-  const s = (A * rho) / (rate + rho)
-  const sb = BigInt(Math.round(Math.min(Math.max(s, 0), A)))
-  return sb > amountIn ? amountIn : sb
+/** the target's raw-unit deposit ratio amt1/amt0 at the current price
+ *  (0 → token0 only, ∞ → token1 only) + spot as token1-per-token0 —
+ *  needAndSpot with inIs0=true measures exactly this */
+function needRatio1Per0(target: ZapTarget): { rho: number; spot: number } {
+  return needAndSpot(target, true)
+}
+
+/**
+ * Best executable quote across venues. A venue whose quote *failed* (reverted /
+ * RPC error) only blocks planning when it leaves us with nothing to route
+ * through — a dead pool on one venue must never veto a zap another venue can
+ * serve. Throws the comparison error only when NO venue produced a usable quote
+ * yet at least one failed (so the reason is "quoting broke", not "no pool").
+ */
+function bestExecutableQuote(quotes: DirectQuotes): DirectCandidate | null {
+  if (quotes.best) return quotes.best
+  const failed = (['uniswap', 'up33'] as const).filter((protocol) => quotes.status[protocol] === 'failed')
+  if (failed.length > 0) throw new Error(t('zap.errQuoteFailed', { protocols: failed.join(' / ') }))
+  return null
 }
 
 /**
  * Plan a zap. Throws Error with a human-readable reason when it can't
- * (no route, empty pool, dust amounts). Network: 1–2 kyber quotes.
+ * (no route, empty pool, dust amounts). Network: 1–2 direct-route quote rounds.
  */
+/** display label for a planned swap leg */
+export function zapRouteLabel(swap: ZapSwapVia): string {
+  return swap.via === 'direct' ? directRouteLabel(swap.route) : swap.routeLabel
+}
+
+/** worst swap-leg venue fee in bps — autoSlippage's volatility prior (0 = no swap) */
+export function zapVenueFeeBps(plan: ZapPlan): number {
+  let worst = 0
+  for (const leg of plan.legs) {
+    const fee = leg.via.via === 'direct' ? leg.via.route.feePpm / 100 : leg.via.venueFeeBps
+    if (fee > worst) worst = fee
+  }
+  return worst
+}
+
+/** one planning-time quote for the swap leg, whichever venue answered best */
+type SwapLegQuote = { via: ZapSwapVia; amountOut: bigint; impactBps: number | null }
+
+/**
+ * Quote the swap leg across BOTH kinds: the solver (SHEEP CHOICE — zap's fee
+ * charged server-side via the request's feeBps override) and the direct
+ * venues (fee inside the client-side quote). Both amounts are net of the
+ * terminal fee, so the comparison is apples-to-apples; the solver wins ties
+ * like the SWAP tab. One side failing alone is fine — a total blank rethrows
+ * the direct path's (localized) error.
+ */
+async function quoteSwapLeg(
+  client: PublicClient,
+  pools: readonly Pool[] | null,
+  tokenIn: Address,
+  tokenOut: Address,
+  amountIn: bigint,
+  feeBps: number,
+): Promise<SwapLegQuote> {
+  const [direct, solver] = await Promise.allSettled([
+    quoteDirectCandidates(client, pools, tokenIn, tokenOut, amountIn, feeBps).then(bestExecutableQuote),
+    fetchSolverQuote({ tokenIn, tokenOut, amountIn, slippageBps: 50, feeBps }),
+  ])
+  const best = direct.status === 'fulfilled' ? direct.value : null
+  const routed = solver.status === 'fulfilled' ? solver.value : null
+  if (routed && (!best || routed.amountOutNet >= best.amountOut)) {
+    return {
+      via: {
+        via: 'solver',
+        routeLabel: `${t('swap.solverRoute')} · ${solverRouteLabel(routed)}`,
+        venueFeeBps: solverVenueFeeBps(routed),
+      },
+      amountOut: routed.amountOutNet,
+      impactBps: routed.priceImpactBps,
+    }
+  }
+  if (best) return { via: { via: 'direct', route: best.route }, amountOut: best.amountOut, impactBps: best.impactBps }
+  if (direct.status === 'rejected') throw direct.reason
+  throw new Error(t('zap.errNoRoute'))
+}
+
 export async function planZap(args: {
+  client: PublicClient
+  pools: readonly Pool[] | null
   target: ZapTarget
   tokenIn: Address // NATIVE | pool.token0 | pool.token1
   amountIn: bigint
-  signal?: AbortSignal
 }): Promise<ZapPlan> {
-  const { target, tokenIn, amountIn } = args
-  const pool = poolOf(target)
+  const { client, pools, target, tokenIn, amountIn } = args
+  const pool = target.pool
   if (amountIn <= 0n) throw new Error(t('zap.errAmount'))
-  const nativeIn = isNat(tokenIn)
+  const nativeIn = isNative(tokenIn)
   const erc20In = nativeIn ? ADDR.WETH : tokenIn
-  const inIs0 = low(erc20In) === low(pool.token0)
-  if (!inIs0 && low(erc20In) !== low(pool.token1)) throw new Error(t('zap.errNotInPool'))
-  const otherErc20 = inIs0 ? pool.token1 : pool.token0
+  const lower = erc20In.toLowerCase()
+  const inIs0 =
+    lower === pool.token0.toLowerCase() ? true : lower === pool.token1.toLowerCase() ? false : null
 
-  const { rho, spot } = needAndSpot(target, inIs0)
+  const feeBps = zapFee().bps
+  const quoteLegs = (spec: { buyIs0: boolean; swapIn: bigint }[]): Promise<ZapLeg[]> =>
+    Promise.all(
+      spec.map(async ({ buyIs0, swapIn }) => {
+        const q = await quoteSwapLeg(client, pools, erc20In, buyIs0 ? pool.token0 : pool.token1, swapIn, feeBps)
+        if (q.amountOut === 0n) throw new Error(t('zap.errZeroQuote'))
+        return { buyIs0, swapIn, via: q.via, estOut: q.amountOut, impactBps: q.impactBps }
+      }),
+    )
 
-  // --- solve the swap size (≤2 kyber quotes) ---
-  let swapIn = solveSwap(amountIn, rho, spot)
-  let route: KyberRouteData | null = null
-  if (swapIn > 0n && swapIn * 1_000_000n < amountIn) swapIn = 0n // <0.0001% — not worth a tx
-  if (amountIn - swapIn > 0n && (amountIn - swapIn) * 1_000_000n < amountIn) swapIn = amountIn
-  if (swapIn > 0n) {
-    route = await kyberRoute(erc20In, otherErc20, swapIn, { signal: args.signal })
-    const q1 = Number(BigInt(route.routeSummary.amountOut)) / Number(swapIn)
-    if (!(q1 > 0)) throw new Error(t('zap.errZeroQuote'))
-    const s1 = solveSwap(amountIn, rho, q1)
-    // re-quote only when the answer moved meaningfully (>0.4% of the input)
-    const drift = s1 > swapIn ? s1 - swapIn : swapIn - s1
-    if (drift * 250n > amountIn && s1 > 0n) {
-      swapIn = s1
-      route = await kyberRoute(erc20In, otherErc20, swapIn, { signal: args.signal })
+  // --- solve the swap size(s), ≤2 quote rounds across solver + direct venues ---
+  let keep = 0n
+  let legs: ZapLeg[] = []
+  if (inIs0 !== null) {
+    // pool-side input: keep a slice, swap the rest into the counter token
+    const { rho, spot } = needAndSpot(target, inIs0)
+    let swapIn = solveSwap(amountIn, rho, spot)
+    if (swapIn > 0n && swapIn * 1_000_000n < amountIn) swapIn = 0n // <0.0001% — not worth a tx
+    if (amountIn - swapIn > 0n && (amountIn - swapIn) * 1_000_000n < amountIn) swapIn = amountIn
+    if (swapIn > 0n) {
+      legs = await quoteLegs([{ buyIs0: !inIs0, swapIn }])
+      const q1 = Number(legs[0].estOut) / Number(swapIn)
+      if (!(q1 > 0)) throw new Error(t('zap.errZeroQuote'))
+      const s1 = solveSwap(amountIn, rho, q1)
+      // re-quote only when the answer moved meaningfully (>0.4% of the input)
+      const drift = s1 > swapIn ? s1 - swapIn : swapIn - s1
+      if (drift * 250n > amountIn && s1 > 0n) {
+        legs = await quoteLegs([{ buyIs0: !inIs0, swapIn: s1 }])
+      }
+    }
+    keep = amountIn - (legs[0]?.swapIn ?? 0n)
+  } else {
+    // outside token: both sides come from swaps, seeded at the pool's own spot
+    const { rho, spot } = needRatio1Per0(target)
+    legs = await quoteLegs(splitOutside(amountIn, rho, 1 / spot))
+    const l0 = legs.find((l) => l.buyIs0)
+    const l1 = legs.find((l) => !l.buyIs0)
+    if (l0 && l1) {
+      // re-solve from the measured leg rates; re-quote both on >0.4% drift
+      const r0 = Number(l0.estOut) / Number(l0.swapIn)
+      const r1 = Number(l1.estOut) / Number(l1.swapIn)
+      const next = splitOutside(amountIn, rho, r0 / r1)
+      const s0 = next.find((s) => s.buyIs0)?.swapIn ?? 0n
+      const drift = s0 > l0.swapIn ? s0 - l0.swapIn : l0.swapIn - s0
+      if (drift * 250n > amountIn) legs = await quoteLegs(next)
     }
   }
-  const estOut = route ? BigInt(route.routeSummary.amountOut) : 0n
-  if (swapIn > 0n && estOut === 0n) throw new Error(t('zap.errNoRoute'))
 
   // --- planned deposit + dust estimate ---
-  const keep = amountIn - swapIn
-  const dep0 = inIs0 ? keep : estOut
-  const dep1 = inIs0 ? estOut : keep
+  const legOut = (is0: boolean) => legs.filter((l) => l.buyIs0 === is0).reduce((sum, l) => sum + l.estOut, 0n)
+  const dep0 = (inIs0 === true ? keep : 0n) + legOut(true)
+  const dep1 = (inIs0 === false ? keep : 0n) + legOut(false)
   let liquidity = 0n
   let dust0 = 0n
   let dust1 = 0n
@@ -171,12 +288,15 @@ export async function planZap(args: {
     }
   }
 
-  // swap value lost to impact + lp fees, from kyber's own USD marks; the
-  // configured platform fee (if any) is subtracted so it doesn't read as impact
-  let impactBps: number | null = null
-  const inUsd = Number(route?.routeSummary.amountInUsd ?? NaN)
-  const outUsd = Number(route?.routeSummary.amountOutUsd ?? NaN)
-  if (inUsd > 0 && outUsd > 0) impactBps = (1 - outUsd / inUsd) * 10_000 - ENV.kyberFeeBps
+  // worst leg wins; any leg without a probe forces the explicit-slippage path
+  let impactBps: number | null = legs.length ? 0 : null
+  for (const leg of legs) {
+    if (leg.impactBps === null) {
+      impactBps = null
+      break
+    }
+    if (impactBps !== null && leg.impactBps > impactBps) impactBps = leg.impactBps
+  }
 
   return {
     tokenIn,
@@ -184,98 +304,132 @@ export async function planZap(args: {
     erc20In,
     inIs0,
     amountIn,
-    swapIn,
     keep,
-    route,
-    estOut,
+    legs,
     dep0,
     dep1,
     liquidity,
     dust0,
     dust1,
     impactBps,
-    routeLabel: route ? routeLabelOf(route) : '',
   }
-}
-
-function routeLabelOf(r: KyberRouteData): string {
-  const names = new Set<string>()
-  for (const path of r.routeSummary.route ?? []) for (const h of path) names.add(h.exchange)
-  return [...names].slice(0, 3).join(' · ')
 }
 
 // ---------------- stages ----------------
 
-export type ZapStageKind = 'wrap' | 'approveIn' | 'swap' | 'approve0' | 'approve1' | 'deposit'
-export type ZapStage = { kind: ZapStageKind; label: string }
+type ZapStageKind = 'wrap' | 'swap' | 'approve0' | 'approve1' | 'deposit' | 'stake'
+type ZapStage = { kind: ZapStageKind; label: string; leg?: number }
 
-const depositVerb = (tgt: ZapTarget): string =>
-  tgt.kind === 'cl-increase'
-    ? t('zap.stIncrease', { id: tgt.tokenId.toString() })
-    : tgt.kind === 'cl-mint'
-      ? t('zap.stMint')
-      : t('zap.stAddLiquidity')
+/** a pool that mints stakeable liquidity — up33 with a live gauge */
+export function poolStakeable(pool: Pool): boolean {
+  return pool.protocol === 'up33' && !!pool.gauge && !!pool.gaugeAlive
+}
 
-/** the exact tx sequence executeZap will run, for preview + progress UI */
-export function zapStages(plan: ZapPlan, target: ZapTarget, t0: TokenInfo, t1: TokenInfo): ZapStage[] {
-  const tIn = plan.inIs0 ? t0 : t1
-  const tOut = plan.inIs0 ? t1 : t0
+/** a target whose freshly-minted position can be staked (new mint/add, not an
+ *  increase — increasing an existing NFT/LP changes nothing about its stake) */
+export function stakeableTarget(target: ZapTarget): boolean {
+  return target.kind !== 'cl-increase' && poolStakeable(target.pool)
+}
+
+function depositVerb(target: ZapTarget): string {
+  switch (target.kind) {
+    case 'cl-increase':
+      return t('zap.stIncrease', { id: target.tokenId.toString() })
+    case 'cl-mint':
+      return t('zap.stMint')
+    case 'v2':
+      return t('zap.stAddLiquidity')
+  }
+}
+
+function depositSpender(target: ZapTarget): Address {
+  if (target.kind === 'v2') {
+    return target.pool.protocol === 'univ2' ? UNI.V2_ROUTER : ADDR.V2_ROUTER
+  }
+  if (target.kind === 'cl-increase') return target.npm
+  return target.pool.protocol === 'univ3' ? UNI.V3_NPM : ADDR.CL_PM
+}
+
+/** logical execution sequence for preview + progress UI. `stake` appends the
+ *  gauge-stake follow-up when the caller opted in AND the target is stakeable. */
+export function zapStages(
+  plan: ZapPlan,
+  target: ZapTarget,
+  tIn: TokenInfo,
+  t0: TokenInfo,
+  t1: TokenInfo,
+  stake = false,
+): ZapStage[] {
   const spender = target.kind === 'v2' ? t('zap.spenderRouter') : t('zap.spenderNpm')
   const stages: ZapStage[] = []
   if (plan.nativeIn) stages.push({ kind: 'wrap', label: t('zap.stWrap', { amt: fmtAmount(plan.amountIn, 18) }) })
-  if (plan.swapIn > 0n) {
-    stages.push({ kind: 'approveIn', label: t('zap.stApproveKyber', { sym: tIn.symbol }) })
+  plan.legs.forEach((leg, i) => {
+    const tOut = leg.buyIs0 ? t0 : t1
     stages.push({
       kind: 'swap',
+      leg: i,
       label: t('zap.stSwap', {
-        amt: fmtAmount(plan.swapIn, tIn.decimals),
+        amt: fmtAmount(leg.swapIn, tIn.decimals),
         sym: tIn.symbol,
-        out: fmtAmount(plan.estOut, tOut.decimals),
+        out: fmtAmount(leg.estOut, tOut.decimals),
         outSym: tOut.symbol,
       }),
     })
-  }
+  })
   if (plan.dep0 > 0n) stages.push({ kind: 'approve0', label: t('zap.stApproveSpender', { sym: t0.symbol, spender }) })
   if (plan.dep1 > 0n) stages.push({ kind: 'approve1', label: t('zap.stApproveSpender', { sym: t1.symbol, spender }) })
   stages.push({ kind: 'deposit', label: depositVerb(target) })
+  if (stake && stakeableTarget(target)) stages.push({ kind: 'stake', label: t('zap.stStake') })
   return stages
 }
 
 // ---------------- executor ----------------
 
-export type ZapRun = { ok: boolean; failedAt: number | null }
+/** why a run halted, coarse enough for the panel to pick its advice:
+ *  'slippage' — the swap leg died against its min-out (raise slippage);
+ *  'deposit-moved' — the deposit reverted on its fresh-price mins (just retry);
+ *  'other' — rejection / structural abort / anything else (txlog has details) */
+export type ZapFailReason = 'slippage' | 'deposit-moved' | 'other'
+
+type ZapRun = { ok: boolean; failedAt: number | null; reason: ZapFailReason | null }
 
 /**
  * Execute a planned zap step by step. Re-quotes the swap fresh (the plan's
  * quote is for preview) and deposits the amounts that ACTUALLY arrived, so a
  * stale plan can only halt the flow, never mis-spend. Halts (returns
- * failedAt) on the first failed/rejected tx or violated gate.
+ * failedAt + reason) on the first failed/rejected tx or violated gate.
  */
 export async function executeZap(args: {
   plan: ZapPlan
   target: ZapTarget
   user: Address
   slipBps: number // swap leg slippage
+  stake: boolean // continue into the gauge-stake follow-up (when target is stakeable)
+  tIn: TokenInfo // what the user funds with (may be outside the pair)
   t0: TokenInfo
   t1: TokenInfo
   onStage?: (i: number) => void
 }): Promise<ZapRun> {
-  const { plan, target, user, slipBps, t0, t1 } = args
-  const pool = poolOf(target)
-  const stages = zapStages(plan, target, t0, t1)
-  const tIn = plan.inIs0 ? t0 : t1
-  const otherErc20 = plan.inIs0 ? pool.token1 : pool.token0
+  const { plan, target, user, slipBps, tIn, t0, t1 } = args
+  const pool = target.pool
+  const stages = zapStages(plan, target, tIn, t0, t1, args.stake)
   let i = 0
-  const fail = (): ZapRun => ({ ok: false, failedAt: i })
-  const abort = (msg: string): ZapRun => {
+  let stepWhy: StepFailWhy | null = null
+  const onFail = (why: StepFailWhy) => {
+    stepWhy = why
+  }
+  const fail = (reason: ZapFailReason = 'other'): ZapRun => ({ ok: false, failedAt: i, reason })
+  const abort = (msg: string, reason: ZapFailReason = 'other'): ZapRun => {
     txlog.push('err', t('zap.halt', { msg }))
-    return fail()
+    return fail(reason)
   }
 
-  let actualOut = 0n
+  const actualOut: [bigint, bigint] = [0n, 0n]
+  let depositRcpt: TransactionReceipt | null = null
 
   for (i = 0; i < stages.length; i++) {
     args.onStage?.(i)
+    stepWhy = null
     const st = stages[i]
     switch (st.kind) {
       case 'wrap': {
@@ -291,54 +445,50 @@ export async function executeZap(args: {
         if (!h) return fail()
         break
       }
-      case 'approveIn': {
-        if (!(await ensureAllowance(plan.erc20In, user, ENV.kyberRouter, plan.swapIn, tIn.symbol))) return fail()
-        break
-      }
       case 'swap': {
-        // fresh quote for the build; the plan's quote is preview-only
-        let fresh
+        const leg = st.leg === undefined ? undefined : plan.legs[st.leg]
+        if (!leg) return abort(t('zap.errNoRoute'))
+        const legOutToken = leg.buyIs0 ? pool.token0 : pool.token1
+        // the wrap stage already turned ETH into WETH — approvals say so
+        const inputSymbol = plan.nativeIn ? 'WETH' : tIn.symbol
+        let swap
         try {
-          fresh = await kyberRoute(plan.erc20In, otherErc20, plan.swapIn)
+          swap =
+            leg.via.via === 'solver'
+              ? await executeSolverSwap({
+                  tokenIn: plan.erc20In,
+                  tokenOut: legOutToken,
+                  amountIn: leg.swapIn,
+                  slippageBps: slipBps,
+                  minimumAmountOut: applySlippage(leg.estOut, slipBps),
+                  sender: user,
+                  recipient: user,
+                  inputSymbol,
+                  label: `${st.label} [${t('swap.solverRoute')}]`,
+                  feeBps: zapFee().bps,
+                  onStepFail: onFail,
+                })
+              : await executeSwap({
+                  route: leg.via.route,
+                  tokenIn: plan.erc20In,
+                  tokenOut: legOutToken,
+                  amountIn: leg.swapIn,
+                  minimumAmountOut: applySlippage(leg.estOut, slipBps),
+                  sender: user,
+                  recipient: user,
+                  inputSymbol,
+                  label: `${st.label} [${directRouteLabel(leg.via.route)}]`,
+                  fee: zapFee(),
+                  onStepFail: onFail,
+                })
         } catch (e) {
-          return abort(t('zap.haltRequote', { err: (e as Error).message }))
+          return abort((e as Error).message, e instanceof SlippageError ? 'slippage' : 'other')
         }
-        const freshOut = BigInt(fresh.routeSummary.amountOut)
-        // price-move gate: the fresh route must still deliver ≈ the previewed
-        // output (slippage + 0.5% grace) — otherwise stop and let the user re-look
-        if (freshOut < applySlippage(plan.estOut, slipBps + 50)) {
-          const dec = (plan.inIs0 ? t1 : t0).decimals
-          return abort(
-            t('zap.haltPriceMoved', { now: fmtAmount(freshOut, dec), prev: fmtAmount(plan.estOut, dec) }),
-          )
-        }
-        // tokenOut identity gate: the route must pay out the pool's counter-token
-        if (low(fresh.routeSummary.tokenOut) !== low(otherErc20)) {
-          return abort(t('zap.haltTokenOut', { addr: fresh.routeSummary.tokenOut }))
-        }
-        let tx
-        try {
-          tx = await buildGatedKyberTx({
-            routeSummary: fresh.routeSummary,
-            sender: user,
-            recipient: user,
-            slippageBps: slipBps,
-            amountIn: plan.swapIn,
-            nativeIn: false, // zap always swaps the erc20 (ETH was wrapped in stage 0)
-          })
-        } catch (e) {
-          return abort((e as Error).message)
-        }
-        // read what actually arrived (receipt Transfer logs) — deposits use this
-        let got = 0n
-        const h = await step(
-          st.label + ' [KYBER]',
-          () => sendTransaction(wagmiConfig, { to: tx.to, data: tx.data, value: tx.value, chainId: CHAIN_ID }),
-          { onSuccess: (rcpt) => (got = receivedOf(rcpt, otherErc20, user)) },
-        )
-        if (!h) return fail()
-        if (got === 0n) return abort(t('zap.haltNoTransfer'))
-        actualOut = got
+        // a swap that REVERTED on-chain died on its min-out check — same
+        // slippage remedy as the pre-flight gate; a rejection is not advice-worthy
+        if (!swap) return fail(stepWhy === 'reverted' ? 'slippage' : 'other')
+        if (swap.output.kind !== 'erc20') return abort(t('zap.haltTokenOut', { addr: NATIVE }))
+        actualOut[leg.buyIs0 ? 0 : 1] += swap.output.amount
         break
       }
       case 'approve0':
@@ -347,31 +497,41 @@ export async function executeZap(args: {
         const token = is0 ? pool.token0 : pool.token1
         const sym = is0 ? t0.symbol : t1.symbol
         const amt = depositAmounts(plan, actualOut)[is0 ? 0 : 1]
-        const spender =
-          target.kind === 'v2'
-            ? (pool as V2Pool).protocol === 'univ2'
-              ? UNI.V2_ROUTER
-              : ADDR.V2_ROUTER
-            : target.kind === 'cl-increase'
-              ? target.npm
-              : (pool as ClPool).protocol === 'univ3'
-                ? UNI.V3_NPM
-                : ADDR.CL_PM
+        const spender = depositSpender(target)
         if (amt > 0n && !(await ensureAllowance(token, user, spender, amt, sym))) return fail()
         break
       }
       case 'deposit': {
         const [dep0, dep1] = depositAmounts(plan, actualOut)
         if (dep0 === 0n && dep1 === 0n) return abort(t('zap.haltNothing'))
-        const ok = await runDeposit(target, user, dep0, dep1, st.label, t0, t1)
-        if (!ok) return fail()
+        try {
+          depositRcpt = await runDeposit(target, user, dep0, dep1, st.label, t0, t1, onFail)
+        } catch (e) {
+          // pre-tx reads (fresh price, router quote) can throw on RPC trouble —
+          // that must halt visibly, not escape as an unhandled rejection
+          return abort(shortErr(e))
+        }
+        if (!depositRcpt) return fail(stepWhy === 'reverted' ? 'deposit-moved' : 'other')
+        break
+      }
+      case 'stake': {
+        // the position is already live: staking is a best-effort follow-up, not
+        // a zap halt — a failure/rejection here just points the user at POSITIONS
+        if (depositRcpt && !(await runStake(target, user, depositRcpt, t0, t1))) {
+          txlog.push('info', t('zap.stakeHint'), undefined, {
+            label: t('zap.stakeHintAction'),
+            onClick: () => {
+              location.hash = 'positions'
+            },
+          })
+        }
         break
       }
     }
   }
 
-  // zapped into an up33 pool with a live gauge → staking is the follow-up move
-  if (pool.protocol === 'up33' && pool.gauge && pool.gaugeAlive && target.kind !== 'cl-increase') {
+  // auto-stake off but the pool is stakeable → nudge them to do it from POSITIONS
+  if (!args.stake && stakeableTarget(target)) {
     txlog.push('info', t('zap.stakeHint'), undefined, {
       label: t('zap.stakeHintAction'),
       onClick: () => {
@@ -379,13 +539,35 @@ export async function executeZap(args: {
       },
     })
   }
-  return { ok: true, failedAt: null }
+  return { ok: true, failedAt: null, reason: null }
 }
 
-/** post-swap deposit amounts: kept side exact, swapped side = what arrived */
-function depositAmounts(plan: ZapPlan, actualOut: bigint): [bigint, bigint] {
-  const out = plan.swapIn > 0n ? actualOut : 0n
-  return plan.inIs0 ? [plan.keep, out] : [out, plan.keep]
+/** stake the just-minted position, reading its id/LP from the deposit receipt */
+async function runStake(
+  target: ZapTarget,
+  user: Address,
+  rcpt: TransactionReceipt,
+  t0: TokenInfo,
+  t1: TokenInfo,
+): Promise<boolean> {
+  const pool = target.pool
+  if (!pool.gauge) return false
+  if (target.kind === 'v2') {
+    const lp = receivedOf(rcpt, pool.address, user)
+    return stakeV2Lp(pool.address, pool.gauge, lp, user, `${t0.symbol}/${t1.symbol}`)
+  }
+  const npm = pool.protocol === 'univ3' ? UNI.V3_NPM : ADDR.CL_PM
+  const tokenId = mintedTokenId(rcpt, npm, user)
+  if (tokenId === null) return false
+  return stakeClNft(pool.gauge, npm, tokenId)
+}
+
+/** post-swap deposit amounts: kept side exact, swapped sides = what ACTUALLY arrived */
+function depositAmounts(plan: ZapPlan, actualOut: readonly [bigint, bigint]): [bigint, bigint] {
+  return [
+    (plan.inIs0 === true ? plan.keep : 0n) + actualOut[0],
+    (plan.inIs0 === false ? plan.keep : 0n) + actualOut[1],
+  ]
 }
 
 async function runDeposit(
@@ -396,7 +578,8 @@ async function runDeposit(
   label: string,
   t0: TokenInfo,
   t1: TokenInfo,
-): Promise<boolean> {
+  onFail?: (why: StepFailWhy) => void,
+): Promise<TransactionReceipt | null> {
   if (target.kind === 'v2') {
     const pool = target.pool
     if (pool.protocol === 'univ2') {
@@ -420,11 +603,12 @@ async function runDeposit(
           abi: uniV2RouterAbi,
           address: UNI.V2_ROUTER,
           functionName: 'addLiquidity',
-          args: [pool.token0, pool.token1, d0, d1, applySlippage(d0, MINS_BPS), applySlippage(d1, MINS_BPS), user, deadline()],
+          args: [pool.token0, pool.token1, d0, d1, applySlippage(d0, DEPOSIT_MINS_BPS), applySlippage(d1, DEPOSIT_MINS_BPS), user, deadline()],
           chainId: CHAIN_ID,
         }),
+        { onFail },
       )
-      return h !== null
+      return h
     }
     const quote = await readContract(wagmiConfig, {
       abi: v2RouterAbi,
@@ -444,15 +628,16 @@ async function runDeposit(
           pool.stable,
           dep0,
           dep1,
-          applySlippage(quote[0], MINS_BPS),
-          applySlippage(quote[1], MINS_BPS),
+          applySlippage(quote[0], DEPOSIT_MINS_BPS),
+          applySlippage(quote[1], DEPOSIT_MINS_BPS),
           user,
           deadline(),
         ],
         chainId: CHAIN_ID,
       }),
+      { onFail },
     )
-    return h !== null
+    return h
   }
 
   // CL: fresh price + band-edge mins (see minAmountsForLiquidity) — 'PS'-safe
@@ -463,9 +648,9 @@ async function runDeposit(
   const liq = getLiquidityForAmounts(sqrtP, sqrtA, sqrtB, dep0, dep1)
   if (liq === 0n) {
     txlog.push('err', t('zap.halt', { msg: t('zap.haltDepositSmall') }))
-    return false
+    return null
   }
-  const mins = minAmountsForLiquidity(sqrtP, sqrtA, sqrtB, liq, MINS_BPS)
+  const mins = minAmountsForLiquidity(sqrtP, sqrtA, sqrtB, liq, DEPOSIT_MINS_BPS)
 
   if (target.kind === 'cl-increase') {
     const h = await step(`${label} (${t0.symbol}/${t1.symbol})`, () =>
@@ -485,8 +670,9 @@ async function runDeposit(
         ],
         chainId: CHAIN_ID,
       }),
+      { onFail },
     )
-    return h !== null
+    return h
   }
 
   const common = {
@@ -519,6 +705,7 @@ async function runDeposit(
             args: [{ ...common, tickSpacing: pool.tickSpacing, sqrtPriceX96: 0n }],
             chainId: CHAIN_ID,
           }),
+    { onFail },
   )
-  return h !== null
+  return h
 }

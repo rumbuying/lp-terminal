@@ -7,7 +7,8 @@ import { ProtoBadge } from '../ProtoBadge'
 import { RangeBar } from '../RangeBar'
 import { Badge, Btn } from '../ui'
 import { AddCl, AddV2 } from './PoolsTab'
-import { ClCard, IncreasePanel, V2Card } from './PositionsTab'
+import { clPosMetrics } from '../../lib/posmetrics'
+import { ClCard, ClPoolGroup, IncreasePanel, V2Card } from './PositionsTab'
 
 const LAB_POOL: ClPool = {
   kind: 'cl',
@@ -227,6 +228,47 @@ export function LabTab() {
             <ClCard pos={uniWallet} data={LAB_DATA} xtokens={{}} user={LAB_USER} stat={{ ...stat, vol24hUsd: 351_000 }} {...labUsd} />
             <V2Card pos={v2Pos} data={LAB_DATA} user={LAB_USER} stat={{ vol24hUsd: 82_000, liqUsd: 46_000, source: 'geckoterminal' }} {...labUsd} />
           </>
+        )
+      })()}
+
+      <div className="section-title">POOL GROUP — same-pool aggregation (2+ positions collapse under one header)</div>
+      {(() => {
+        const gaugePool: ClPool = {
+          ...LAB_POOL,
+          gauge: '0x00000000000000000000000000000000000000aa',
+          rewardRate: 5_000_000_000_000_000n,
+        }
+        const stat = { vol24hUsd: 155_000, liqUsd: 184_000, source: 'dexscreener' as const }
+        const labUsd = { upUsd: 0.0688, wethUsd: 1928 }
+        const staked1: ClPosition = {
+          ...labPos(100000, 104000, 500_000_000_000_000_000_000n),
+          pool: gaugePool,
+          staked: true,
+          earned: 1_204_500_000_000_000_000_000n,
+          ...getAmountsForLiquidity(gaugePool.sqrtPriceX96, mk(100000), mk(104000), 500_000_000_000_000_000_000n),
+        }
+        const staked2: ClPosition = {
+          ...labPos(103000, 104000, 300_000_000_000_000_000_000n),
+          tokenId: 4243n,
+          pool: gaugePool,
+          staked: true,
+          earned: 88_000_000_000_000_000_000n,
+          ...getAmountsForLiquidity(gaugePool.sqrtPriceX96, mk(103000), mk(104000), 300_000_000_000_000_000_000n),
+        }
+        return (
+          <ClPoolGroup
+            positions={[staked1, staked2]}
+            metricsOf={(p) =>
+              clPosMetrics({ pos: p, amount0: p.amount0, amount1: p.amount1, tick: p.pool.tick, dec0: 18, dec1: 18, stat, ...labUsd })
+            }
+            data={LAB_DATA}
+            xtokens={{}}
+            user={LAB_USER}
+            liveOf={() => undefined}
+            statOf={() => stat}
+            upUsd={labUsd.upUsd}
+            wethUsd={labUsd.wethUsd}
+          />
         )
       })()}
 

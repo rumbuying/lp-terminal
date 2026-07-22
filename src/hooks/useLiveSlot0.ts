@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { usePublicClient } from 'wagmi'
 import type { Address, PublicClient } from 'viem'
 import { clPoolAbi } from '../abi'
+import { CHAIN_ID } from '../config/addresses'
 
 export type LiveSlot0 = { sqrtPriceX96: bigint; tick: number }
 
@@ -11,7 +12,7 @@ export type LiveSlot0 = { sqrtPriceX96: bigint; tick: number }
  * orders) without re-running the full pool enumeration at that rate.
  */
 export function useLiveSlot0(pools: Address[], intervalMs = 4_000) {
-  const pc = usePublicClient()
+  const pc = usePublicClient({ chainId: CHAIN_ID })
   const key = pools
     .map((a) => a.toLowerCase())
     .sort()

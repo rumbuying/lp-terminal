@@ -2,11 +2,11 @@ import { useQuery } from '@tanstack/react-query'
 import { usePublicClient } from 'wagmi'
 import type { Address, PublicClient } from 'viem'
 import { erc20Abi } from '../abi'
-import { NATIVE } from '../lib/kyber'
+import { CHAIN_ID, NATIVE } from '../config/addresses'
 
 /** balances for a set of tokens (NATIVE sentinel included). key = lowercase addr */
 export function useBalances(user?: Address, tokens: Address[] = []) {
-  const pc = usePublicClient()
+  const pc = usePublicClient({ chainId: CHAIN_ID })
   const key = tokens
     .map((t) => t.toLowerCase())
     .sort()

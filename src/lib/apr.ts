@@ -1,6 +1,6 @@
 // APR math — pool-level columns AND per-position add-LP simulation.
 //
-// ve(3,3) ground rules:
+// ve(3,3) ground rules (see docs/up33-contract-map.md):
 //   fees  -> UNSTAKED LPs only (CL pays a 10% default levy); staked LPs' fees go to voters
 //   UP    -> STAKED LPs only, pro-rata ACTIVE (in-range) staked liquidity, post-cap rewardRate
 // A position earns one or the other, never both.

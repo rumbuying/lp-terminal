@@ -44,7 +44,7 @@ export function TxLogPanel() {
             {glyph(l)} {l.text}
           </span>
           {l.hash && (
-            <a href={`${EXPLORER}/tx/${l.hash}`} target="_blank" rel="noreferrer">
+            <a href={l.href ?? `${EXPLORER}/tx/${l.hash}`} target="_blank" rel="noreferrer">
               tx↗
             </a>
           )}

@@ -6,8 +6,9 @@
 // unrealistic. There is also no official Uniswap subgraph for Robinhood Chain
 // (official Graph deployments are mainnet-only as of 2026-07).
 //
-// So discovery is token-centric via DexScreener (already same-origin proxied
-// in server mode), and every candidate is VERIFIED on-chain before display:
+// So discovery is token-centric via DexScreener (browser-direct by default;
+// same-origin proxied only in KYBERSWAP_AGGREGATOR_API_BASE_URL=/kyber
+// builds), and every candidate is VERIFIED on-chain before display:
 // the pool's own token0/token1/fee must round-trip through factory.getPool to
 // the same address — an API can suggest pools, it can never substitute one.
 import { getAddress, zeroAddress, type Address, type PublicClient } from 'viem'

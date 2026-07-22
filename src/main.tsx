@@ -11,7 +11,7 @@ import { txlog } from './lib/txlog'
 // import happens before the OffchainLookup selector check), which made it the
 // one chunk this app fetches mid-error. After a redeploy, a tab opened before
 // the deploy 404s the old hash and the module error MASKS the real revert
-// (seen live 2026-07-16: a Kyber swap revert surfaced as "Failed to fetch
+// (seen live 2026-07-16: a swap revert surfaced as "Failed to fetch
 // dynamically imported module ccip-*.js"). Referencing the module here folds
 // it into the eager bundle so it can never go stale.
 ;(globalThis as Record<string, unknown>).__viemCcipEagerPin = ccipRequest

@@ -8,6 +8,9 @@ export type LogLine = {
   kind: LogKind
   text: string
   hash?: string
+  /** full explorer url for hash — defaults to the Robinhood explorer when unset
+   *  (bridge steps on remote chains carry their own) */
+  href?: string
   action?: LogAction
 }
 

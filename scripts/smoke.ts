@@ -1,5 +1,5 @@
 // Live-chain smoke test for the read layer: TickMath constants, ABI selectors,
-// pool discovery, quoter-vs-kyber sanity. Run: npm run smoke
+// pool discovery and direct Uniswap/UP33 quote sanity. Run: npm run smoke
 // Never prints the RPC URL.
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -20,6 +20,8 @@ import {
   getSqrtRatioAtTick,
   sqrtPriceToPrice,
 } from '../src/lib/clmath'
+import { directRouteLabel, netAfterFee, quoteDirectCandidates } from '../src/lib/directSwap'
+import type { ClPool } from '../src/types'
 
 let pass = 0
 let fail = 0
@@ -29,21 +31,9 @@ function check(name: string, cond: boolean, detail = '') {
   console.log(`  ${cond ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`)
 }
 
-// duplicated rather than imported: src/config/env.ts reads import.meta.env,
-// which is vite-only and does not load under node/tsx.
-const PUBLIC_RPC = 'https://rpc.mainnet.chain.robinhood.com'
-
-/** repo-root .env `RPC` (SECRET — never print it). No .env / no key: public RPC. */
-const rpc = (() => {
-  const fromEnv = process.env.RPC?.trim()
-  if (fromEnv) return fromEnv
-  try {
-    const text = readFileSync(fileURLToPath(new URL('../.env', import.meta.url)), 'utf8')
-    return text.match(/^\s*RPC\s*=\s*(\S+)\s*$/m)?.[1] ?? PUBLIC_RPC
-  } catch {
-    return PUBLIC_RPC
-  }
-})()
+const envText = readFileSync(fileURLToPath(new URL('../../.env', import.meta.url)), 'utf8')
+const rpc =
+  envText.match(/^\s*RPC\s*=\s*(\S+)\s*$/m)?.[1] ?? 'https://rpc.mainnet.chain.robinhood.com'
 
 const chain = defineChain({
   id: 4663,
@@ -114,6 +104,7 @@ async function main() {
       { abi: clPoolAbi, address: p, functionName: 'token0' },
       { abi: clPoolAbi, address: p, functionName: 'token1' },
       { abi: clPoolAbi, address: p, functionName: 'tickSpacing' },
+      { abi: clPoolAbi, address: p, functionName: 'fee' },
       { abi: clPoolAbi, address: p, functionName: 'liquidity' },
       { abi: clPoolAbi, address: p, functionName: 'gauge' },
     ]) as never,
@@ -127,18 +118,20 @@ async function main() {
     t0: Address
     t1: Address
     ts: number
+    fee: number
     liq: bigint
     gauge?: Address
   }[] = []
   clAddrs.forEach((p, i) => {
-    const s0 = ok<readonly [bigint, number, number, number, number, boolean]>(slotRes[i * 6])
-    const t0 = ok<Address>(slotRes[i * 6 + 1])
-    const t1 = ok<Address>(slotRes[i * 6 + 2])
-    const ts = ok<number>(slotRes[i * 6 + 3])
-    const liq = ok<bigint>(slotRes[i * 6 + 4]) ?? 0n
-    const gauge = ok<Address>(slotRes[i * 6 + 5])
-    if (!s0 || !t0 || !t1 || ts === undefined) return
-    clPools.push({ addr: p, sqrtP: s0[0], tick: s0[1], t0, t1, ts, liq, gauge })
+    const s0 = ok<readonly [bigint, number, number, number, number, boolean]>(slotRes[i * 7])
+    const t0 = ok<Address>(slotRes[i * 7 + 1])
+    const t1 = ok<Address>(slotRes[i * 7 + 2])
+    const ts = ok<number>(slotRes[i * 7 + 3])
+    const fee = ok<number>(slotRes[i * 7 + 4])
+    const liq = ok<bigint>(slotRes[i * 7 + 5]) ?? 0n
+    const gauge = ok<Address>(slotRes[i * 7 + 6])
+    if (!s0 || !t0 || !t1 || ts === undefined || fee === undefined) return
+    clPools.push({ addr: p, sqrtP: s0[0], tick: s0[1], t0, t1, ts, fee, liq, gauge })
     if (s0[0] === 0n) return
     const lo = getSqrtRatioAtTick(s0[1])
     const hi = getSqrtRatioAtTick(s0[1] + 1)
@@ -147,7 +140,7 @@ async function main() {
   })
   check('slot0 sqrtPrice within [tick, tick+1) for all CL pools', tickBad === 0, `${tickOk} ok / ${tickBad} bad`)
 
-  // 6. WETH/UP CL pool: our quoter path vs kyber aggregator ballpark
+  // 6. WETH/UP: raw UP33 quoter plus the product's direct comparison module
   const wethUp = clPools
     .filter(
       (p) =>
@@ -194,22 +187,41 @@ async function main() {
       check('quoter ~ spot price (<30% incl. fee+impact)', rel < 0.3, `spot=${upPerWeth.toFixed(1)} quote=${outF.toFixed(1)}`)
     }
 
-    try {
-      const r = await fetch(
-        `https://aggregator-api.kyberswap.com/robinhood/api/v1/routes?tokenIn=${ADDR.WETH}&tokenOut=${ADDR.UP}&amountIn=${oneWeth}`,
-        { headers: { 'x-client-id': 'up33-terminal-smoke' } },
-      )
-      const j: any = await r.json()
-      const aggOut = BigInt(j?.data?.routeSummary?.amountOut ?? '0')
-      if (aggOut > 0n && quoterOut) {
-        const rel = Math.abs(Number(aggOut - quoterOut)) / Number(aggOut)
-        check('kyber agg vs our single-pool quote (<25%)', rel < 0.25, `agg=${aggOut} ours=${quoterOut}`)
-      } else {
-        check('kyber aggregator reachable', aggOut > 0n, j?.message ?? 'no data')
-      }
-    } catch (e) {
-      check('kyber aggregator reachable', false, String(e))
+    const smokePool: ClPool = {
+      kind: 'cl',
+      protocol: 'up33',
+      address: wethUp.addr,
+      token0: wethUp.t0,
+      token1: wethUp.t1,
+      tickSpacing: wethUp.ts,
+      feePpm: wethUp.fee,
+      unstakedFeePpm: 0,
+      sqrtPriceX96: wethUp.sqrtP,
+      tick: wethUp.tick,
+      liquidity: wethUp.liq,
+      stakedLiquidity: 0n,
+      gauge: null,
+      gaugeAlive: false,
+      weight: 0n,
+      rewardRate: 0n,
+      periodFinish: 0n,
     }
+    const direct = await quoteDirectCandidates(pc, [smokePool], ADDR.WETH, ADDR.UP, oneWeth, 9)
+    check(
+      'direct comparison quotes Uniswap and UP33',
+      direct.status.uniswap === 'quoted' && direct.status.up33 === 'quoted',
+      `${direct.status.uniswap}/${direct.status.up33}`,
+    )
+    check(
+      'direct UP33 quote is net of the exact 9 bps fee',
+      !!quoterOut && direct.byProtocol.up33?.amountOut === netAfterFee(quoterOut, 9),
+      direct.byProtocol.up33?.amountOut.toString() ?? 'no quote',
+    )
+    check(
+      'direct comparison selects a concrete route',
+      direct.best !== null,
+      direct.best ? directRouteLabel(direct.best.route) : 'none',
+    )
   }
 
   // 7. v2 gauge standard selectors respond (gauge instances are unverified on Blockscout)

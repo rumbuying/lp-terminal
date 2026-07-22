@@ -1,6 +1,8 @@
 import type { Address } from 'viem'
 
-// All addresses verified against Blockscout's verified source (compiler 0.8.19).
+export const NATIVE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE' as Address
+
+// All addresses verified on Blockscout — see docs/up33-contract-map.md at repo root.
 export const ADDR = {
   UP: '0x57C0E45cB534413D1C20A4240955d6bB250BB4F1',
   VE_UP: '0x5d321dE36F0bf98D92b291280514F3878582B7B6',
@@ -27,6 +29,8 @@ export const ADDR = {
 export const UNI = {
   V3_FACTORY: '0x1f7d7550B1b028f7571E69A784071F0205FD2EfA',
   V3_NPM: '0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3',
+  V3_QUOTER: '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7',
+  V3_SWAP_ROUTER: '0xcaf681a66d020601342297493863e78c959e5cb2',
   V2_FACTORY: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f',
   V2_ROUTER: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba',
 } as const satisfies Record<string, Address>

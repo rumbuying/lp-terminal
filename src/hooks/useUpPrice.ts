@@ -1,21 +1,14 @@
-import { useQuery } from '@tanstack/react-query'
-import { parseUnits } from 'viem'
 import { ADDR } from '../config/addresses'
-import { kyberRoute } from '../lib/kyber'
+import type { TokenInfo } from '../types'
+import { useTokenUsd } from './useTokenUsd'
 
-/** USD price of 1 UP via a kyber UP->USDG quote (display only) */
+const UP_TOKEN: TokenInfo = { address: ADDR.UP, symbol: 'UP', decimals: 18 }
+
+/** USD value of 1 UP (display only) via the shared venue pricer — dexscreener's
+ *  most-liquid pair first, fee-free Kyber unit quote as fallback. Shares the
+ *  ['tokenUsd', UP] cache entry with the swap page, so UP is fetched once
+ *  app-wide. Replaces the direct Kyber unit quote, which ran ~7% high by
+ *  routing through an $8-liquidity stale pool (see lib/tokenPrice.ts). */
 export function useUpPrice() {
-  return useQuery({
-    queryKey: ['upPrice'],
-    refetchInterval: 60_000,
-    staleTime: 50_000,
-    retry: 1,
-    queryFn: async () => {
-      // applyFee: false — this is a price display, not an executable quote
-      const r = await kyberRoute(ADDR.UP, ADDR.USDG, parseUnits('1', 18), { applyFee: false })
-      const usd = Number(r.routeSummary.amountOutUsd ?? NaN)
-      if (Number.isFinite(usd) && usd > 0) return usd
-      return Number(r.routeSummary.amountOut) / 1e6 // USDG has 6 decimals
-    },
-  })
+  return useTokenUsd(UP_TOKEN)
 }

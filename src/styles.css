@@ -136,6 +136,11 @@
 * { box-sizing: border-box; }
 
 html, body, #root { height: 100%; }
+/* RainbowKitProvider wraps the app in an unstyled <div data-rk> — without a
+   height it breaks the % chain and the whole shell collapses to content
+   height (footer mid-screen, dead space below). Scoped to the #root wrapper
+   so RainbowKit's body-portaled modals (also data-rk) stay untouched. */
+#root > div[data-rk] { height: 100%; }
 
 body {
   margin: 0;
@@ -188,17 +193,18 @@ button, input, select {
 .brand .cursor { animation: blink 1.1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* direction-aware update flash (Flash component) — semantic, theme-invariant */
-.flash { border-radius: 2px; }
-.flash-up { animation: flashUp 1.1s ease-out; }
-.flash-down { animation: flashDown 1.1s ease-out; }
-.flash-arrow { font-size: 0.8em; margin-left: 3px; }
+/* direction-aware update flash (Flash component) — semantic, theme-invariant.
+   deep, saturated green/red held briefly at full so up/down reads at a glance */
+.flash { border-radius: 2px; padding: 0 3px; }
+.flash-up { animation: flashUp 1.3s ease-out; }
+.flash-down { animation: flashDown 1.3s ease-out; }
+.flash-arrow { font-size: 0.85em; margin-left: 3px; font-weight: 700; }
 @keyframes flashUp {
-  0% { background: rgba(80, 220, 90, 0.3); }
+  0%, 15% { background: rgba(16, 138, 62, 0.92); }
   100% { background: transparent; }
 }
 @keyframes flashDown {
-  0% { background: rgba(255, 92, 92, 0.32); }
+  0%, 15% { background: rgba(190, 34, 34, 0.92); }
   100% { background: transparent; }
 }
 
@@ -220,6 +226,55 @@ button, input, select {
 .hdr-meta b { color: var(--fg); font-weight: 400; }
 
 /* ---------- generic ---------- */
+/* a term that explains itself on hover. The dashed rule is the ONLY signal an
+   explanation is there — an unmarked one is undiscoverable. Underline (not
+   border-bottom) so it follows wrapped text and adds no layout; the rule stays
+   neutral even under tone-coloured numbers, because the dash is chrome, not
+   semantics.
+   We draw the panel instead of using a native `title`: the OS tooltip waits
+   about a second before appearing, renders 58 characters of Chinese as one
+   unreadable strip, and never appears at all on a touch screen. */
+.hint {
+  text-decoration: underline dashed;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--dim);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+/* the panel hangs off the ROW, not off the inline term: anchored to a term
+   sitting mid-row it would run past the right edge on a phone. :has() keeps
+   the containing block off every other .kv/.l2 in the app. */
+.kv:has(.hint),
+.l2:has(.hint) { position: relative; }
+/* [data-tip] guard: a .hint without one would otherwise hover an empty box */
+.hint[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + 7px);
+  left: 0;
+  width: max-content;
+  max-width: min(340px, 100%);
+  background: var(--inset);
+  border: 1px solid var(--acc-dim);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  padding: 8px 10px;
+  color: var(--dim);
+  font-size: 0.8rem;
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  text-decoration: none;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 90ms linear;
+}
+.hint[data-tip]:hover::after { opacity: 1; visibility: visible; }
+
 .btn {
   background: var(--panel2);
   border: 1px solid var(--line-hi);
@@ -234,6 +289,8 @@ button, input, select {
 .btn:disabled { color: var(--dim); border-color: var(--line); cursor: not-allowed; }
 .btn.danger { color: var(--red); }
 .btn.danger:hover:not(:disabled) { background: var(--red); color: #000; border-color: var(--red); }
+.btn.amber { background: var(--amber); border-color: var(--amber); color: #000; }
+.btn.amber:hover:not(:disabled) { background: transparent; color: var(--amber); }
 .btn.ghost { color: var(--dim); border-color: var(--line); }
 .btn.ghost:hover:not(:disabled) { background: var(--line); color: var(--fg); }
 .btn.big { padding: 8px 16px; font-weight: 700; }
@@ -265,6 +322,30 @@ button, input, select {
 .proto-mini img { height: 11px; width: 11px; display: block; }
 .proto-mini.uni { color: rgba(245, 13, 180, 0.8); }
 .proto-mini.up33 { color: var(--acc-dim); }
+/* jump-off to the pair's DexScreener chart, sat right of the protocol mark.
+   Badge geometry at row scale: it has to read as a button without out-weighing
+   the pair name beside it. Spacing comes from the flex parent's gap in all
+   three homes (.pair-line, .card-head, .pg-title), never a margin here.
+   `a:hover` underlines every link in this file, hence the second selector. */
+.ds-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 0.8em;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+/* the brand mark keeps its own colors (it is artwork, not an icon font), so it
+   does not brighten with the label on hover — same as .badge.proto's UP icon */
+.ds-btn img { height: 11px; width: 11px; display: block; }
+.ds-btn,
+.ds-btn:hover { text-decoration: none; }
+.ds-btn:hover { color: var(--fg); border-color: var(--line-hi); background: var(--panel2); }
 
 .input {
   background: var(--inset);
@@ -276,15 +357,32 @@ button, input, select {
   width: 100%;
 }
 .input:focus { border-color: var(--acc-dim); }
+.input.invalid { border-color: var(--red); } /* wins over :focus by source order */
 .input::placeholder { color: var(--placeholder); }
 
 .dim { color: var(--dim); }
+.fg { color: var(--fg); }
 .green { color: var(--green); }
 .amber { color: var(--amber); }
 .red { color: var(--red); }
 .cyan { color: var(--cyan); }
 .right { text-align: right; }
 .mono-sm { font-size: 0.88em; }
+
+/* remembered "stake after adding" checkbox, shown on stakeable add surfaces */
+.stake-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.stake-toggle:not(.off):hover { color: var(--fg); }
+.stake-toggle input { accent-color: var(--acc); cursor: pointer; margin: 0; }
+.stake-toggle.off { cursor: default; opacity: 0.55; }
+.stake-toggle.off input { cursor: default; }
 
 /* ---------- main ---------- */
 .main {
@@ -321,7 +419,11 @@ button, input, select {
   letter-spacing: 1px;
   margin: 14px 0 6px;
   font-size: 0.9em;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
 }
+.section-title .aux { margin-left: auto; letter-spacing: 0; min-width: 7ch; text-align: center; }
 .section-title::before { content: '┌─ '; color: var(--line-hi); }
 .section-title::after { content: ' ─'; color: var(--line-hi); }
 
@@ -339,7 +441,12 @@ table.tbl { width: 100%; border-collapse: collapse; }
   white-space: nowrap;
 }
 .tbl td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+/* the whole row toggles the add-LP expander (PoolsTab) — the ADD LP button
+   stays as the keyboard path, so the row itself takes no tab stop */
+.tbl tr.rowhover { cursor: pointer; }
 .tbl tr.rowhover:hover td { background: var(--panel2); }
+/* keep the expanded row visibly attached to the row that opened it */
+.tbl tr.rowhover.is-open td { background: var(--panel2); }
 .tbl .num { text-align: right; white-space: nowrap; }
 
 /* long catalogs: the table scrolls under a sticky header row */
@@ -373,6 +480,28 @@ table.tbl { width: 100%; border-collapse: collapse; }
 
 .kv { display: flex; gap: 18px; flex-wrap: wrap; margin: 4px 0; }
 .kv .k { color: var(--dim); margin-right: 6px; }
+/* position metrics readout — label-over-value cells packed left at content
+   width, one vocabulary for card bodies AND pool-group headers. Each cell
+   answers one question (worth? / harvestable? / earning?); token breakdowns
+   stack as dim sub-lines instead of running on in prose */
+.pmetrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 32px;
+  margin: 8px 0 4px;
+}
+.pmetrics .pcell .k {
+  display: block;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 0.8em;
+  margin-bottom: 2px;
+}
+.pmetrics .pcell .v { font-size: 1.1em; }
+.pmetrics .pcell .sub { display: block; color: var(--dim); margin-top: 1px; }
+.pmetrics.compact { gap: 6px 24px; margin: 6px 0 0; }
+.pmetrics.compact .pcell .v { font-size: 1em; }
 
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
 
@@ -383,6 +512,15 @@ table.tbl { width: 100%; border-collapse: collapse; }
 
 /* ---------- range bar ---------- */
 .rbar-wrap { margin: 8px 0 4px; }
+/* which single token you hold once price leaves each end of the band, sat
+   above the track ends; the side you're currently resting in lights up */
+.rbar-holds {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 3px;
+  letter-spacing: 0.3px;
+}
 .rbar {
   display: flex;
   align-items: center;
@@ -504,22 +642,82 @@ table.tbl { width: 100%; border-collapse: collapse; }
 /* ---------- swap ---------- */
 /* single-task views sit centered in the wide main panel */
 .swap-box { max-width: 720px; width: 100%; margin: 0 auto; }
-.swap-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-.swap-row .lbl { width: 46px; color: var(--dim); text-transform: uppercase; font-size: 0.9em; }
-.quote-row {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
+/* market view: header row shares the card column's width so edges line up */
+.swap-box.narrow { max-width: 560px; }
+/* static network indicator (single-chain terminal — no selector) */
+.chain-tag {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-hi);
+  background: var(--panel2);
+  padding: 3px 10px;
+  font-size: 0.8em;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: default;
+}
+.chain-tag .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ccff00; /* Robinhood neon */
+  box-shadow: 0 0 6px rgba(204, 255, 0, 0.55);
+}
+/* the trade column itself is narrower than the panel — focused, Robinhood-style */
+.swap-col { max-width: 560px; margin: 0 auto; }
+
+/* selectable route cards: line 1 = venue + output + BEST/shortfall, line 2 = pool detail + usd */
+.quote-card {
   border: 1px solid var(--line);
-  padding: 7px 10px;
+  padding: 7px 12px;
   margin-bottom: 6px;
   cursor: pointer;
+}
+.quote-card:hover { border-color: var(--line-hi); }
+.quote-card.sel { border-color: var(--acc-dim); background: var(--panel2); }
+.quote-card .l1 { display: flex; align-items: baseline; gap: 10px; }
+.quote-card .src { text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+.quote-card .qstate { margin-left: auto; }
+.quote-card .qamt { margin-left: auto; font-size: 1.05em; white-space: nowrap; }
+.quote-card .l2 {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--dim);
+  font-size: 0.85em;
+  margin-top: 3px;
+  padding-left: 18px; /* aligns under the venue name, past the ◉ marker */
   flex-wrap: wrap;
 }
-.quote-row:hover { border-color: var(--line-hi); }
-.quote-row.sel { border-color: var(--acc-dim); background: var(--panel2); }
-.quote-row .src { width: 130px; text-transform: uppercase; letter-spacing: 0.5px; }
-.quote-row .out { font-size: 1.05em; }
+
+/* sheep-choice route visualization: a split-proportion bar + one chip per
+   leg. Accent shades only — venue identity lives in the mono labels, so the
+   bar stays legible in every theme (the palette keeps hues semantic). */
+.route-viz {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+  padding-left: 18px; /* same gutter as .l2 */
+}
+.route-bar { display: flex; height: 4px; gap: 1px; }
+.route-bar i { flex: 0 0 auto; min-width: 3px; background: var(--acc); }
+.route-bar i:nth-child(2) { opacity: 0.68; }
+.route-bar i:nth-child(3) { opacity: 0.5; }
+.route-bar i:nth-child(4) { opacity: 0.38; }
+.route-bar i:nth-child(n + 5) { opacity: 0.26; }
+.route-legs { display: flex; flex-wrap: wrap; gap: 4px 6px; font-size: 0.8em; }
+.route-legs .leg {
+  border: 1px solid var(--line);
+  padding: 1px 6px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.route-legs .leg b { color: var(--fg); font-weight: 500; }
+.route-legs .leg:first-child { border-color: var(--acc-dim); }
 
 /* token select */
 .tsel { position: relative; }
@@ -573,6 +771,219 @@ table.tbl { width: 100%; border-collapse: collapse; }
 .logline.ok .txt { color: var(--green); }
 .logline.err .txt { color: var(--red); }
 .logline.pending .txt { color: var(--amber); }
+
+/* activity log, relocated to a header button (was a footer panel) */
+.hist { position: relative; }
+.hist-btn {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  padding: 4px 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.hist-btn:hover { color: var(--fg); border-color: var(--line-hi); }
+.hist-btn.on { color: var(--acc); border-color: var(--acc-dim); background: var(--panel2); }
+.hist-btn.pending { color: var(--amber); border-color: var(--amber); animation: hist-pulse 1.2s ease-in-out infinite; }
+.hist-btn.failed { color: var(--red); border-color: var(--red); }
+@keyframes hist-pulse { 50% { opacity: 0.55; } }
+.hist-n { color: var(--dim); font-size: 0.85em; margin-left: 5px; }
+.hist-btn.on .hist-n { color: var(--acc-dim); }
+.hist-pop {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  right: 0;
+  width: min(560px, 88vw);
+  background: var(--inset);
+  border: 1px solid var(--acc-dim);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+}
+.hist-pop .logpanel { max-height: 46vh; border: none; }
+
+/* what's new — same button + popover shell as the log next door, own body.
+   The dot is red because it means "shipped in the last two days", not a
+   semantic down/error; nothing else in the header uses a filled dot. */
+.news-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--red);
+  vertical-align: middle;
+}
+.news-hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.news-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 2px 10px 8px;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+.news-e { padding: 7px 0; }
+.news-e + .news-e { border-top: 1px dashed var(--line); }
+.news-e-hd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.news-date { color: var(--dim); white-space: nowrap; }
+.news-tag { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.5px; }
+.news-tag.new { color: var(--acc); }
+.news-tag.fix { color: var(--dim); }
+.news-tag.perf { color: var(--cyan); }
+.news-title { color: var(--fg); }
+.news-item { color: var(--dim); }
+.news-item::before { content: '> '; color: var(--line-hi); }
+
+/* column-header explainer: ⓘ in a th, popover rendered fixed at the tab root
+   (the sticky thead is a stacking context and the table scroll-clips) */
+.info-btn {
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 0 3px;
+  font-size: 1em;
+}
+.info-btn:hover { color: var(--fg); }
+.info-pop {
+  position: fixed;
+  z-index: 70;
+  width: min(320px, 88vw);
+  background: var(--inset);
+  border: 1px solid var(--acc-dim);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  padding: 9px 11px;
+  color: var(--dim);
+  line-height: 1.55;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: normal;
+  font-weight: 400;
+  font-size: 0.92em;
+}
+.info-pop b { color: var(--fg); font-weight: 700; }
+
+/* ---------- pair label → address card (PairAddrs) ----------
+   The trigger inherits its type from the caller (a table cell's bold pair name,
+   a card title), so it resets everything a <button> would otherwise impose and
+   takes only the affordance: a pointer and an accent on hover. */
+.pair-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* the affordance. text-decoration rather than border-bottom so the rule
+     tracks the glyphs instead of the button box — the pair cell ellipsizes on
+     a phone, and a border would keep drawing under the empty tail. --dim is
+     the palette's legible-but-secondary token (the same weight as the type
+     line under the name), so the rule reads without competing with it. */
+  text-decoration: underline dashed var(--dim);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+/* Callers style the trigger with their own class — `pair-name` for the pools
+   table's old <b>, `card-title` on the positions cards. Both are declared
+   EARLIER in this file, so the `font: inherit` above would otherwise strip
+   their weight (and card-title its color) purely on source order. Restating
+   them at .pair-btn.X specificity is what keeps the two look identical to the
+   <span>/<b> each replaced. */
+.pair-btn.pair-name,
+.pair-btn.card-title { font-weight: 700; }
+.pair-btn.card-title { color: var(--fg); }
+/* currentColor, not a second token: the rule then brightens with the label in
+   every theme instead of needing its own accent that could come out darker */
+.pair-btn:hover,
+.pair-btn.on { color: var(--acc); text-decoration-color: currentColor; }
+
+/* The pools table's identity line: name + protocol mark + DS jump. Flex so the
+   NAME is what shrinks and ellipsizes under the mobile width clamp further
+   down — laid out inline, the marks sit after the name and were the first
+   things the clamp cut off. text-overflow has to move onto the name with it:
+   a flex container never ellipsizes its items. */
+.pair-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pair-line > .pair-btn {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* the ellipsis needs overflow:hidden, and overflow clips at the PADDING box —
+     which the dashed rule, sitting 3px under a 16px line box, falls outside of.
+     2px buys it back and costs nothing: row height measures 45.7px either way. */
+  padding-bottom: 2px;
+}
+.pair-line > :not(.pair-btn) { flex: 0 0 auto; }
+.pair-line .proto-mini { margin-left: 0; } /* the gap above already spaces it */
+
+.addr-pop {
+  position: fixed;
+  z-index: 70;
+  width: min(320px, calc(100vw - 16px));
+  background: var(--inset);
+  border: 1px solid var(--acc-dim);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  padding: 8px 10px;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  font-size: 0.92em;
+}
+.addr-pop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+}
+.addr-pop-head b { color: var(--fg); font-weight: 700; }
+.addr-pop-head .dim { font-size: 0.85em; margin-left: auto; }
+.addr-row { display: flex; align-items: center; gap: 6px; }
+/* the ticker column is fixed-width so the three addresses line up, but a long
+   symbol must ellipsize rather than push the address out of the card */
+.addr-k {
+  color: var(--dim);
+  flex: 0 0 6.5ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.addr-copy {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  padding: 3px 5px;
+}
+.addr-copy:hover { border-color: var(--line-hi); background: var(--panel2); }
+.addr-v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.addr-ok { color: var(--green); }
+.addr-bad { color: var(--red); }
+.addr-ext { text-decoration: none; padding: 0 2px; }
+.addr-ext:hover { color: var(--fg); }
 
 .footer {
   display: flex;
@@ -656,7 +1067,8 @@ th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--fg); }
 th.sortable.on { color: var(--acc); }
 
-.mydot { color: var(--acc); margin-right: 4px; }
+/* owned-position rows carry a green left rail so they scan out of the list */
+.tbl tr.rowhover.is-mine td:first-child { box-shadow: inset 3px 0 0 var(--green); }
 
 /* pools table: compact two-line cells */
 .pair-sub {
@@ -709,48 +1121,228 @@ th.sortable.on { color: var(--acc); }
 .spec-row .sv { white-space: nowrap; }
 .spec-row .sd { color: var(--dim); }
 
-/* swap panel */
-.swap-side {
+/* swap trade cards — SELL / BUY */
+.swap-card {
   border: 1px solid var(--line-hi);
   background: var(--panel2);
-  padding: 10px 12px;
+  padding: 10px 14px 12px;
+}
+.swap-card:focus-within { border-color: var(--acc-dim); }
+.swap-card .hd {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
   margin-bottom: 8px;
 }
-.swap-side .top { display: flex; gap: 12px; align-items: center; }
-.swap-side .side-lbl { color: var(--dim); font-size: 0.8em; width: 40px; text-transform: uppercase; letter-spacing: 1px; }
-.swap-side .amt {
+.swap-card .side-lbl { color: var(--dim); font-size: 0.8em; text-transform: uppercase; letter-spacing: 1.5px; }
+.swap-card .bal {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--dim);
+  font-family: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.swap-card .bal:hover { color: var(--fg); }
+.swap-card .bal.static { cursor: default; }
+.swap-card .bal.static:hover { color: var(--dim); }
+.swap-card .bal.red, .swap-card .bal.red:hover { color: var(--red); }
+.swap-card .io { display: flex; gap: 12px; align-items: center; }
+.swap-card .tsel-btn { background: var(--panel); padding: 7px 12px; font-size: 1.05em; }
+.swap-card .amt {
   background: none;
   border: none;
   outline: none;
   color: var(--fg);
-  font-size: 1.5em;
+  font-size: 2em;
   width: 100%;
   caret-color: var(--acc);
   font-family: inherit;
   text-align: right;
   min-width: 60px;
+  padding: 0;
 }
-.swap-side .amt::placeholder { color: var(--placeholder); }
-.swap-side .out {
-  font-size: 1.5em;
+.swap-card .amt::placeholder { color: var(--placeholder); }
+.swap-card .out {
+  font-size: 2em;
   flex: 1;
   text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.swap-side .meta {
+.swap-card .ft {
   display: flex;
   justify-content: space-between;
-  color: var(--dim);
-  font-size: 0.85em;
+  align-items: center;
+  gap: 8px;
   margin-top: 6px;
-  flex-wrap: wrap;
-  gap: 6px;
+  min-height: 20px;
 }
-.swap-mid { display: flex; justify-content: center; margin: -4px 0 4px; }
-.rate-line { color: var(--dim); font-size: 0.9em; margin: 8px 0 2px; cursor: pointer; }
-.rate-line:hover { color: var(--fg); }
+.swap-card .ft .pcts { display: flex; gap: 6px; flex-wrap: wrap; }
+.swap-card .ft .usd { color: var(--dim); font-size: 0.9em; margin-left: auto; white-space: nowrap; }
+.swap-card .ft .usd .delta.red { color: var(--red); }
+
+/* BRIDGE: fixed-asset chip is informational, not a picker — kill the
+   interactive affordances the tsel-btn base carries */
+.tsel-btn.static { cursor: default; }
+.tsel-btn.static:hover { border-color: var(--line-hi); }
+
+/* BRIDGE: chain endpoint selector on each card (standard from/to bridge model).
+   Reuses the tsel popover chrome; items are buttons for keyboard access. */
+.swap-card .side { display: inline-flex; align-items: center; gap: 8px; }
+.chain-sel { position: relative; display: inline-flex; }
+.chain-btn {
+  background: var(--panel);
+  border: 1px solid var(--line-hi);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.9em;
+  letter-spacing: 1px;
+  padding: 3px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chain-btn:hover { border-color: var(--acc-dim); background: var(--panel2); }
+.chain-btn .caret { color: var(--dim); }
+.chain-pop {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 190px;
+  background: var(--inset);
+  border: 1px solid var(--acc-dim);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+}
+.chain-pop .tsel-item {
+  background: none;
+  border: none;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  letter-spacing: 1px;
+}
+.chain-pop .tsel-item.cur { color: var(--acc); }
+
+/* BRIDGE: inline execution progress — a cross-chain fill takes seconds to
+   minutes and must be visible without opening the history popover */
+.bridge-progress {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 8px 12px;
+}
+.bridge-progress .stg { color: var(--dim); letter-spacing: 1px; }
+.bridge-progress .stg.on { color: var(--acc); }
+.bridge-progress .stg.done { color: var(--green); }
+.bridge-progress .stg.warn { color: var(--amber); }
+.bridge-progress .stg.err { color: var(--red); }
+.bridge-progress .sep { color: var(--line-hi); }
+.bridge-progress .elapsed { margin-left: auto; color: var(--dim); }
+
+/* BRIDGE: persisted pending transfers — updated conservatively, so the row
+   carries its own countdown instead of a live-polling illusion */
+.pend-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+.pend-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 6px 10px;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.pend-row .amt { flex-shrink: 0; }
+.pend-row .prov { color: var(--dim); letter-spacing: 0.5px; overflow: hidden; text-overflow: ellipsis; }
+.pend-row .eta { margin-left: auto; color: var(--dim); }
+.pend-row .eta a { color: inherit; }
+.pend-row .x {
+  border: none;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1em;
+  padding: 0 2px;
+}
+.pend-row .x:hover { color: var(--fg); }
+
+/* SWAP: persisted in-flight swaps — survive reload so a pending swap stays
+   visible (the corner activity log is in-memory and lost on reload), and the
+   user isn't tempted to re-fire it. usePendingSwaps' poller flips the state. */
+.pending-swaps { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.pending-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 6px 10px;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.pending-row.green { border-color: var(--green-dim); }
+.pending-row.red { border-color: var(--red); }
+.pending-row.amber { border-color: var(--amber); }
+.pending-row .ic { min-width: 12px; text-align: center; }
+.pending-row.green .ic { color: var(--green); }
+.pending-row.red .ic { color: var(--red); }
+.pending-row.amber .ic { color: var(--amber); }
+.pending-row .pair { color: var(--fg); overflow: hidden; text-overflow: ellipsis; }
+.pending-row .st { color: var(--dim); letter-spacing: 0.5px; }
+.pending-row .view { margin-left: auto; color: var(--acc); text-decoration: none; }
+.pending-row .view:hover { text-decoration: underline; }
+.pending-row .x {
+  border: none;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1em;
+  padding: 0 2px;
+}
+.pending-row .x:hover { color: var(--fg); }
+
+/* direction flip — overlaps both cards */
+.swap-flip-row { display: flex; justify-content: center; margin: -11px 0; position: relative; z-index: 4; }
+.swap-flip {
+  width: 38px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  border: 1px solid var(--line-hi);
+  color: var(--acc);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1em;
+}
+.swap-flip:hover { border-color: var(--acc-dim); background: var(--panel2); }
+
+/* DETAILS — receipt-style key/value rows with dotted leaders */
+.kv-list { margin: 2px 0 4px; }
+.kv { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+.kv .k { color: var(--dim); text-transform: uppercase; font-size: 0.85em; letter-spacing: 0.5px; flex-shrink: 0; }
+.kv .fill { flex: 1; border-bottom: 1px dotted var(--line); transform: translateY(-3px); min-width: 20px; }
+.kv .v { text-align: right; }
+.kv.click { cursor: pointer; }
+.kv.click:hover .k { color: var(--fg); }
+/* indented breakdown rows under an expandable kv (e.g. IMPACT -> fees) */
+.kv.sub { padding-left: 16px; }
+.kv-sub { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 4px 0 6px; }
+
+/* full-width action button */
+.swap-cta { margin-top: 12px; }
+.swap-cta .btn { width: 100%; padding: 12px 16px; font-size: 1.05em; letter-spacing: 1.5px; }
 
 .logaction {
   color: var(--acc);
@@ -776,6 +1368,183 @@ th.sortable.on { color: var(--acc); }
 .zstep.run .zm { animation: blink 1s step-end infinite; }
 .zstep.fail { color: var(--red); }
 
-/* positions: per-card value + earning strip */
-.pos-earn { margin-top: 2px; }
-.pos-earn .k { color: var(--dim); margin-right: 8px; text-transform: uppercase; font-size: 0.9em; letter-spacing: 0.4px; }
+/* ---------- POSITIONS: same-pool aggregation (ClPoolGroup) ---------- */
+.pool-group { margin-bottom: 10px; }
+.pool-group-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.pool-group-head:hover { background: var(--panel); }
+/* open head connects visually to the body's tree guide below it */
+.pool-group-head.is-open { border-bottom-color: var(--line-hi); }
+.pg-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pg-caret { color: var(--dim); width: 1ch; display: inline-block; }
+.pg-agg { margin: 0; }
+/* nested position cards hang off a tree guide, indented under the header */
+.pool-group-body {
+  margin-left: 11px;
+  border-left: 1px solid var(--line-hi);
+  padding: 8px 0 0 12px;
+}
+.pool-group-body .card:last-child { margin-bottom: 4px; }
+
+/* mobile-only content (compact variants of desktop cells) */
+.show-m { display: none; }
+
+/* ---------- tablet / small laptop (≤1023px) ----------
+   A table's width is set by its widest cell, and this one's widest cells have
+   no natural bound: a pair label, a reserve line ("24.9M CASHCAT + 12.4 WETH"),
+   a USD figure. Below a laptop that arithmetic stopped fitting and the columns
+   that matter most — TVL and VOL 24H — were the ones pushed off the right edge,
+   because they sit AFTER the widest column. So the widest column goes first. */
+@media (max-width: 1023px) {
+  .hide-t { display: none !important; }
+  /* one long symbol must not be able to spend the whole row's width */
+  .tbl td:first-child > div:not(.expander),
+  .tbl th:first-child {
+    max-width: 42vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* ---------- mobile (≤720px) ----------
+   one breakpoint: phones + narrow tablets. desktop layout is untouched. */
+@media (max-width: 720px) {
+  /* generic escape hatch: anything tagged hide-m disappears on mobile */
+  .hide-m { display: none !important; }
+  .show-m { display: inline; }
+  .cell-sub.show-m { display: block; } /* stacked second metric in a cell */
+
+  /* bottom padding clears the fixed tab bar */
+  .app { padding: 6px 8px calc(58px + env(safe-area-inset-bottom)); }
+  .main { padding: 12px 10px; }
+
+  /* header keeps brand + history + news + lang + connect on one row. It is
+     tight: at 360px the English CONNECT leaves 322px for 335px of buttons, so
+     the wordmark contracts (Header.tsx) and these two densities buy the rest —
+     measure before adding a sixth control here. */
+  .hdr { gap: 6px; padding: 7px 10px; }
+  .hist-btn { padding: 4px 7px; }
+  .hdr-meta { display: none; } /* block number is a desktop nicety */
+  /* pushes the utility cluster right — only the FIRST button in it may take the
+     auto margin, otherwise the free space splits between them and the cluster
+     scatters across the row */
+  .hdr .hist { margin-left: auto; }
+  .hdr .hist + .hist { margin-left: 0; }
+  .hdr .theme-ctl > .dim { display: none; } /* "lang:" label */
+
+  /* Popovers span the header instead of hanging off their own button. At
+     88vw a card whose right edge is pinned to a right-aligned button puts its
+     left half off-screen. Making .hist static hands the containing block to
+     .hdr, so top:100% still reads as "just under the header" however it wraps. */
+  .hdr { position: relative; }
+  .hdr .hist { position: static; }
+  .hist-pop { left: 0; right: 0; width: auto; }
+
+  /* the tab bar drops to the bottom edge — thumb territory */
+  .tabs {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    gap: 6px;
+    background: var(--panel);
+    border-top: 1px solid var(--line-hi);
+    /* a sliver of air under the buttons — they shouldn't kiss the screen edge */
+    padding: 7px 10px calc(13px + env(safe-area-inset-bottom));
+  }
+  .tab { flex: 1; padding: 8px 2px; text-align: center; }
+  .tab .key { display: none; } /* [1]/[2]/[3] are keyboard affordances */
+
+  /* fixed 110px form labels waste a third of a phone row */
+  .form-row .lbl { width: auto; }
+  .form-row { row-gap: 6px; }
+
+  /* no rpc/theme/blockscout chrome on a phone — the bottom bar owns that edge */
+  .footer { display: none; }
+
+  .tbl { font-size: 0.9em; }
+  .tbl th,
+  .tbl td { padding: 8px 6px; } /* taller rows breathe on a phone */
+  /* A phone overlays its scrollbars, so the reserved gutter draws nothing — it
+     just takes 8px off the right of the ONE block that reserves it. The table
+     then stops short of the search box and the chips above it while its left
+     edge stays flush, and the pair column pays for it. `auto` gives the space
+     back; where a scrollbar really does take room it is still visible there,
+     which reads as a scrollbar rather than as dead margin. */
+  .tbl-wrap { scrollbar-gutter: auto; }
+
+  /* The three phone columns are a budget, not a suggestion.
+     `overflow-x: hidden` says the table may not scroll sideways; fixed layout
+     is what makes that promise keepable, by handing every column its width up
+     front instead of deriving it from the longest value that happens to be on
+     screen. Cells then ellipsize rather than push — one bad number (a runaway
+     TVL, a 30-character symbol) can no longer move the columns next to it. */
+  .tbl-wrap { overflow-x: hidden; }
+  .tbl { table-layout: fixed; }
+  /* col 1 pair · col 3 TVL (+VOL 24H stacked) · col 6 FEE APR (+REWARDS) —
+     the rest are display:none here. Percentages so the split survives a 320px
+     phone, where fixed pixels would starve the pair column.
+     All three are declared, and the three sum to 100%. Naming the pair column
+     is not cosmetic: an expanded row is a single <td colSpan={8}>, and a
+     colspan wider than the table's column count CREATES the missing columns.
+     With 49% left unclaimed the fixed algorithm split it equally between those
+     five phantom columns, so opening a panel shrank the pair column of every
+     row above it to 8% (measured at 720px: 334px -> 56px). Leaving nothing to
+     divide is what holds the rows still. :not([colspan]) keeps the width off
+     the panel cell itself, which must span the lot. */
+  .tbl th:nth-child(1),
+  .tbl td:nth-child(1):not([colspan]) { width: 49%; }
+  .tbl th:nth-child(3),
+  .tbl td:nth-child(3) { width: 27%; }
+  .tbl th:nth-child(6),
+  .tbl td:nth-child(6) { width: 24%; }
+  .tbl tbody .num,
+  .tbl tbody .num .cell-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Headers wrap instead of clipping — a truncated "FEE APR" would take the
+     sort arrow with it, and that arrow is the only cue the column is sortable.
+     `anywhere` rather than plain wrapping so a header with no space in it (a
+     long localization, an unbreakable glyph run) still cannot poke out.
+     `.tbl thead .num` is deliberate, not redundant: plain `.tbl thead th` loses
+     to `.tbl .num`'s nowrap on specificity (0,1,2 vs 0,2,0), so the headers
+     that most need to wrap — the numeric ones — were the only ones that
+     couldn't. Adding the thead-scoped variant (0,2,1) is what outranks it. */
+  .tbl thead th,
+  .tbl thead .num {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* spec rows (ZAP PLAN / LIMIT ticket) stack on a phone — the three-column
+     grid starves the detail column into a one-character-per-line sliver */
+  .spec-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+    padding: 6px 10px;
+  }
+  .spec-row .sv { white-space: normal; }
+
+  /* ellipsize the pair cell's tail; the full label lives in the expanded panel.
+     :not(.expander) — the ADD LP row is one full-width td whose first div is
+     the panel itself; clamping it squeezed the whole form to ~150px.
+     The width now comes from the fixed layout above, so this is a plain 100%
+     rather than the old `min(168px, calc(100vw - 246px))` guess — that number
+     had to predict what the metric columns would need, and could only ever be
+     wrong in one of the two directions. */
+  .tbl td:first-child > div:not(.expander) {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

@@ -12,7 +12,7 @@ import {
   v2PoolAbi,
   voterAbi,
 } from '../abi'
-import { ADDR } from '../config/addresses'
+import { ADDR, CHAIN_ID } from '../config/addresses'
 import type { ClPool, Pool, PoolsData, TokenInfo, V2Pool } from '../types'
 
 type McRes = { status: 'success' | 'failure'; result?: unknown; error?: Error }
@@ -265,7 +265,7 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
 }
 
 export function usePools() {
-  const pc = usePublicClient()
+  const pc = usePublicClient({ chainId: CHAIN_ID })
   return useQuery({
     queryKey: ['pools'],
     enabled: !!pc,

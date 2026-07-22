@@ -3,7 +3,7 @@ import { currentLang, setLang, type Lang } from '../i18n'
 
 const LABELS: Record<Lang, string> = { en: 'EN', zh: '中文' }
 
-/** footer language switcher — instant, persisted, wallet modal follows */
+/** header language switcher — instant, persisted, wallet modal follows */
 export function LangControl() {
   const { t, i18n } = useTranslation()
   void i18n.language // subscribe: re-render on language change

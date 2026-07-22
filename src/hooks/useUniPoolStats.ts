@@ -4,7 +4,8 @@
 import { useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
 import { fetchUniIndex } from '../lib/uniIndex'
-import type { PoolStat } from '../lib/poolstats'
+import { fetchDexscreener, type PoolStat } from '../lib/poolstats'
+import { poolStatWithFallback } from '../lib/poolStatFallback'
 
 export function useUniPoolStats(addrs: Address[]) {
   const key = addrs
@@ -24,6 +25,16 @@ export function useUniPoolStats(addrs: Address[]) {
           if (r) Object.assign(out, r.stats)
         }),
       )
+      const gaps = addrs.filter((a) => {
+        const stat = out[a.toLowerCase()]
+        return !stat || stat.vol24hUsd == null || stat.liqUsd == null
+      })
+      const fallback = gaps.length ? await fetchDexscreener(gaps).catch(() => null) : null
+      for (const address of gaps) {
+        const key = address.toLowerCase()
+        const merged = poolStatWithFallback(out[key], fallback?.stats[key])
+        if (merged) out[key] = merged
+      }
       return out
     },
   })

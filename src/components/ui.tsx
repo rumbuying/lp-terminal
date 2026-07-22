@@ -1,18 +1,18 @@
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { formatUnits } from 'viem'
-import { fmtAmount } from '../lib/format'
+import { fmtAmount, sanitizeAmountInput } from '../lib/format'
 
 export function Btn(props: {
   onClick?: () => void
   disabled?: boolean
-  tone?: 'default' | 'danger' | 'ghost'
+  tone?: 'default' | 'danger' | 'ghost' | 'amber'
   big?: boolean
   busy?: boolean
   title?: string
   children: ReactNode
 }) {
-  const cls = ['btn', props.tone === 'danger' ? 'danger' : '', props.tone === 'ghost' ? 'ghost' : '', props.big ? 'big' : '']
+  const cls = ['btn', props.tone === 'default' ? '' : props.tone, props.big ? 'big' : '']
     .filter(Boolean)
     .join(' ')
   return (
@@ -78,10 +78,13 @@ export function NumInput(props: {
   placeholder?: string
   disabled?: boolean
   width?: number
+  invalid?: boolean
+  /** clamp typed fraction digits (token precision); 18 = EVM max */
+  decimals?: number
 }) {
   return (
     <input
-      className="input"
+      className={`input${props.invalid ? ' invalid' : ''}`}
       style={props.width ? { width: props.width } : undefined}
       inputMode="decimal"
       autoComplete="off"
@@ -90,8 +93,8 @@ export function NumInput(props: {
       value={props.value}
       disabled={props.disabled}
       onChange={(e) => {
-        const v = e.target.value.replace(',', '.')
-        if (v === '' || /^\d*\.?\d*$/.test(v)) props.onChange(v)
+        const v = sanitizeAmountInput(e.target.value, props.decimals ?? 18)
+        if (v !== null) props.onChange(v)
       }}
     />
   )

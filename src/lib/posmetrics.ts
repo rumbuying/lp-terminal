@@ -28,6 +28,22 @@ export type ClMetrics = {
   earning: Earning
 }
 
+/** Stable display order: staking changes yield, not the position's place. */
+export function compareClPositionDisplay(
+  a: ClPosition,
+  b: ClPosition,
+  valueA: number | null,
+  valueB: number | null,
+): number {
+  const protocolA = a.pool.protocol === 'up33' ? 0 : 1
+  const protocolB = b.pool.protocol === 'up33' ? 0 : 1
+  const protocol = protocolA - protocolB
+  if (protocol) return protocol
+  const value = (valueB ?? -1) - (valueA ?? -1)
+  if (value) return value
+  return a.tokenId === b.tokenId ? 0 : a.tokenId < b.tokenId ? -1 : 1
+}
+
 const DAY = 86_400
 const YEAR_DAYS = 365
 

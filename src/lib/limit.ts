@@ -5,7 +5,7 @@
 // and nothing executes automatically — the owner withdraws to lock in.
 //
 // Closed forms for liquidity L over sqrt bounds [A,B] (verified against
-// CLPool/SqrtPriceMath):
+// CLPool/SqrtPriceMath, see docs/up33-contract-map.md §6.6):
 //   all-token0 amount = L·(1/A − 1/B)   (price at/below A)
 //   all-token1 amount = L·(B − A)       (price at/above B)
 //   ⇒ full-fill average price (token1 per token0) = A·B — geometric mean of bounds

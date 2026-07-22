@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAccount } from 'wagmi'
 import { readContract, writeContract } from 'wagmi/actions'
 import { parseUnits } from 'viem'
-import { clGaugeAbi, clPmAbi, v2GaugeAbi, v2PoolAbi, v2RouterAbi } from '../../abi'
+import { clGaugeAbi, clPmAbi, uniV2RouterAbi, v2GaugeAbi, v2PoolAbi, v2RouterAbi } from '../../abi'
 import { ADDR, CHAIN_ID, EXPLORER, UNI } from '../../config/addresses'
 import { wagmiConfig } from '../../config/wagmi'
 import {
@@ -18,9 +18,10 @@ import {
 import { fmtApr } from '../../lib/apr'
 import { fmtAmount, fmtNum, fmtUsd, shortAddr } from '../../lib/format'
 import { limitFillFrac, limitSideFor, limitTagOf, untagLimit } from '../../lib/limit'
-import { clPosMetrics, v2PosMetrics, type Earning } from '../../lib/posmetrics'
+import { compareClPositionDisplay, clPosMetrics, v2PosMetrics, type ClMetrics, type Earning } from '../../lib/posmetrics'
 import type { PoolStat } from '../../lib/poolstats'
 import { deadline, ensureAllowance, fetchSqrtPriceX96, offerSwapClaimedUp, step } from '../../lib/tx'
+import { stakeClNft, stakeV2Lp } from '../../lib/stake'
 import { txlog } from '../../lib/txlog'
 import { tokenOf, usePools } from '../../hooks/usePools'
 import { useBalances } from '../../hooks/useBalances'
@@ -31,7 +32,9 @@ import { useUpPrice } from '../../hooks/useUpPrice'
 import { useLiveSlot0, type LiveSlot0 } from '../../hooks/useLiveSlot0'
 import type { Address } from 'viem'
 import type { ClPosition, Pool, PoolsData, TokenInfo, V2Position } from '../../types'
+import { DexScreenerLink } from '../DexScreenerLink'
 import { Flash } from '../Flash'
+import { PairAddrs } from '../PairAddrs'
 import { ProtoBadge } from '../ProtoBadge'
 import { RangeBar } from '../RangeBar'
 import { ZapPanel } from '../ZapPanel'
@@ -49,10 +52,14 @@ export function PositionsTab() {
   const upPrice = useUpPrice()
   const [claimBusy, setClaimBusy] = useState(false)
 
-  // indexer stats for the specific uniswap pools the user is LPing
+  // indexer stats for the specific uniswap pools the user is LPing (v3 + v2)
   const uniAddrs = useMemo(
-    () =>
-      [...new Set((positions.data?.cl ?? []).filter((p) => p.pool.protocol === 'univ3').map((p) => p.pool.address))],
+    () => [
+      ...new Set([
+        ...(positions.data?.cl ?? []).filter((p) => p.pool.protocol === 'univ3').map((p) => p.pool.address),
+        ...(positions.data?.v2 ?? []).filter((p) => p.pool.protocol === 'univ2').map((p) => p.pool.address),
+      ]),
+    ],
     [positions.data],
   )
   const uniStats = useUniPoolStats(uniAddrs)
@@ -69,9 +76,9 @@ export function PositionsTab() {
   const live = useLiveSlot0(orderPools)
   const liveOf = (p: ClPosition): LiveSlot0 | undefined => live.data?.[p.pool.address.toLowerCase()]
   const statOf = (pool: Pool): PoolStat | undefined =>
-    pool.protocol === 'univ3'
-      ? uniStats.data?.[pool.address.toLowerCase()]
-      : stats.data?.byPool[pool.address.toLowerCase()]
+    pool.protocol === 'up33'
+      ? stats.data?.byPool[pool.address.toLowerCase()]
+      : uniStats.data?.[pool.address.toLowerCase()]
 
   const claimables = useMemo(() => {
     const cl = positions.data?.cl.filter((p) => p.staked && p.earned > 0n && p.pool.gauge) ?? []
@@ -102,7 +109,10 @@ export function PositionsTab() {
   // portfolio roll-up: value / uncollected fees / UP accrual rate. Uses the
   // 15s positions snapshot (cards refine with the fast feed where they have it)
   const tokAll: Record<string, TokenInfo> = { ...pools.data.tokens, ...data.tokens }
-  const clVal = new Map<ClPosition, number | null>()
+  // full per-position metrics (not just value): the pool-group headers roll
+  // these up. Snapshot-priced like the portfolio totals above — cards refine
+  // with the live feed where they have one.
+  const clM = new Map<ClPosition, ClMetrics | null>()
   const v2Val = new Map<V2Position, number | null>()
   let lpValue = 0
   let unpriced = 0
@@ -113,7 +123,7 @@ export function PositionsTab() {
     const t1 = tokAll[p.pool.token1.toLowerCase()]
     if (!t0 || !t1) {
       unpriced++
-      clVal.set(p, null)
+      clM.set(p, null)
       continue
     }
     const m = clPosMetrics({
@@ -127,7 +137,7 @@ export function PositionsTab() {
       upUsd,
       wethUsd,
     })
-    clVal.set(p, m.valueUsd)
+    clM.set(p, m)
     if (m.valueUsd === null) unpriced++
     else lpValue += m.valueUsd + (m.feesUsd ?? 0)
     if (m.feesUsd) feesUsdTotal += m.feesUsd
@@ -149,13 +159,19 @@ export function PositionsTab() {
     if (m.staked?.kind === 'emissions') upPerDayTotal += m.staked.upPerDay
   }
   const pendingUpUsd = upUsd !== undefined ? (Number(pendingUp) / 1e18) * upUsd : null
+  // rewards = claimable UP emissions + uncollected fees: positions with no
+  // emissions at all (uniswap, unstaked up33) still surface their harvest here
+  const rewardsUsd = (pendingUpUsd ?? 0) + feesUsdTotal
 
-  // display order: staked first, then up33 wallet, then uniswap — biggest first
-  const rank = (p: ClPosition) => (p.staked ? 0 : p.pool.protocol === 'up33' ? 1 : 2)
+  // Protocol and value define the order; staking/unstaking must not move a card.
   const clSorted = [...data.cl].sort(
-    (a, b) => rank(a) - rank(b) || (clVal.get(b) ?? -1) - (clVal.get(a) ?? -1),
+    (a, b) => compareClPositionDisplay(a, b, clM.get(a)?.valueUsd ?? null, clM.get(b)?.valueUsd ?? null),
   )
   const v2Sorted = [...data.v2].sort((a, b) => (v2Val.get(b) ?? -1) - (v2Val.get(a) ?? -1))
+  // bucket same-pool CL positions (multiple NFTs, staked + wallet) under one
+  // expandable header; single-position pools stay flat. v2 is one card per
+  // pool already, so it never groups.
+  const clGroups = groupByPool(clSorted)
   // a range order is SUPPOSED to sit out of range — don't count it as an anomaly
   const outOfRange = data.cl.filter((x) => {
     if (x.pool.protocol === 'up33' && limitTagOf(x.tokenId)) return false
@@ -224,6 +240,33 @@ export function PositionsTab() {
       </div>
     )
 
+  // PENDING REWARDS breakdown, in harvest order: UP emissions · uncollected
+  // fees · accrual rate · claim action. Assembled as parts so the separator
+  // never dangles (fees-only wallets, unclaimable-but-accruing edge cases).
+  const rewardsParts: ReactNode[] = []
+  if (pendingUp > 0n)
+    rewardsParts.push(
+      <span>
+        {fmtAmount(pendingUp, 18)} UP
+        {pendingUpUsd !== null && pendingUpUsd > 0.01 ? ` ≈ ${fmtUsd(pendingUpUsd)}` : ''}
+      </span>,
+    )
+  if (feesUsdTotal > 0.01)
+    rewardsParts.push(<span>{t('pos.lpValueFees', { usd: fmtUsd(feesUsdTotal) })}</span>)
+  if (upPerDayTotal > 0)
+    rewardsParts.push(
+      <span>
+        {t('pos.upPerDay', { n: fmtNum(upPerDayTotal, 3) })}
+        {upUsd !== undefined ? ` ${t('pos.upPerDayUsd', { usd: fmtUsd(upPerDayTotal * upUsd) })}` : ''}
+      </span>,
+    )
+  if (claimables.count > 0)
+    rewardsParts.push(
+      <Btn busy={claimBusy} onClick={claimAll}>
+        {t('pos.claimAll', { n: claimables.count })}
+      </Btn>,
+    )
+
   return (
     <div>
       <div className="grid2">
@@ -242,39 +285,33 @@ export function PositionsTab() {
             cl: data.cl.length,
             v2: data.v2.length,
             staked: data.cl.filter((p) => p.staked).length,
-          })}${feesUsdTotal > 0.01 ? ` · ${t('pos.lpValueFees', { usd: fmtUsd(feesUsdTotal) })}` : ''}${
-            unpriced > 0 ? ` · ${t('pos.lpValueUnpriced', { n: unpriced })}` : ''
-          }`}
+          })}${unpriced > 0 ? ` · ${t('pos.lpValueUnpriced', { n: unpriced })}` : ''}`}
         />
         <Stat
-          k={t('pos.pendingUp')}
+          k={t('pos.pendingRewards')}
           v={
-            <Flash v={Number(pendingUp)} arrow>
-              <span className={pendingUp > 0n ? 'green' : ''}>
-                {fmtAmount(pendingUp, 18)}
-                {pendingUpUsd !== null && pendingUp > 0n && (
-                  <span className="dim"> ≈ {fmtUsd(pendingUpUsd)}</span>
-                )}
-              </span>
-            </Flash>
+            rewardsUsd > 0.01 ? (
+              <Flash v={rewardsUsd} arrow>
+                <span>{fmtUsd(rewardsUsd)}</span>
+              </Flash>
+            ) : pendingUp > 0n ? (
+              // UP accrued but unpriceable — show the raw amount rather than $0
+              <Flash v={Number(pendingUp)} arrow>
+                <span>{fmtAmount(pendingUp, 18)} UP</span>
+              </Flash>
+            ) : (
+              '—'
+            )
           }
           sub={
-            <>
-              {upPerDayTotal > 0 && (
-                <span className="green">
-                  {t('pos.upPerDay', { n: fmtNum(upPerDayTotal, 3) })}
-                  {upUsd !== undefined ? ` ${t('pos.upPerDayUsd', { usd: fmtUsd(upPerDayTotal * upUsd) })}` : ''}
-                  {claimables.count > 0 ? ' · ' : ''}
-                </span>
-              )}
-              {claimables.count > 0 ? (
-                <Btn busy={claimBusy} onClick={claimAll}>
-                  {t('pos.claimAll', { n: claimables.count })}
-                </Btn>
-              ) : upPerDayTotal > 0 ? null : (
-                t('pos.nothingClaimable')
-              )}
-            </>
+            rewardsParts.length > 0
+              ? rewardsParts.map((el, i) => (
+                  <span key={i}>
+                    {i > 0 && ' · '}
+                    {el}
+                  </span>
+                ))
+              : t('pos.nothingClaimable')
           }
         />
         <Stat
@@ -309,20 +346,35 @@ export function PositionsTab() {
           {t('pos.noCl')} <a href="#pools">{t('pos.noClCta')}</a>
         </div>
       )}
-      {clSorted.map((p) => (
-        // tokenIds are only unique per NPM — prefix the protocol in the key
-        <ClCard
-          key={`${p.pool.protocol}-${p.tokenId}`}
-          pos={p}
-          data={pools.data!}
-          xtokens={data.tokens}
-          user={user}
-          live={liveOf(p)}
-          stat={statOf(p.pool)}
-          upUsd={upUsd}
-          wethUsd={wethUsd}
-        />
-      ))}
+      {clGroups.map((g) =>
+        g.length === 1 ? (
+          // tokenIds are only unique per NPM — prefix the protocol in the key
+          <ClCard
+            key={`${g[0].pool.protocol}-${g[0].tokenId}`}
+            pos={g[0]}
+            data={pools.data!}
+            xtokens={data.tokens}
+            user={user}
+            live={liveOf(g[0])}
+            stat={statOf(g[0].pool)}
+            upUsd={upUsd}
+            wethUsd={wethUsd}
+          />
+        ) : (
+          <ClPoolGroup
+            key={g[0].pool.address}
+            positions={g}
+            metricsOf={(p) => clM.get(p)}
+            data={pools.data!}
+            xtokens={data.tokens}
+            user={user}
+            liveOf={liveOf}
+            statOf={statOf}
+            upUsd={upUsd}
+            wethUsd={wethUsd}
+          />
+        ),
+      )}
       <div className="section-title">{t('pos.sectionV2', { n: data.v2.length })}</div>
       {data.v2.length === 0 && (
         <div className="dim">
@@ -334,6 +386,7 @@ export function PositionsTab() {
           key={p.pool.address}
           pos={p}
           data={pools.data!}
+          xtokens={data.tokens}
           user={user}
           stat={statOf(p.pool)}
           upUsd={upUsd}
@@ -355,6 +408,7 @@ export function ClCard({
   stat,
   upUsd,
   wethUsd,
+  nested,
 }: {
   pos: ClPosition
   data: PoolsData
@@ -364,6 +418,9 @@ export function ClCard({
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  /** rendered inside a ClPoolGroup: the pair title / protocol / pool-type
+      badges live in the group head, so drop them from the card head here */
+  nested?: boolean
 }) {
   const { t } = useTranslation()
   const t0 = xtokens[pos.pool.token0.toLowerCase()] ?? tokenOf(data, pos.pool.token0)
@@ -422,35 +479,7 @@ export function ClCard({
 
   const stake = () =>
     run(async () => {
-      if (!pos.pool.gauge) return
-      const approved = await readContract(wagmiConfig, {
-        abi: clPmAbi,
-        address: npm,
-        functionName: 'getApproved',
-        args: [pos.tokenId],
-        chainId: CHAIN_ID,
-      })
-      if (approved.toLowerCase() !== pos.pool.gauge.toLowerCase()) {
-        const ok = await step(t('pos.stApproveNft', { id: pos.tokenId.toString() }), () =>
-          writeContract(wagmiConfig, {
-            abi: clPmAbi,
-            address: npm,
-            functionName: 'approve',
-            args: [pos.pool.gauge!, pos.tokenId],
-            chainId: CHAIN_ID,
-          }),
-        )
-        if (!ok) return
-      }
-      await step(t('pos.stStake', { id: pos.tokenId.toString() }), () =>
-        writeContract(wagmiConfig, {
-          abi: clGaugeAbi,
-          address: pos.pool.gauge!,
-          functionName: 'deposit',
-          args: [pos.tokenId],
-          chainId: CHAIN_ID,
-        }),
-      )
+      if (pos.pool.gauge) await stakeClNft(pos.pool.gauge, npm, pos.tokenId)
     })
 
   // CLGauge.withdraw auto-claims accrued UP, so the swap offer applies here too
@@ -553,13 +582,23 @@ export function ClCard({
   return (
     <div className="card">
       <div className="card-head">
-        <span className="card-title">
-          {t0.symbol}/{t1.symbol}
-        </span>
-        <ProtoBadge proto={pos.pool.protocol} />
-        <Badge tone="cyan">
-          CL {(pos.pool.feePpm / 10_000).toFixed(2)}% · ts{pos.pool.tickSpacing}
-        </Badge>
+        {!nested && (
+          <>
+            <PairAddrs
+              className="card-title"
+              sym0={t0.symbol}
+              sym1={t1.symbol}
+              token0={pos.pool.token0}
+              token1={pos.pool.token1}
+              pool={pos.pool.address}
+            />
+            <ProtoBadge proto={pos.pool.protocol} />
+            <DexScreenerLink pool={pos.pool.address} />
+            <Badge tone="cyan">
+              CL {(pos.pool.feePpm / 10_000).toFixed(2)}% · ts{pos.pool.tickSpacing}
+            </Badge>
+          </>
+        )}
         <a
           className="dim mono-sm"
           href={`${EXPLORER}/token/${npm}/instance/${pos.tokenId}`}
@@ -616,6 +655,69 @@ export function ClCard({
         </div>
       </div>
 
+      <div className="pmetrics mono-sm">
+        <PCell
+          k={t('pos.value')}
+          v={
+            m.valueUsd !== null ? (
+              <Flash v={m.valueUsd}>
+                <b>{fmtUsd(m.valueUsd)}</b>
+              </Flash>
+            ) : (
+              <span className="dim">{t('pos.noAnchor')}</span>
+            )
+          }
+          subs={[
+            <Flash v={Number(held.amount0)}>
+              <span>
+                {fmtAmount(held.amount0, t0.decimals)} {t0.symbol}
+              </span>
+            </Flash>,
+            <Flash v={Number(held.amount1)}>
+              <span>
+                {fmtAmount(held.amount1, t1.decimals)} {t1.symbol}
+              </span>
+            </Flash>,
+          ]}
+        />
+        {pos.staked ? (
+          <PCell
+            k={t('pos.pendingUpK')}
+            v={
+              <Flash v={Number(pos.earned)} arrow>
+                <span>{fmtAmount(pos.earned, 18)} UP</span>
+              </Flash>
+            }
+            subs={
+              upUsd !== undefined && pos.earned > 0n
+                ? [<span className="amber">≈ {fmtUsd((Number(pos.earned) / 1e18) * upUsd)}</span>]
+                : undefined
+            }
+          />
+        ) : (
+          <PCell
+            k={t('pos.fees')}
+            tip={pos.pool.protocol === 'up33' ? t('pos.levyNote') : undefined}
+            v={
+              m.feesUsd !== null && m.feesUsd > 0.01 ? (
+                <span className="amber">≈ {fmtUsd(m.feesUsd)}</span>
+              ) : (
+                <span className="dim">{hasFees ? '…' : '—'}</span>
+              )
+            }
+            subs={
+              hasFees
+                ? [
+                    `${fmtAmount(pos.fees0, t0.decimals)} ${t0.symbol}`,
+                    `${fmtAmount(pos.fees1, t1.decimals)} ${t1.symbol}`,
+                  ]
+                : undefined
+            }
+          />
+        )}
+        {!limitTag && <EarnCell e={m.earning} label={t('pos.earning')} />}
+      </div>
+
       <RangeBar
         tickLower={pos.tickLower}
         tickUpper={pos.tickUpper}
@@ -640,61 +742,6 @@ export function ClCard({
                 ? t('pos.orderClose')
                 : t('pos.orderCancel', { sym: limitTag.sellSym })}
           </Btn>
-        </div>
-      )}
-
-      <div className="kv mono-sm">
-        <span>
-          <span className="k">{t('pos.value')}</span>
-          {m.valueUsd !== null ? (
-            <Flash v={m.valueUsd}>
-              <b>{fmtUsd(m.valueUsd)}</b>
-            </Flash>
-          ) : (
-            <span className="dim">{t('pos.noAnchor')}</span>
-          )}
-        </span>
-        <span>
-          <span className="k">{t('pos.holds')}</span>
-          <Flash v={Number(held.amount0)}>
-            <span>
-              {fmtAmount(held.amount0, t0.decimals)} {t0.symbol}
-            </span>
-          </Flash>{' '}
-          +{' '}
-          <Flash v={Number(held.amount1)}>
-            <span>
-              {fmtAmount(held.amount1, t1.decimals)} {t1.symbol}
-            </span>
-          </Flash>
-        </span>
-        {pos.staked ? (
-          <span>
-            <span className="k">{t('pos.pendingUpK')}</span>
-            <Flash v={Number(pos.earned)} arrow>
-              <span className="green">
-                {fmtAmount(pos.earned, 18)}
-                {upUsd !== undefined && pos.earned > 0n && (
-                  <span className="dim"> ≈ {fmtUsd((Number(pos.earned) / 1e18) * upUsd)}</span>
-                )}
-              </span>
-            </Flash>
-          </span>
-        ) : (
-          <span>
-            <span className="k">{t('pos.fees')}</span>
-            {fmtAmount(pos.fees0, t0.decimals)} {t0.symbol} + {fmtAmount(pos.fees1, t1.decimals)} {t1.symbol}
-            {m.feesUsd !== null && m.feesUsd > 0.01 && <span className="amber"> ≈ {fmtUsd(m.feesUsd)}</span>}
-            {pos.pool.protocol === 'up33' && <span className="dim"> {t('pos.levyNote')}</span>}
-          </span>
-        )}
-      </div>
-      {!limitTag && (
-        <div className="kv mono-sm pos-earn">
-          <span>
-            <span className="k">{t('pos.earning')}</span>
-            <EarnLine e={m.earning} />
-          </span>
         </div>
       )}
 
@@ -732,6 +779,203 @@ export function ClCard({
   )
 }
 
+// ---------------- CL pool group (same-pool aggregation) ----------------
+
+/** bucket positions by pool address, preserving the caller's (sorted) order */
+function groupByPool(list: ClPosition[]): ClPosition[][] {
+  const m = new Map<string, ClPosition[]>()
+  for (const p of list) {
+    const k = p.pool.address.toLowerCase()
+    const g = m.get(k)
+    if (g) g.push(p)
+    else m.set(k, [p])
+  }
+  return [...m.values()]
+}
+
+type ClAgg = {
+  value: number | null // Σ underlying USD, excl fees — matches each card's "value"
+  feesUsd: number
+  pendingUp: bigint
+  upPerDay: number // emissions UP/day
+  usdPerDay: number // emissions $ + fee $ (only what we can price)
+  aprPct: number | null // value-weighted blend of every position's daily yield
+  stakedSharePct: number // Σ staked liquidity / this pool's staked liquidity
+  stakedCount: number
+  count: number
+}
+
+/** roll a same-pool group up to the numbers its header shows */
+function aggregateClGroup(
+  positions: ClPosition[],
+  metricsOf: (p: ClPosition) => ClMetrics | null | undefined,
+): ClAgg {
+  let value: number | null = null
+  let feesUsd = 0
+  let pendingUp = 0n
+  let upPerDay = 0
+  let usdPerDay = 0
+  let stakedLiq = 0
+  let stakedCount = 0
+  for (const p of positions) {
+    pendingUp += p.earned
+    if (p.staked) {
+      stakedCount++
+      stakedLiq += Number(p.liquidity)
+    }
+    const m = metricsOf(p)
+    if (!m) continue
+    if (m.valueUsd !== null) value = (value ?? 0) + m.valueUsd
+    if (m.feesUsd) feesUsd += m.feesUsd
+    if (m.earning.kind === 'emissions') {
+      upPerDay += m.earning.upPerDay
+      if (m.earning.usdPerDay !== null) usdPerDay += m.earning.usdPerDay
+    } else if (m.earning.kind === 'fees') {
+      usdPerDay += m.earning.usdPerDay
+    }
+  }
+  const denom = Number(positions[0].pool.stakedLiquidity)
+  return {
+    value,
+    feesUsd,
+    pendingUp,
+    upPerDay,
+    usdPerDay,
+    aprPct: value !== null && value > 0 ? ((usdPerDay * 365) / value) * 100 : null,
+    stakedSharePct: denom > 0 ? (stakedLiq / denom) * 100 : 0,
+    stakedCount,
+    count: positions.length,
+  }
+}
+
+/** aggregated earning cell for a pool group (mirrors EarnCell vocabulary) */
+function ClAggEarnCell({ agg, label }: { agg: ClAgg; label: string }) {
+  const { t } = useTranslation()
+  if (agg.upPerDay <= 0 && agg.usdPerDay <= 0)
+    return <PCell k={label} v={<span className="dim">{t('pos.groupIdle')}</span>} />
+  const emit = agg.upPerDay > 0 ? t('pos.earnEmit', { n: fmtNum(agg.upPerDay, 3) }) : null
+  const subs: ReactNode[] = []
+  if (agg.aprPct !== null && emit) subs.push(emit)
+  if (agg.usdPerDay > 0) subs.push(t('pos.earnUsdDay', { usd: fmtUsd(agg.usdPerDay) }))
+  return (
+    <PCell
+      k={label}
+      v={
+        <span>
+          <span className="green">● </span>
+          {agg.aprPct !== null ? <b>{t('pos.earnApr', { apr: fmtApr(agg.aprPct) })}</b> : emit}
+        </span>
+      }
+      subs={subs}
+    />
+  )
+}
+
+/** expandable header over 2+ positions in one pool (default expanded). The
+    aggregate is computed from metricsOf; the child cards refine themselves. */
+export function ClPoolGroup(props: {
+  positions: ClPosition[]
+  metricsOf: (p: ClPosition) => ClMetrics | null | undefined
+  data: PoolsData
+  xtokens: Record<string, TokenInfo>
+  user: `0x${string}`
+  liveOf: (p: ClPosition) => LiveSlot0 | undefined
+  statOf: (pool: Pool) => PoolStat | undefined
+  upUsd?: number
+  wethUsd?: number | null
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(true)
+  const { positions, data, xtokens } = props
+  const agg = aggregateClGroup(positions, props.metricsOf)
+  const pool = positions[0].pool
+  const t0 = xtokens[pool.token0.toLowerCase()] ?? tokenOf(data, pool.token0)
+  const t1 = xtokens[pool.token1.toLowerCase()] ?? tokenOf(data, pool.token1)
+  const share = (s: number) => (s < 0.01 ? '<0.01%' : s.toFixed(2) + '%')
+  return (
+    <div className="pool-group">
+      <div
+        className={`pool-group-head${open ? ' is-open' : ''}`}
+        onClick={() => {
+          if (window.getSelection()?.toString()) return // a drag-select is a copy, not a toggle
+          setOpen(!open)
+        }}
+      >
+        <div className="pg-title">
+          <span className="pg-caret">{open ? '▾' : '▸'}</span>
+          <PairAddrs
+            className="card-title"
+            sym0={t0.symbol}
+            sym1={t1.symbol}
+            token0={pool.token0}
+            token1={pool.token1}
+            pool={pool.address}
+          />
+          <ProtoBadge proto={pool.protocol} />
+          <DexScreenerLink pool={pool.address} />
+          <Badge tone="cyan">
+            CL {(pool.feePpm / 10_000).toFixed(2)}% · ts{pool.tickSpacing}
+          </Badge>
+          <span className="dim mono-sm">
+            {t('pos.groupPositions', { n: agg.count })}
+            {agg.stakedCount > 0 ? ` · ${t('pos.groupStakedN', { n: agg.stakedCount })}` : ''}
+          </span>
+        </div>
+        <div className="pmetrics compact mono-sm pg-agg">
+          <PCell
+            k={t('pos.value')}
+            v={
+              agg.value !== null ? (
+                <Flash v={agg.value}>
+                  <b>{fmtUsd(agg.value)}</b>
+                </Flash>
+              ) : (
+                <span className="dim">{t('pos.noAnchor')}</span>
+              )
+            }
+            subs={
+              agg.feesUsd > 0.01
+                ? [<span className="amber">{t('pos.lpValueFees', { usd: fmtUsd(agg.feesUsd) })}</span>]
+                : undefined
+            }
+          />
+          {agg.pendingUp > 0n && (
+            <PCell
+              k={t('pos.pendingUpK')}
+              v={`${fmtAmount(agg.pendingUp, 18)} UP`}
+              subs={
+                props.upUsd !== undefined
+                  ? [<span className="amber">≈ {fmtUsd((Number(agg.pendingUp) / 1e18) * props.upUsd)}</span>]
+                  : undefined
+              }
+            />
+          )}
+          <ClAggEarnCell agg={agg} label={t('pos.earning')} />
+          {agg.stakedSharePct > 0 && <PCell k={t('pos.groupStakedShare')} v={share(agg.stakedSharePct)} />}
+        </div>
+      </div>
+      {open && (
+        <div className="pool-group-body">
+          {positions.map((p) => (
+            <ClCard
+              key={`${p.pool.protocol}-${p.tokenId}`}
+              pos={p}
+              data={data}
+              xtokens={xtokens}
+              user={props.user}
+              live={props.liveOf(p)}
+              stat={props.statOf(p.pool)}
+              upUsd={props.upUsd}
+              wethUsd={props.wethUsd}
+              nested
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function IncreasePanel(props: {
   pos: ClPosition
   npm: Address // position manager the NFT lives in (protocol-resolved)
@@ -749,7 +993,7 @@ export function IncreasePanel(props: {
 }) {
   const { pos, dec0, dec1, sqrtP } = props
   const { t } = useTranslation()
-  const [fund, setFund] = useState<'pair' | 'zap'>('pair')
+  const [fund, setFund] = useState<'pair' | 'zap'>('zap')
   const [a0, setA0] = useState('')
   const [a1, setA1] = useState('')
   const bal = useBalances(props.user, [pos.pool.token0, pos.pool.token1])
@@ -935,6 +1179,7 @@ export function IncreasePanel(props: {
 export function V2Card({
   pos,
   data,
+  xtokens = {},
   user,
   stat,
   upUsd,
@@ -942,14 +1187,16 @@ export function V2Card({
 }: {
   pos: V2Position
   data: PoolsData
+  /** metadata for pair tokens outside the UP33 registry (univ2 pairs) */
+  xtokens?: Record<string, TokenInfo>
   user: `0x${string}`
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
 }) {
   const { t } = useTranslation()
-  const t0 = tokenOf(data, pos.pool.token0)
-  const t1 = tokenOf(data, pos.pool.token1)
+  const t0 = xtokens[pos.pool.token0.toLowerCase()] ?? tokenOf(data, pos.pool.token0)
+  const t1 = xtokens[pos.pool.token1.toLowerCase()] ?? tokenOf(data, pos.pool.token1)
   const [busy, setBusy] = useState(false)
   const [removeOpen, setRemoveOpen] = useState(false)
   const m = v2PosMetrics({ pos, dec0: t0.decimals, dec1: t1.decimals, stat, upUsd, wethUsd })
@@ -965,17 +1212,8 @@ export function V2Card({
 
   const stakeAll = () =>
     run(async () => {
-      if (!pos.pool.gauge || pos.walletLp === 0n) return
-      if (!(await ensureAllowance(pos.pool.address, user, pos.pool.gauge, pos.walletLp, 'LP'))) return
-      await step(t('pos.stStakeLp', { pair: `${t0.symbol}/${t1.symbol}` }), () =>
-        writeContract(wagmiConfig, {
-          abi: v2GaugeAbi,
-          address: pos.pool.gauge!,
-          functionName: 'deposit',
-          args: [pos.walletLp],
-          chainId: CHAIN_ID,
-        }),
-      )
+      if (pos.pool.gauge)
+        await stakeV2Lp(pos.pool.address, pos.pool.gauge, pos.walletLp, user, `${t0.symbol}/${t1.symbol}`)
     })
 
   const unstakeAll = () =>
@@ -1026,6 +1264,32 @@ export function V2Card({
         txlog.push('err', t('pos.stNoWalletLp'))
         return
       }
+      if (pos.pool.protocol === 'univ2') {
+        // the vanilla router has no quoteRemoveLiquidity — mins come from the
+        // pro-rata reserve share, same tolerance as the up33 path
+        const expect0 = (lp * pos.pool.reserve0) / pos.pool.totalSupply
+        const expect1 = (lp * pos.pool.reserve1) / pos.pool.totalSupply
+        if (!(await ensureAllowance(pos.pool.address, user, UNI.V2_ROUTER, lp, 'LP'))) return
+        await step(t('pos.stRemoveLp', { pct, pair: `${t0.symbol}/${t1.symbol}` }), () =>
+          writeContract(wagmiConfig, {
+            abi: uniV2RouterAbi,
+            address: UNI.V2_ROUTER,
+            functionName: 'removeLiquidity',
+            args: [
+              pos.pool.token0,
+              pos.pool.token1,
+              lp,
+              applySlippage(expect0, SLIP_BPS),
+              applySlippage(expect1, SLIP_BPS),
+              user,
+              deadline(),
+            ],
+            chainId: CHAIN_ID,
+          }),
+        )
+        setRemoveOpen(false)
+        return
+      }
       const quote = await readContract(wagmiConfig, {
         abi: v2RouterAbi,
         address: ADDR.V2_ROUTER,
@@ -1061,11 +1325,20 @@ export function V2Card({
   return (
     <div className="card">
       <div className="card-head">
-        <span className="card-title">
-          {t0.symbol}/{t1.symbol}
-        </span>
+        <PairAddrs
+          className="card-title"
+          sym0={t0.symbol}
+          sym1={t1.symbol}
+          token0={pos.pool.token0}
+          token1={pos.pool.token1}
+          pool={pos.pool.address}
+        />
+        {/* no ProtoBadge on this card — the cyan badge below is the v2 identity,
+            so the DS jump keeps its slot right of the marks */}
+        <DexScreenerLink pool={pos.pool.address} />
         <Badge tone="cyan">
-          {pos.pool.stable ? 'v2 stable' : 'v2 volatile'} · {(pos.pool.feeBps / 100).toFixed(2)}%
+          {pos.pool.protocol === 'univ2' ? 'uni v2' : pos.pool.stable ? 'v2 stable' : 'v2 volatile'} ·{' '}
+          {(pos.pool.feeBps / 100).toFixed(2)}%
         </Badge>
         <a className="dim mono-sm" href={`${EXPLORER}/address/${pos.pool.address}`} target="_blank" rel="noreferrer">
           {shortAddr(pos.pool.address)}↗
@@ -1099,56 +1372,53 @@ export function V2Card({
         </div>
       </div>
 
-      <div className="kv mono-sm">
-        <span>
-          <span className="k">{t('pos.value')}</span>
-          {m.valueUsd !== null ? <b>{fmtUsd(m.valueUsd)}</b> : <span className="dim">{t('pos.noAnchor')}</span>}
-        </span>
-        <span>
-          <span className="k">{t('pos.v2Total')}</span>
-          {fmtAmount(pos.amount0, t0.decimals)} {t0.symbol} + {fmtAmount(pos.amount1, t1.decimals)} {t1.symbol}
-        </span>
-        <span>
-          <span className="k">{t('pos.v2WalletLp')}</span>
-          {fmtAmount(pos.walletLp, 18)}
-        </span>
-        <span>
-          <span className="k">{t('pos.v2StakedLp')}</span>
-          <span className={pos.stakedLp > 0n ? 'green' : ''}>{fmtAmount(pos.stakedLp, 18)}</span>
-        </span>
+      <div className="pmetrics mono-sm">
+        <PCell
+          k={t('pos.value')}
+          v={m.valueUsd !== null ? <b>{fmtUsd(m.valueUsd)}</b> : <span className="dim">{t('pos.noAnchor')}</span>}
+          subs={[
+            `${fmtAmount(pos.amount0, t0.decimals)} ${t0.symbol}`,
+            `${fmtAmount(pos.amount1, t1.decimals)} ${t1.symbol}`,
+          ]}
+        />
+        <PCell
+          k={t('pos.v2Lp')}
+          v={fmtAmount(pos.stakedLp + pos.walletLp, 18)}
+          subs={[
+            t('pos.v2Staked', { n: fmtAmount(pos.stakedLp, 18) }),
+            t('pos.v2Wallet', { n: fmtAmount(pos.walletLp, 18) }),
+          ]}
+        />
         {pos.earned > 0n && (
-          <span>
-            <span className="k">{t('pos.pendingUpK')}</span>
-            <span className="green">
-              {fmtAmount(pos.earned, 18)}
-              {upUsd !== undefined && <span className="dim"> ≈ {fmtUsd((Number(pos.earned) / 1e18) * upUsd)}</span>}
-            </span>
-          </span>
+          <PCell
+            k={t('pos.pendingUpK')}
+            v={`${fmtAmount(pos.earned, 18)} UP`}
+            subs={
+              upUsd !== undefined
+                ? [<span className="amber">≈ {fmtUsd((Number(pos.earned) / 1e18) * upUsd)}</span>]
+                : undefined
+            }
+          />
         )}
         {hasFees && (
-          <span>
-            <span className="k">{t('pos.v2Claimable')}</span>
-            {fmtAmount(pos.claimable0, t0.decimals)} {t0.symbol} + {fmtAmount(pos.claimable1, t1.decimals)} {t1.symbol}
-            {m.feesUsd !== null && m.feesUsd > 0.01 && <span className="amber"> ≈ {fmtUsd(m.feesUsd)}</span>}
-          </span>
+          <PCell
+            k={t('pos.v2Claimable')}
+            v={
+              m.feesUsd !== null && m.feesUsd > 0.01 ? (
+                <span className="amber">≈ {fmtUsd(m.feesUsd)}</span>
+              ) : (
+                <span className="dim">…</span>
+              )
+            }
+            subs={[
+              `${fmtAmount(pos.claimable0, t0.decimals)} ${t0.symbol}`,
+              `${fmtAmount(pos.claimable1, t1.decimals)} ${t1.symbol}`,
+            ]}
+          />
         )}
+        {m.staked && <EarnCell e={m.staked} v2 label={m.wallet ? t('pos.earningStaked') : t('pos.earning')} />}
+        {m.wallet && <EarnCell e={m.wallet} v2 label={m.staked ? t('pos.earningWallet') : t('pos.earning')} />}
       </div>
-      {(m.staked || m.wallet) && (
-        <div className="kv mono-sm pos-earn">
-          {m.staked && (
-            <span>
-              <span className="k">{m.wallet ? t('pos.earningStaked') : t('pos.earning')}</span>
-              <EarnLine e={m.staked} v2 />
-            </span>
-          )}
-          {m.wallet && (
-            <span>
-              <span className="k">{m.staked ? t('pos.earningWallet') : t('pos.earning')}</span>
-              <EarnLine e={m.wallet} v2 />
-            </span>
-          )}
-        </div>
-      )}
 
       {removeOpen && (
         <div className="expander">
@@ -1172,46 +1442,93 @@ export function V2Card({
 
 // ---------------- helpers ----------------
 
-/** one-line "what is this position earning right now" renderer */
-function EarnLine({ e, v2 }: { e: Earning; v2?: boolean }) {
+/** one metrics cell: small uppercase label, prominent primary value, dim
+ *  stacked sub-lines. The card body and group header both speak this. */
+function PCell(props: { k: ReactNode; tip?: string; v: ReactNode; subs?: ReactNode[] }) {
+  return (
+    <div className="pcell">
+      <span className="k" title={props.tip}>
+        {props.k}
+      </span>
+      <span className="v">{props.v}</span>
+      {props.subs?.map((s, i) => (
+        <span key={i} className="sub">
+          {s}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/** "what is this position earning right now" as a cell: primary = APR (or the
+ *  colored idle/stalled state), subs = accrual rates. Color carries STATE only
+ *  (green dot = actively earning, red = stalled, amber = paused); the
+ *  pool-share detail lives in the label tooltip. */
+function EarnCell({ e, v2, label }: { e: Earning; v2?: boolean; label: string }) {
   const { t } = useTranslation()
   const share = (s: number) => (s < 0.01 ? '<0.01%' : s.toFixed(2) + '%')
   switch (e.kind) {
-    case 'emissions':
+    case 'emissions': {
+      const emit = t('pos.earnEmit', { n: fmtNum(e.upPerDay, 3) })
+      const subs: ReactNode[] = e.aprPct !== null ? [emit] : []
+      if (e.usdPerDay !== null) subs.push(t('pos.earnUsdDay', { usd: fmtUsd(e.usdPerDay) }))
       return (
-        <span className="green">
-          {t('pos.earnEmit', { n: fmtNum(e.upPerDay, 3) })}
-          {e.usdPerDay !== null ? ` ${t('pos.earnUsdDay', { usd: fmtUsd(e.usdPerDay) })}` : ''}
-          {e.aprPct !== null ? ` · ${t('pos.earnApr', { apr: fmtApr(e.aprPct) })}` : ''} ·{' '}
-          {v2
-            ? t('pos.earnShareGauge', { share: share(e.sharePct) })
-            : t('pos.earnShareStaked', { share: share(e.sharePct) })}
-        </span>
+        <PCell
+          k={label}
+          tip={
+            v2 ? t('pos.earnShareGauge', { share: share(e.sharePct) }) : t('pos.earnShareStaked', { share: share(e.sharePct) })
+          }
+          v={
+            <span>
+              <span className="green">● </span>
+              {e.aprPct !== null ? <b>{t('pos.earnApr', { apr: fmtApr(e.aprPct) })}</b> : emit}
+            </span>
+          }
+          subs={subs}
+        />
       )
+    }
     case 'emissions-idle':
-      return e.reason === 'out-of-range' ? (
-        <span className="red" title={t('pos.earnOutStakedTip')}>
-          {t('pos.earnOutStaked')}
-        </span>
-      ) : (
-        <span className="amber">{t('pos.earnEnded')}</span>
-      )
-    case 'fees':
       return (
-        <span>
-          {t('pos.earnFeeApr')} <b>{fmtApr(e.aprPct)}</b> {t('pos.earnUsdDay', { usd: fmtUsd(e.usdPerDay) })} ·{' '}
-          {v2
-            ? t('pos.earnSharePool', { share: share(e.sharePct) })
-            : t('pos.earnShareActive', { share: share(e.sharePct) })}
-          {!v2 && <> · {t('pos.earnWhileInRange')}</>}
-        </span>
+        <PCell
+          k={label}
+          tip={e.reason === 'out-of-range' ? t('pos.earnOutStakedTip') : undefined}
+          v={
+            e.reason === 'out-of-range' ? (
+              <span className="red">● {t('pos.earnOutStaked')}</span>
+            ) : (
+              <span className="amber">● {t('pos.earnEnded')}</span>
+            )
+          }
+        />
       )
+    case 'fees': {
+      const subs: ReactNode[] = [t('pos.earnUsdDay', { usd: fmtUsd(e.usdPerDay) })]
+      if (!v2) subs.push(t('pos.earnWhileInRange'))
+      return (
+        <PCell
+          k={label}
+          tip={
+            v2 ? t('pos.earnSharePool', { share: share(e.sharePct) }) : t('pos.earnShareActive', { share: share(e.sharePct) })
+          }
+          v={
+            <span>
+              <span className="green">● </span>
+              <b>
+                {t('pos.earnFeeApr')} {fmtApr(e.aprPct)}
+              </b>
+            </span>
+          }
+          subs={subs}
+        />
+      )
+    }
     case 'fees-unknown':
-      return <span className="dim">{t('pos.earnUnknown')}</span>
+      return <PCell k={label} v={<span className="dim">{t('pos.earnUnknown')}</span>} />
     case 'out-of-range':
-      return <span className="red">{t('pos.earnOut')}</span>
+      return <PCell k={label} v={<span className="red">● {t('pos.earnOut')}</span>} />
     case 'empty':
-      return <span className="dim">{t('pos.earnEmpty')}</span>
+      return <PCell k={label} v={<span className="dim">{t('pos.earnEmpty')}</span>} />
   }
 }
 

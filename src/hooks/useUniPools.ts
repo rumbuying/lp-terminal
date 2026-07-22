@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { usePublicClient } from 'wagmi'
 import type { PublicClient } from 'viem'
+import { CHAIN_ID } from '../config/addresses'
 import { fetchUniBrowse } from '../lib/uniBrowse'
 import { fetchUniIndex } from '../lib/uniIndex'
 import type { PoolStat } from '../lib/poolstats'
@@ -24,11 +25,12 @@ export type UniPoolsData = {
  * on-chain factory.getPool verification (v3 only, top 30).
  */
 export function useUniPools(query: string, minTvl: number, proto?: 'univ2' | 'univ3') {
-  const pc = usePublicClient()
+  const pc = usePublicClient({ chainId: CHAIN_ID })
   return useQuery<UniPoolsData>({
     queryKey: ['uniPools', query.trim().toLowerCase(), minTvl, proto ?? 'all'],
     enabled: !!pc,
-    refetchInterval: 30_000,
+    // matches the indexer's frontpage sweep — hits our own API, not the RPC
+    refetchInterval: 15_000,
     queryFn: async () => {
       const idx = await fetchUniIndex(query, minTvl, proto)
       if (idx) return { ...idx, dropped: 0, source: 'index' }

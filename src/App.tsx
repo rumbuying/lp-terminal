@@ -9,11 +9,10 @@ import { queryClient } from './config/query'
 import { CHAIN_ID, EXPLORER } from './config/addresses'
 import { currentLang } from './i18n'
 import { Header, type TabId } from './components/Header'
-import { LangControl } from './components/LangControl'
 import { RpcControl } from './components/RpcControl'
 import { ThemeControl } from './components/ThemeControl'
 import { THEMES, useTheme } from './lib/theme'
-import { TxLogPanel } from './components/TxLogPanel'
+import { BridgeTab } from './components/tabs/BridgeTab'
 import { LabTab } from './components/tabs/LabTab'
 import { PoolsTab } from './components/tabs/PoolsTab'
 import { PositionsTab } from './components/tabs/PositionsTab'
@@ -45,12 +44,12 @@ export default function App() {
   )
 }
 
-const KEYS: Record<string, TabId> = { '1': 'pools', '2': 'positions', '3': 'swap' }
+const KEYS: Record<string, TabId> = { '1': 'pools', '2': 'positions', '3': 'swap', '5': 'bridge' }
 
 const validTab = (h: string): TabId | null => {
   if (h === 'limit') return 'swap' // LIMIT mode is a sub-view of the swap tab
   if (h === 'lab') return 'pools' // hidden component lab rides the pools slot
-  return (['pools', 'positions', 'swap'] as const).includes(h as TabId) ? (h as TabId) : null
+  return (['pools', 'positions', 'swap', 'bridge'] as const).includes(h as TabId) ? (h as TabId) : null
 }
 
 function Shell() {
@@ -97,7 +96,7 @@ function Shell() {
     <div className="app">
       <Header tab={tab} onTab={setTab} />
       <div className="main">
-        {isConnected && chainId !== CHAIN_ID && (
+        {isConnected && chainId !== CHAIN_ID && tab !== 'bridge' && (
           <div className="banner">
             {t('app.wrongNetwork')}
             <Btn onClick={() => switchChain({ chainId: CHAIN_ID })}>{t('app.switch')}</Btn>
@@ -106,14 +105,13 @@ function Shell() {
         {tab === 'pools' && (location.hash === '#lab' ? <LabTab /> : <PoolsTab />)}
         {tab === 'positions' && <PositionsTab />}
         {tab === 'swap' && <SwapTab />}
+        {tab === 'bridge' && <BridgeTab />}
       </div>
-      <TxLogPanel />
       <div className="footer">
-        <span>{t('app.tagline')}</span>
-        <span>{t('app.keys')}</span>
+        <span className="hide-m">{t('app.tagline')}</span>
+        <span className="hide-m">{t('app.keys')}</span>
         <RpcControl />
         <ThemeControl />
-        <LangControl />
         <a href={EXPLORER} target="_blank" rel="noreferrer">
           {t('app.blockscout')}
         </a>

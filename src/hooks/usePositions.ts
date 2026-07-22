@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import { usePublicClient } from 'wagmi'
 import type { Address, PublicClient } from 'viem'
-import { clGaugeAbi, clPmAbi, erc20Abi, uniV3FactoryAbi, uniV3PmAbi, uniV3PoolAbi, v2GaugeAbi, v2PoolAbi } from '../abi'
-import { ADDR, UNI } from '../config/addresses'
+import { clGaugeAbi, clPmAbi, erc20Abi, uniV2PairAbi, uniV3FactoryAbi, uniV3PmAbi, uniV3PoolAbi, v2GaugeAbi, v2PoolAbi } from '../abi'
+import { ADDR, CHAIN_ID, EXPLORER, UNI } from '../config/addresses'
 import { MAX_UINT128, getAmountsForLiquidity, getSqrtRatioAtTick } from '../lib/clmath'
+import { previewV2ClaimFees } from '../lib/v2Fees'
 import type { ClPool, ClPosition, PoolsData, PositionsData, TokenInfo, V2Pool, V2Position } from '../types'
 import { usePools } from './usePools'
 
@@ -34,6 +35,111 @@ type RawPos = readonly [
 // same tuple shape as RawPos, but index 4 is the uint24 fee tier (univ3 NPMs
 // are fee-keyed where Slipstream is tickSpacing-keyed)
 type RawUniPos = RawPos
+
+/**
+ * Uniswap v2 wallet positions. V2 LP is a plain ERC-20 — there is no NFT
+ * enumeration like the NPMs, and the official factory holds 15k+ pairs
+ * (mostly dust), so pair-side sweeps are out. Discover from the WALLET
+ * instead: Blockscout lists the address's ERC-20 holdings in one call, and
+ * every UNI-V2 entry is verified on-chain (factory() must be the official
+ * deployment — a spoofed "Uniswap V2" token fails this) with balance,
+ * reserves and supply read fresh. Blockscout being down hides univ2
+ * positions for that refresh only — same degrade contract as the univ3
+ * fetch below.
+ */
+async function fetchUniV2Positions(
+  pc: PublicClient,
+  user: Address,
+): Promise<{ v2: V2Position[]; tokens: Record<string, TokenInfo> }> {
+  const res = await fetch(`${EXPLORER}/api/v2/addresses/${user}/tokens?type=ERC-20`, {
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!res.ok) throw new Error(`blockscout ${res.status}`)
+  type Held = { token?: { symbol?: string | null; address?: string; address_hash?: string }; value?: string }
+  const body = (await res.json()) as { items?: Held[] }
+  const pairs = [
+    ...new Set(
+      (body.items ?? [])
+        .filter((it) => it.token?.symbol === 'UNI-V2' && BigInt(it.value ?? '0') > 0n)
+        .map((it) => (it.token?.address_hash ?? it.token?.address)?.toLowerCase())
+        .filter((a): a is string => !!a),
+    ),
+  ] as Address[]
+  if (pairs.length === 0) return { v2: [], tokens: {} }
+
+  const det = await mc(
+    pc,
+    pairs.flatMap((p) => [
+      { abi: uniV2PairAbi, address: p, functionName: 'factory' },
+      { abi: uniV2PairAbi, address: p, functionName: 'token0' },
+      { abi: uniV2PairAbi, address: p, functionName: 'token1' },
+      { abi: uniV2PairAbi, address: p, functionName: 'getReserves' },
+      { abi: uniV2PairAbi, address: p, functionName: 'totalSupply' },
+      { abi: uniV2PairAbi, address: p, functionName: 'balanceOf', args: [user] },
+    ]),
+  )
+
+  const v2: V2Position[] = []
+  pairs.forEach((p, j) => {
+    const base = j * 6
+    const factory = ok<Address>(det[base])
+    const token0 = ok<Address>(det[base + 1])
+    const token1 = ok<Address>(det[base + 2])
+    const reserves = ok<readonly [bigint, bigint, number]>(det[base + 3])
+    const totalSupply = ok<bigint>(det[base + 4]) ?? 0n
+    const walletLp = ok<bigint>(det[base + 5]) ?? 0n
+    if (factory?.toLowerCase() !== UNI.V2_FACTORY.toLowerCase()) return
+    if (!token0 || !token1 || !reserves || walletLp === 0n || totalSupply === 0n) return
+    const pool: V2Pool = {
+      kind: 'v2',
+      protocol: 'univ2',
+      address: p,
+      token0,
+      token1,
+      stable: false,
+      reserve0: reserves[0],
+      reserve1: reserves[1],
+      totalSupply,
+      gaugeTotalSupply: 0n,
+      feeBps: 30, // uniswap v2 flat 0.30%, rolled into reserves
+      gauge: null,
+      gaugeAlive: false,
+      weight: 0n,
+      rewardRate: 0n,
+      periodFinish: 0n,
+    }
+    v2.push({
+      pool,
+      walletLp,
+      stakedLp: 0n,
+      earned: 0n,
+      claimable0: 0n,
+      claimable1: 0n,
+      amount0: (walletLp * reserves[0]) / totalSupply,
+      amount1: (walletLp * reserves[1]) / totalSupply,
+    })
+  })
+
+  // erc20 metadata for pair tokens outside the UP33 registry, so any pair
+  // renders with real symbols/decimals
+  const tokens: Record<string, TokenInfo> = {}
+  const uniq = [...new Set(v2.flatMap((r) => [r.pool.token0, r.pool.token1]))]
+  const meta = await mc(
+    pc,
+    uniq.flatMap((a) => [
+      { abi: erc20Abi, address: a, functionName: 'symbol' },
+      { abi: erc20Abi, address: a, functionName: 'decimals' },
+    ]),
+  )
+  uniq.forEach((a, j) => {
+    tokens[a.toLowerCase()] = {
+      address: a,
+      symbol: ok<string>(meta[j * 2]) ?? a.slice(0, 6) + '…',
+      decimals: ok<number>(meta[j * 2 + 1]) ?? 18,
+    }
+  })
+  return { v2, tokens }
+}
 
 /**
  * Uniswap v3 wallet positions (official Robinhood Chain deployment). Pools are
@@ -194,6 +300,7 @@ async function fetchPositions(
 ): Promise<PositionsData> {
   // univ3 discovery runs concurrently with the UP33 passes below
   const uniP = fetchUniPositions(pc, user, pools).catch(() => ({ cl: [], tokens: {} }))
+  const uniV2P = fetchUniV2Positions(pc, user).catch(() => ({ v2: [], tokens: {} }))
   const clPools = pools.pools.filter((p): p is ClPool => p.kind === 'cl')
   const v2Pools = pools.pools.filter((p): p is V2Pool => p.kind === 'v2')
   const clGauges = clPools.filter((p) => p.gauge)
@@ -366,6 +473,18 @@ async function fetchPositions(
       }),
   )
 
+  // Solidly claimable getters only expose fees materialized by a prior pool
+  // interaction. Simulating claimFees as the owner includes the latest index.
+  await Promise.all(
+    v2Raw
+      .filter((r) => r.pool.protocol === 'up33' && r.walletLp > 0n)
+      .map(async (r) => {
+        const [fee0, fee1] = await previewV2ClaimFees(pc, r.pool.address, user, [r.claimable0, r.claimable1])
+        r.claimable0 = fee0
+        r.claimable1 = fee1
+      }),
+  )
+
   const v2: V2Position[] = v2Raw.map((r) => {
     const lp = r.walletLp + r.stakedLp
     const ts = r.pool.totalSupply
@@ -381,14 +500,14 @@ async function fetchPositions(
     }
   })
 
-  // staked first, then wallet up33, then univ3
-  const rank = (p: ClPosition) => (p.staked ? 0 : p.pool.protocol === 'up33' ? 1 : 2)
-  cl.sort((a, b) => rank(a) - rank(b))
-  return { cl, v2, tokens: uni.tokens }
+  const uniV2 = await uniV2P
+  v2.push(...uniV2.v2)
+
+  return { cl, v2, tokens: { ...uni.tokens, ...uniV2.tokens } }
 }
 
 export function usePositions(user?: Address) {
-  const pc = usePublicClient()
+  const pc = usePublicClient({ chainId: CHAIN_ID })
   const pools = usePools()
   return useQuery({
     queryKey: ['positions', user],

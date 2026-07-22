@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 import { useAccount } from 'wagmi'
 import { readContract, writeContract } from 'wagmi/actions'
-import { formatUnits, parseUnits } from 'viem'
+import { formatUnits, parseUnits, type TransactionReceipt } from 'viem'
 import { clPmAbi, uniV2RouterAbi, uniV3PmAbi, v2RouterAbi } from '../../abi'
 import { ADDR, CHAIN_ID, EXPLORER, UNI, WEEK } from '../../config/addresses'
 import { wagmiConfig } from '../../config/wagmi'
@@ -29,19 +29,26 @@ import {
   stakedShareOf,
   type AddSim,
 } from '../../lib/apr'
-import { fmtAmount, fmtCompactAmount, fmtNum, fmtUsd, nowSec } from '../../lib/format'
-import { deadline, ensureAllowance, fetchSqrtPriceX96, step } from '../../lib/tx'
+import { fmtAmount, fmtCompact, fmtCompactAmount, fmtNum, fmtUsd, nowSec } from '../../lib/format'
+import { poolStatWithFallback } from '../../lib/poolStatFallback'
+import { deadline, ensureAllowance, fetchSqrtPriceX96, receivedOf, step } from '../../lib/tx'
+import { autostake } from '../../lib/autostake'
+import { poolStakeable } from '../../lib/zap'
+import { stakeClNft, stakeV2Lp, mintedTokenId } from '../../lib/stake'
 import { useBalances } from '../../hooks/useBalances'
 import { usePositions } from '../../hooks/usePositions'
-import { usePoolStats } from '../../hooks/usePoolStats'
+import { useDsFallbackStats, usePoolStats } from '../../hooks/usePoolStats'
 import { useUpPrice } from '../../hooks/useUpPrice'
 import type { PoolStat } from '../../lib/poolstats'
 import { poolTypeLabel, tokenOf, usePools } from '../../hooks/usePools'
 import { useUniPools } from '../../hooks/useUniPools'
 import type { ClPool, Pool, PoolsData, V2Pool } from '../../types'
+import { DexScreenerLink } from '../DexScreenerLink'
 import { Flash } from '../Flash'
+import { PairAddrs } from '../PairAddrs'
 import { ProtoBadge } from '../ProtoBadge'
 import { RangeBar } from '../RangeBar'
+import { StakeAfterToggle } from '../StakeAfterToggle'
 import { ZapPanel } from '../ZapPanel'
 import { AmountRow, Btn, NumInput } from '../ui'
 
@@ -49,6 +56,10 @@ const SLIP_BPS = 100
 
 type SortKey = 'vol' | 'fees24' | 'tvl' | 'feeApr' | 'rewards' | null
 type ProtoFilter = 'all' | 'up33' | 'univ3' | 'univ2'
+
+// Top-level tabs unmount; retain only the browsing choices for this session.
+let rememberedSort: SortKey = 'vol'
+let rememberedProto: ProtoFilter = 'all'
 
 export function PoolsTab() {
   const { t } = useTranslation()
@@ -59,13 +70,24 @@ export function PoolsTab() {
   const positions = usePositions(user)
   const [q, setQ] = useState('') // one input: filters up33 locally + queries the indexer
   const [open, setOpen] = useState<string | null>(null)
-  const [sort, setSort] = useState<SortKey>('tvl') // browse default: biggest pools first
+  const [sort, setSortState] = useState<SortKey>(rememberedSort)
   const [onlyMine, setOnlyMine] = useState(false)
-  const [proto, setProto] = useState<ProtoFilter>('all')
+  const [proto, setProtoState] = useState<ProtoFilter>(rememberedProto)
   const [uniQuery, setUniQuery] = useState('') // '' = whole catalog by TVL (index) / WETH pools (fallback)
   const [hideDust, setHideDust] = useState(true) // 95% of the uniswap catalog is <$1k meme dust
+  // APR explainer popover, anchored under the ⓘ that opened it (fixed: the
+  // sticky thead is its own stacking context, so the pop must live outside)
+  const [aprInfo, setAprInfo] = useState<{ top: number; right: number } | null>(null)
   const uni = useUniPools(uniQuery, hideDust ? 1_000 : 0, proto === 'univ2' || proto === 'univ3' ? proto : undefined)
   const filterRef = useRef<HTMLInputElement>(null)
+  const setSort = (next: SortKey) => {
+    rememberedSort = next
+    setSortState(next)
+  }
+  const setProto = (next: ProtoFilter) => {
+    rememberedProto = next
+    setProtoState(next)
+  }
 
   // typing filters the local list instantly; the catalog query follows 350ms behind
   useEffect(() => {
@@ -94,6 +116,40 @@ export function PoolsTab() {
     return s
   }, [positions.data])
 
+  // stats resolve in three layers: up33 primary (dexscreener CL + official v2
+  // subgraph) → uniswap indexer (chain TVL + geckoterminal volume) → dexscreener
+  // backstop for rows still missing a number (geckoterminal only tracks its
+  // listed subset — measured 53 of the top-200 TVL rows). Field-level merge so
+  // the indexer's chain-derived TVL keeps priority over dexscreener's estimate.
+  const dsFallbackAddrs = useMemo(() => {
+    if (!stats.data) return [] // wait for the primary pass — else the first render batches the whole catalog
+    const byPool = stats.data.byPool
+    const uniStats = uni.data?.stats
+    const out: string[] = []
+    for (const p of [...(pools.data?.pools ?? []), ...(uni.data?.pools ?? [])]) {
+      const a = p.address.toLowerCase()
+      const s = byPool[a] ?? uniStats?.[a]
+      if (!s || s.vol24hUsd == null || s.liqUsd == null) out.push(a)
+      if (out.length >= 90) break // 3 batched calls — rows past the cap keep their "—"
+    }
+    return out
+  }, [pools.data, uni.data, stats.data])
+  const dsFb = useDsFallbackStats(dsFallbackAddrs)
+  const mergedStats = useMemo(() => {
+    const byPool = stats.data?.byPool
+    const uniStats = uni.data?.stats
+    const out: Record<string, PoolStat> = {}
+    for (const p of [...(pools.data?.pools ?? []), ...(uni.data?.pools ?? [])]) {
+      const a = p.address.toLowerCase()
+      const base = byPool?.[a] ?? uniStats?.[a]
+      const fb = dsFb.data?.[a]
+      const s = poolStatWithFallback(base, fb)
+      if (s) out[a] = s
+    }
+    return out
+  }, [pools.data, uni.data, stats.data, dsFb.data])
+  const statOf = (p: Pool) => mergedStats[p.address.toLowerCase()]
+
   if (pools.isLoading)
     return (
       <div className="dim">
@@ -108,9 +164,6 @@ export function PoolsTab() {
   const data: PoolsData = uni.data
     ? { ...pools.data, tokens: { ...pools.data.tokens, ...uni.data.tokens } }
     : pools.data
-  const byPool = stats.data?.byPool
-  const uniStats = uni.data?.stats
-  const statOf = (p: Pool) => byPool?.[p.address.toLowerCase()] ?? uniStats?.[p.address.toLowerCase()]
   let list = [...pools.data.pools, ...(uni.data?.pools ?? [])].filter((p) => {
     if (onlyMine && !mySet.has(p.address.toLowerCase())) return false
     if (proto !== 'all' && p.protocol !== proto) return false
@@ -134,14 +187,37 @@ export function PoolsTab() {
   }
 
   const totalWeight = data.protocol.totalWeight
-  const th = (key: Exclude<SortKey, null>, label: string) => (
+  const th = (key: Exclude<SortKey, null>, label: string, extra = '', sub?: string, info = false) => (
     <th
-      className={`num sortable ${sort === key ? 'on' : ''}`}
+      className={`num sortable ${extra} ${sort === key ? 'on' : ''}`}
       onClick={() => setSort(sort === key ? null : key)}
       title={t('pools.sortTip')}
     >
       {label}
       {sort === key ? ' ▼' : ''}
+      {/* the space is load-bearing: JSX eats the newline, and without a break
+          opportunity this inline-block cannot wrap — on a 320px phone it hung
+          4px past the table and put the sideways scrollbar back */}
+      {info && ' '}
+      {info && (
+        <button
+          className="info-btn"
+          title={t('pools.footnoteTip')}
+          onClick={(e) => {
+            e.stopPropagation() // the th click sorts
+            if (aprInfo) {
+              setAprInfo(null)
+              return
+            }
+            const r = e.currentTarget.getBoundingClientRect()
+            setAprInfo({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right - 4) })
+          }}
+        >
+          ⓘ
+        </button>
+      )}
+      {/* mobile stacks a second metric into this column; name it in the header */}
+      {sub && <span className="cell-sub show-m">{sub}</span>}
     </th>
   )
 
@@ -218,13 +294,20 @@ export function PoolsTab() {
           <thead>
             <tr>
               <th>{t('pools.thPair')}</th>
-              <th>{t('pools.thPrice')}</th>
-              {th('tvl', t('pools.thTvl'))}
-              {th('vol', t('pools.thVol'))}
-              {th('fees24', t('pools.thFees'))}
-              {th('feeApr', t('pools.thFeeApr'))}
-              {th('rewards', t('pools.thRewards'))}
-              <th></th>
+              {/* mobile keeps two stacked columns: TVL/VOL and FEE APR/REWARDS.
+                  PRICE/RESERVES is the widest cell in the table and the first to
+                  go: below a laptop it was pushing TVL and VOL off the right
+                  edge, and its content ("24.9M CASHCAT + 12.4 WETH") has no
+                  natural width bound. */}
+              <th className="hide-t">{t('pools.thPrice')}</th>
+              {th('tvl', t('pools.thTvl'), '', t('pools.thVol'))}
+              {th('vol', t('pools.thVol'), 'hide-m')}
+              {th('fees24', t('pools.thFees'), 'hide-m')}
+              {th('feeApr', t('pools.thFeeApr'), '', t('pools.thRewards'), true)}
+              {th('rewards', t('pools.thRewards'), 'hide-m')}
+              {/* the row itself is the toggle everywhere, so this column is pure
+                  width below a laptop — same trade the phone layout already made */}
+              <th className="hide-t"></th>
             </tr>
           </thead>
           <tbody>
@@ -246,9 +329,14 @@ export function PoolsTab() {
           </tbody>
         </table>
       </div>
-      <div className="dim mono-sm" style={{ marginTop: 6 }} title={t('pools.footnoteTip')}>
-        <Trans i18nKey="pools.footnote" components={[<b className="dim" key="0" />, <b className="dim" key="1" />]} />
-      </div>
+      {aprInfo && (
+        <>
+          <div className="tsel-backdrop" onClick={() => setAprInfo(null)} />
+          <div className="info-pop" style={{ top: aprInfo.top, right: aprInfo.right }}>
+            <Trans i18nKey="pools.footnote" components={[<b key="0" />, <b key="1" />]} />
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -281,18 +369,35 @@ function PoolRow(props: {
 
   return (
     <>
-      <tr className="rowhover">
-        <td>
-          <div>
-            {props.mine && (
-              <span className="mydot" title={t('pools.mineDotTip')}>
-                ●
-              </span>
-            )}
-            <b>
-              {t0.symbol}/{t1.symbol}
-            </b>
-            {p.protocol !== 'up33' && <ProtoBadge proto={p.protocol} mini />}
+      <tr
+        className={`rowhover${props.mine ? ' is-mine' : ''}${props.open ? ' is-open' : ''}`}
+        onClick={(e) => {
+          // the row is the toggle, but the controls inside it own their own
+          // clicks: ADD LP already calls onToggle (bubbling would fire it a
+          // second time and snap the panel shut), and ↗ goes to the explorer.
+          // closest() covers anything interactive added here later.
+          if ((e.target as HTMLElement).closest('button, a')) return
+          // a click that ends a drag-select is the user copying a number,
+          // not asking to expand
+          if (window.getSelection()?.toString()) return
+          props.onToggle()
+        }}
+      >
+        <td title={props.mine ? t('pools.mineDotTip') : undefined}>
+          <div className="pair-line">
+            <PairAddrs
+              className="pair-name"
+              sym0={t0.symbol}
+              sym1={t1.symbol}
+              token0={p.token0}
+              token1={p.token1}
+              pool={p.address}
+            />
+            {/* every protocol gets its mark, UP33 included — it was the unmarked
+                default back when this table was UP33-only, but in a three-protocol
+                list "no badge" is not an identity. POSITIONS already badges all three. */}
+            <ProtoBadge proto={p.protocol} mini />
+            <DexScreenerLink pool={p.address} />
           </div>
           <div className="pair-sub">
             <span className="cyan">
@@ -314,23 +419,17 @@ function PoolRow(props: {
             >
               {feePct.toFixed(feePct < 0.1 ? 3 : 2)}%
             </span>
-            {p.protocol === 'up33' && (
+            {/* a killed gauge still matters (staking there earns nothing) — the
+                healthy/no-gauge states were the noise and are gone */}
+            {p.protocol === 'up33' && p.gauge && !p.gaugeAlive && (
               <>
                 {' · '}
-                {p.gauge ? (
-                  p.gaugeAlive ? (
-                    <span className="green">{t('pools.gauge')}</span>
-                  ) : (
-                    <span className="red">{t('pools.killed')}</span>
-                  )
-                ) : (
-                  <span>{t('pools.noGauge')}</span>
-                )}
+                <span className="red">{t('pools.killed')}</span>
               </>
             )}
           </div>
         </td>
-        <td className="mono-sm">
+        <td className="mono-sm hide-t">
           {p.kind === 'v2' ? (
             <>
               {fmtCompactAmount(p.reserve0, t0.decimals)} {t0.symbol} + {fmtCompactAmount(p.reserve1, t1.decimals)} {t1.symbol}
@@ -340,18 +439,42 @@ function PoolRow(props: {
           )}
         </td>
         <td className="num">
-          {stat?.liqUsd != null && stat.liqUsd > 0 ? fmtUsd(stat.liqUsd) : <span className="dim">—</span>}
+          <Flash v={stat?.liqUsd}>
+            {stat?.liqUsd != null && stat.liqUsd > 0 ? (
+              <>
+                <span className="hide-m">{fmtUsd(stat.liqUsd)}</span>
+                {/* phone columns: $2.8M, not $2,844,349 */}
+                <span className="show-m">${fmtCompact(stat.liqUsd)}</span>
+              </>
+            ) : (
+              <span className="dim">—</span>
+            )}
+          </Flash>
+          {/* phone: VOL 24H stacks under TVL */}
+          <span className="cell-sub show-m">
+            {stat?.vol24hUsd != null ? `$${fmtCompact(stat.vol24hUsd)}` : '—'}
+          </span>
         </td>
-        <td className="num">
-          {stat?.vol24hUsd != null ? fmtUsd(stat.vol24hUsd) : <span className="dim">—</span>}
+        <td className="num hide-m">
+          <Flash v={stat?.vol24hUsd}>
+            {stat?.vol24hUsd != null ? fmtUsd(stat.vol24hUsd) : <span className="dim">—</span>}
+          </Flash>
         </td>
-        <td className="num">
+        <td className="num hide-m">
           {fees24 != null ? <span className="amber">{fmtUsd(fees24)}</span> : <span className="dim">—</span>}
         </td>
         <td className="num" title="unstaked LP net fee yield (staked LPs earn 0 fees)">
           {feeApr != null ? fmtApr(feeApr) : <span className="dim">—</span>}
+          {/* phone: reward APR stacks under fee APR */}
+          <span className="cell-sub show-m">
+            {p.protocol === 'up33' && emitApr != null ? (
+              <span className="green">{fmtApr(emitApr)}</span>
+            ) : (
+              '—'
+            )}
+          </span>
         </td>
-        <td className="num" title={t('pools.rewardsTip')}>
+        <td className="num hide-m" title={t('pools.rewardsTip')}>
           {p.protocol === 'up33' ? (
             <>
               {emitApr != null ? <span className="green">{fmtApr(emitApr)}</span> : <span className="dim">—</span>}
@@ -367,7 +490,8 @@ function PoolRow(props: {
             <span className="dim">—</span>
           )}
         </td>
-        <td className="num">
+        {/* phone and tablet: the row itself is the toggle, the button column just steals width */}
+        <td className="num hide-t">
           <Btn tone="ghost" onClick={props.onToggle}>
             {props.open ? t('common.close') : t('pools.addLp')}
           </Btn>{' '}
@@ -444,7 +568,7 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
   const { address: user } = useAccount()
   const t0 = tokenOf(data, pool.token0)
   const t1 = tokenOf(data, pool.token1)
-  const [fund, setFund] = useState<'pair' | 'zap'>('pair')
+  const [fund, setFund] = useState<'pair' | 'zap'>('zap')
   const [a0, setA0] = useState('')
   const [a1, setA1] = useState('')
   const [busy, setBusy] = useState(false)
@@ -487,6 +611,7 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
 
   const add = async () => {
     if (!user) return
+    const stakeAfter = autostake.get() // captured at click, like the zap flow
     setBusy(true)
     try {
       const amt0 = safeParse(a0, t0.decimals)
@@ -494,11 +619,12 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
       if (amt0 === 0n || amt1 === 0n) return
       if (!(await ensureAllowance(pool.token0, user, router, amt0, t0.symbol))) return
       if (!(await ensureAllowance(pool.token1, user, router, amt1, t1.symbol))) return
+      let rcpt: TransactionReceipt | null
       if (uni2) {
         // vanilla Router02: no on-chain quote helper — amounts are already
         // reserve-ratio-linked by the UI, the router pins the optimal ratio
         // and the mins bound the drift since linking
-        await step(t('add.stepAddV2', { pair: `${t0.symbol}/${t1.symbol}` }), () =>
+        rcpt = await step(t('add.stepAddV2', { pair: `${t0.symbol}/${t1.symbol}` }), () =>
           writeContract(wagmiConfig, {
             abi: uniV2RouterAbi,
             address: UNI.V2_ROUTER,
@@ -516,34 +642,40 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
             chainId: CHAIN_ID,
           }),
         )
-        return
-      }
-      const quote = await readContract(wagmiConfig, {
-        abi: v2RouterAbi,
-        address: ADDR.V2_ROUTER,
-        functionName: 'quoteAddLiquidity',
-        args: [pool.token0, pool.token1, pool.stable, ADDR.V2_FACTORY, amt0, amt1],
-        chainId: CHAIN_ID,
-      })
-      await step(t('add.stepAdd', { pair: `${t0.symbol}/${t1.symbol}` }), () =>
-        writeContract(wagmiConfig, {
+      } else {
+        const quote = await readContract(wagmiConfig, {
           abi: v2RouterAbi,
           address: ADDR.V2_ROUTER,
-          functionName: 'addLiquidity',
-          args: [
-            pool.token0,
-            pool.token1,
-            pool.stable,
-            amt0,
-            amt1,
-            applySlippage(quote[0], SLIP_BPS),
-            applySlippage(quote[1], SLIP_BPS),
-            user,
-            deadline(),
-          ],
+          functionName: 'quoteAddLiquidity',
+          args: [pool.token0, pool.token1, pool.stable, ADDR.V2_FACTORY, amt0, amt1],
           chainId: CHAIN_ID,
-        }),
-      )
+        })
+        rcpt = await step(t('add.stepAdd', { pair: `${t0.symbol}/${t1.symbol}` }), () =>
+          writeContract(wagmiConfig, {
+            abi: v2RouterAbi,
+            address: ADDR.V2_ROUTER,
+            functionName: 'addLiquidity',
+            args: [
+              pool.token0,
+              pool.token1,
+              pool.stable,
+              amt0,
+              amt1,
+              applySlippage(quote[0], SLIP_BPS),
+              applySlippage(quote[1], SLIP_BPS),
+              user,
+              deadline(),
+            ],
+            chainId: CHAIN_ID,
+          }),
+        )
+      }
+      // up33 v2 with a live gauge + pref on → stake the freshly minted LP
+      // (uniswap v2 has no gauge, so poolStakeable gates it out cleanly)
+      if (rcpt && stakeAfter && poolStakeable(pool) && pool.gauge) {
+        const lp = receivedOf(rcpt, pool.address, user)
+        if (lp > 0n) await stakeV2Lp(pool.address, pool.gauge, lp, user, `${t0.symbol}/${t1.symbol}`)
+      }
     } finally {
       setBusy(false)
     }
@@ -577,6 +709,7 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
             <Btn busy={busy} onClick={add} disabled={!user}>
               {t('add.addLiquidity')}
             </Btn>
+            {poolStakeable(pool) && <StakeAfterToggle disabled={busy} />}
             <span className="dim mono-sm">
               {t('add.v2Hint', { slip: SLIP_BPS / 100 })} · {uni2 ? t('add.v2HintUni') : t('add.v2HintUp33')}
             </span>
@@ -595,18 +728,18 @@ export function FundSwitch(props: { fund: 'pair' | 'zap'; onFund: (f: 'pair' | '
     <div className="form-row">
       <span className="lbl">{t('add.fund')}</span>
       <button
-        className={`chip ${props.fund === 'pair' ? 'on' : ''}`}
-        onClick={() => props.onFund('pair')}
-        title={t('add.fundPairTip')}
-      >
-        {t('add.fundPair')}
-      </button>
-      <button
         className={`chip ${props.fund === 'zap' ? 'on' : ''}`}
         onClick={() => props.onFund('zap')}
         title={t('add.fundZapTip')}
       >
         {t('add.fundZap')}
+      </button>
+      <button
+        className={`chip ${props.fund === 'pair' ? 'on' : ''}`}
+        onClick={() => props.onFund('pair')}
+        title={t('add.fundPairTip')}
+      >
+        {t('add.fundPair')}
       </button>
     </div>
   )
@@ -658,8 +791,9 @@ export function AddCl({
   const { address: user } = useAccount()
   const t0 = tokenOf(data, pool.token0)
   const t1 = tokenOf(data, pool.token1)
-  const [fund, setFund] = useState<'pair' | 'zap'>('pair')
+  const [fund, setFund] = useState<'pair' | 'zap'>('zap')
   const [mode, setMode] = useState<RangeMode>('p10')
+  const [advOpen, setAdvOpen] = useState(false)
   const [pctStr, setPctStr] = useState('10')
   const [priceLo, setPriceLo] = useState('')
   const [priceHi, setPriceHi] = useState('')
@@ -720,6 +854,8 @@ export function AddCl({
     setMode('price')
   }
 
+  const advActive = mode === 'pct' || mode === 'above' || mode === 'below' || mode === 'price' || mode === 'ticks'
+
   const below = ticks ? pool.tick < ticks.lower : false
   const above = ticks ? pool.tick >= ticks.upper : false
 
@@ -775,6 +911,7 @@ export function AddCl({
 
   const mint = async () => {
     if (!user || !ticks) return
+    const stakeAfter = autostake.get() // captured at click, like the zap flow
     setBusy(true)
     try {
       const amt0 = safeParse(a0, t0.decimals)
@@ -802,7 +939,7 @@ export function AddCl({
         recipient: user,
         deadline: deadline(),
       }
-      await step(
+      const rcpt = await step(
         t('add.stepMint', {
           kind: pool.protocol === 'univ3' ? 'v3' : 'CL',
           pair: `${t0.symbol}/${t1.symbol}`,
@@ -826,6 +963,12 @@ export function AddCl({
                 chainId: CHAIN_ID,
               }),
       )
+      // continue into staking when the pool is stakeable and the pref is on —
+      // the mint receipt carries the new tokenId, so it's exact, never a guess
+      if (rcpt && stakeAfter && poolStakeable(pool) && pool.gauge) {
+        const tokenId = mintedTokenId(rcpt, npm, user)
+        if (tokenId !== null) await stakeClNft(pool.gauge, npm, tokenId)
+      }
     } finally {
       setBusy(false)
     }
@@ -843,7 +986,17 @@ export function AddCl({
         <button className={`chip ${mode === 'full' ? 'on' : ''}`} onClick={() => setMode('full')}>
           {t('add.full')}
         </button>
+        {/* one-sided / custom-% / price / tick modes live behind MORE — five
+            extra controls the common preset flow never needs to look at */}
+        <button
+          className={`chip ${advActive ? 'on' : ''}`}
+          onClick={() => setAdvOpen(!advOpen)}
+          title={t('add.moreTip')}
+        >
+          {t('add.more')} {advOpen || advActive ? '▴' : '▾'}
+        </button>
       </div>
+      {(advOpen || advActive) && (
       <div className="form-row">
         <span className="lbl"></span>
         <button className={`chip ${mode === 'pct' ? 'on' : ''}`} onClick={() => setMode('pct')} title={t('add.pctCustomTip')}>
@@ -899,6 +1052,7 @@ export function AddCl({
           </span>
         )}
       </div>
+      )}
       {ticks && (
         <RangeBar
           tickLower={ticks.lower}
@@ -952,6 +1106,7 @@ export function AddCl({
             <Btn busy={busy} onClick={mint} disabled={!user || !ticks}>
               {t('add.mint')}
             </Btn>
+            {poolStakeable(pool) && <StakeAfterToggle disabled={busy} />}
             <span className="dim mono-sm">
               {pool.protocol === 'univ3' ? t('add.mintHintUni') : t('add.mintHintUp33')}
             </span>

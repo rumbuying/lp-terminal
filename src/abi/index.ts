@@ -1,8 +1,8 @@
 import { parseAbi } from 'viem'
 export { erc20Abi } from 'viem'
 
-// Signatures below were extracted verbatim from Blockscout-verified ABIs.
-// Only what the app calls is included.
+// Signatures below were extracted verbatim from Blockscout-verified ABIs
+// (see docs/up33-contract-map.md §4). Only what the app calls is included.
 
 export const wethAbi = parseAbi([
   'function deposit() payable',
@@ -155,14 +155,30 @@ export const uniV2FactoryAbi = parseAbi([
 export const uniV2PairAbi = parseAbi([
   'function token0() view returns (address)',
   'function token1() view returns (address)',
+  'function factory() view returns (address)',
   'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
   'function totalSupply() view returns (uint256)',
   'function balanceOf(address) view returns (uint256)',
 ])
 
 export const uniV2RouterAbi = parseAbi([
+  'function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)',
   'function addLiquidity(address tokenA, address tokenB, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity)',
   'function removeLiquidity(address tokenA, address tokenB, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB)',
+])
+
+export const uniV3QuoterAbi = parseAbi([
+  'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) view returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+])
+
+export const uniSwapRouterAbi = parseAbi([
+  'function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMinimum, address[] path, address recipient) payable returns (uint256 amountOut)',
+  'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)',
+  'function multicall(uint256 deadline, bytes[] data) payable returns (bytes[] results)',
+  'function sweepTokenWithFee(address token, uint256 amountMinimum, address recipient, uint256 feeBips, address feeRecipient) payable',
+  'function unwrapWETH9WithFee(uint256 amountMinimum, address recipient, uint256 feeBips, address feeRecipient) payable',
+  'function sweepToken(address token, uint256 amountMinimum, address recipient) payable',
+  'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',
 ])
 
 // On-chain the quoter fns are nonpayable (revert-and-catch quoting); declared
@@ -173,4 +189,9 @@ export const quoterAbi = parseAbi([
 
 export const clSwapRouterAbi = parseAbi([
   'function exactInputSingle((address tokenIn, address tokenOut, int24 tickSpacing, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)',
+  'function multicall(bytes[] data) payable returns (bytes[] results)',
+  'function sweepTokenWithFee(address token, uint256 amountMinimum, address recipient, uint256 feeBips, address feeRecipient) payable',
+  'function unwrapWETH9WithFee(uint256 amountMinimum, address recipient, uint256 feeBips, address feeRecipient) payable',
+  'function sweepToken(address token, uint256 amountMinimum, address recipient) payable',
+  'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',
 ])

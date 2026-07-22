@@ -1,24 +1,47 @@
-// ZAP panel — fund a position with ONE token. Shared by POOLS (mint/add) and
-// POSITIONS (increase): the parent picks the target, this panel solves the
-// split, previews it, and walks the tx sequence. See lib/zap.ts for the math.
-import { useEffect, useMemo, useState } from 'react'
+// ZAP panel — fund a position with ONE token: a pool-side token, WETH/USDG,
+// or ANY token (custom picker). Shared by POOLS (mint/add) and POSITIONS
+// (increase): the parent picks the target, this panel solves the split,
+// previews it, and walks the execution sequence. See lib/zap.ts for the math.
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useAccount } from 'wagmi'
-import { useQuery } from '@tanstack/react-query'
+import { useAccount, usePublicClient } from 'wagmi'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { formatUnits, parseUnits, type Address } from 'viem'
-import { ADDR } from '../config/addresses'
+import { ADDR, CHAIN_ID, NATIVE } from '../config/addresses'
+import { ENV } from '../config/env'
 import { simulateClAdd, simulateV2Add, fmtApr } from '../lib/apr'
 import { applySlippage } from '../lib/clmath'
 import { fmtAmount, fmtUsd } from '../lib/format'
-import { NATIVE } from '../lib/kyber'
-import { txlog } from '../lib/txlog'
-import { executeZap, planZap, zapStages, type ZapPlan, type ZapTarget } from '../lib/zap'
+import { autoSlippage, retrySlippage, slippagePctToBps, slippageTone, SLIPPAGE_CHOICES, type AutoSlippage } from '../lib/swapGate'
+import { SOLVER_AUTO_REFRESHES, solverQuoteAutoRefreshExhausted, solverQuoteCanAutoRefresh } from '../lib/solverRefresh'
+import { autostake } from '../lib/autostake'
+import {
+  DEPOSIT_MINS_BPS,
+  executeZap,
+  planZap,
+  stakeableTarget,
+  zapRouteLabel,
+  zapStages,
+  zapVenueFeeBps,
+  type ZapFailReason,
+  type ZapPlan,
+  type ZapTarget,
+} from '../lib/zap'
 import { useBalances } from '../hooks/useBalances'
+import { usePools } from '../hooks/usePools'
+import { useTokenList } from '../hooks/useTokenList'
 import type { PoolStat } from '../lib/poolstats'
 import type { TokenInfo } from '../types'
+import { StakeAfterToggle } from './StakeAfterToggle'
+import { TokenSelect } from './TokenSelect'
 import { Btn, NumInput } from './ui'
 
 const ETH_GAS_BUFFER = parseUnits('0.001', 18)
+const ZAP_PLAN_REFRESH_MS = 30_000
+
+const ETH_TOKEN: TokenInfo = { address: NATIVE as Address, symbol: 'ETH', decimals: 18, native: true }
+const WETH_TOKEN: TokenInfo = { address: ADDR.WETH, symbol: 'WETH', decimals: 18 }
+const USDG_TOKEN: TokenInfo = { address: ADDR.USDG, symbol: 'USDG', decimals: 6 }
 
 export function ZapPanel(props: {
   target: ZapTarget
@@ -32,21 +55,44 @@ export function ZapPanel(props: {
   const { t } = useTranslation()
   const pool = target.pool
   const { address: user } = useAccount()
+  const client = usePublicClient({ chainId: CHAIN_ID })
+  const pools = usePools()
+  const tokenList = useTokenList()
+  const autoStake = useSyncExternalStore(autostake.subscribe, autostake.get)
+  const stakeable = stakeableTarget(target)
 
-  const hasWeth = [t0.address.toLowerCase(), t1.address.toLowerCase()].includes(ADDR.WETH.toLowerCase())
-  const wethIs0 = t0.address.toLowerCase() === ADDR.WETH.toLowerCase()
-  const [sel, setSel] = useState<'0' | '1' | 'eth'>(hasWeth ? (wethIs0 ? '0' : '1') : '0')
+  // funding candidates: the pair itself, ETH, and the two majors (deduped —
+  // a WETH/USDG pool doesn't repeat them); anything else via the picker
+  const candidates = useMemo(() => {
+    const seen = new Set<string>()
+    return [t0, t1, ETH_TOKEN, WETH_TOKEN, USDG_TOKEN].filter((tok) => {
+      const k = tok.address.toLowerCase()
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+  }, [t0, t1])
+  const [selTok, setSelTok] = useState<TokenInfo | null>(null)
+  const tIn = selTok ?? t0
+  const tokenInAddr: Address = tIn.address
+  const customSel = !candidates.some((c) => c.address.toLowerCase() === tokenInAddr.toLowerCase())
+
   const [amtStr, setAmtStr] = useState('')
   const [amount, setAmount] = useState(0n)
-  const [slip, setSlip] = useState(100)
+  // slippage: null = AUTO (quote-derived); a bps number = a preset chip or the
+  // typed custom value (customSlip holds the raw text so the input can own focus)
+  const [manualSlip, setManualSlip] = useState<number | null>(null)
+  const [customSlip, setCustomSlip] = useState('')
+  const [slipOpen, setSlipOpen] = useState(false)
+  // floor under AUTO after a slippage halt: never re-offer the number that
+  // just failed. Cleared when the trade context changes or a run succeeds.
+  const [slipFloor, setSlipFloor] = useState<number | null>(null)
   const [running, setRunning] = useState(false)
-  const [runAt, setRunAt] = useState<{ i: number; failed: boolean } | null>(null)
+  const [runAt, setRunAt] = useState<{ i: number; failed: boolean; reason?: ZapFailReason; slip?: number } | null>(
+    null,
+  )
   const [runPlan, setRunPlan] = useState<ZapPlan | null>(null)
   const [done, setDone] = useState(false)
-
-  const tokenInAddr: Address = sel === 'eth' ? NATIVE : sel === '0' ? t0.address : t1.address
-  const tIn: TokenInfo =
-    sel === 'eth' ? { address: NATIVE, symbol: 'ETH', decimals: 18, native: true } : sel === '0' ? t0 : t1
 
   useEffect(() => {
     const h = setTimeout(() => {
@@ -59,26 +105,68 @@ export function ZapPanel(props: {
     return () => clearTimeout(h)
   }, [amtStr, tIn.decimals])
 
-  const bal = useBalances(user, [t0.address, t1.address, ...(hasWeth ? [NATIVE as Address] : [])])
+  // a new pool/token/amount is a new trade — yesterday's failure floor doesn't apply
+  useEffect(() => {
+    setSlipFloor(null)
+  }, [pool.address, tokenInAddr, amount])
+
+  const balAddrs = useMemo(() => {
+    const s = new Map<string, Address>()
+    for (const c of candidates) s.set(c.address.toLowerCase(), c.address)
+    s.set(tokenInAddr.toLowerCase(), tokenInAddr)
+    return [...s.values()]
+  }, [candidates, tokenInAddr])
+  const bal = useBalances(user, balAddrs)
   const balIn = bal.data?.[tokenInAddr.toLowerCase()]
-  const spendable = balIn === undefined ? undefined : sel === 'eth' ? (balIn > ETH_GAS_BUFFER ? balIn - ETH_GAS_BUFFER : 0n) : balIn
+  let spendable = balIn
+  if (balIn !== undefined && tIn.native) spendable = balIn > ETH_GAS_BUFFER ? balIn - ETH_GAS_BUFFER : 0n
   const insufficient = spendable !== undefined && amount > spendable
 
   // ticks key parts (cl targets re-plan when the parent's range changes)
   const lo = target.kind === 'v2' ? 0 : target.tickLower
   const hi = target.kind === 'v2' ? 0 : target.tickUpper
+  const up33State = pools.error ? 'up33-failed' : pools.data ? 'up33-ready' : 'up33-pending'
 
+  const queryClient = useQueryClient()
+  const zapPlanKey = ['zapPlan', pool.address, lo, hi, tokenInAddr, amount.toString(), up33State] as const
   const plan = useQuery({
-    queryKey: ['zapPlan', pool.address, lo, hi, tokenInAddr, amount.toString()],
-    enabled: amount > 0n && !running,
-    refetchInterval: 30_000,
+    queryKey: zapPlanKey,
+    // same cap as the swap's solver quote: auto-refresh a few times, then pause
+    // — execution re-quotes the swap leg fresh regardless, and the manual
+    // refresh below revives a paused (or failed-out) preview
+    enabled: (query) =>
+      !!client && !pools.isPending && amount > 0n && !running && solverQuoteCanAutoRefresh(query.state),
+    refetchInterval: ZAP_PLAN_REFRESH_MS,
     staleTime: 15_000,
-    retry: 1,
-    queryFn: ({ signal }) => planZap({ target, tokenIn: tokenInAddr, amountIn: amount, signal }),
+    retry: false,
+    queryFn: () =>
+      planZap({
+        client: client!,
+        pools: pools.error ? null : (pools.data?.pools ?? null),
+        target,
+        tokenIn: tokenInAddr,
+        amountIn: amount,
+      }),
   })
   const p = running ? runPlan : (plan.data ?? null)
-  const stages = useMemo(() => (p ? zapStages(p, target, t0, t1) : []), [p, target, t0, t1])
-  const tOut = p ? (p.inIs0 ? t1 : t0) : null
+  // once the auto-refresh cap is hit the preview stops updating — surface a
+  // manual refresh. Gate on amount, not on data: four planning FAILURES also
+  // exhaust the budget, and that is exactly when a retry control is needed.
+  const planRecord = queryClient.getQueryCache().find({ queryKey: zapPlanKey, exact: true })
+  const planPaused = amount > 0n && !running && !!planRecord && solverQuoteAutoRefreshExhausted(planRecord.state)
+  const autoBase = p?.impactBps == null ? null : autoSlippage(p.impactBps, zapVenueFeeBps(p))
+  // post-halt floor wins over the quote-derived number (and stands in for it
+  // when the impact probe is unavailable — a failed run IS a measurement)
+  const flooredBps = slipFloor === null ? null : Math.max(autoBase?.bps ?? 0, slipFloor)
+  const automaticSlippage: AutoSlippage | null =
+    flooredBps === null ? autoBase : { bps: flooredBps, tone: slippageTone(flooredBps) }
+  const effectiveSlip = manualSlip ?? automaticSlippage?.bps
+  const customInvalid = customSlip !== '' && slippagePctToBps(customSlip) === null
+  const slippageRequired = !!p && p.legs.length > 0 && effectiveSlip === undefined
+  const stages = useMemo(
+    () => (p ? zapStages(p, target, tIn, t0, t1, autoStake) : []),
+    [p, target, tIn, t0, t1, autoStake],
+  )
 
   // projected APRs on the planned deposit (mint/add previews only — an
   // increase's projection is the parent card's business)
@@ -128,33 +216,28 @@ export function ZapPanel(props: {
     const dep = side === 0 ? p.dep0 : p.dep1
     if (dust === 0n || dep === 0n) return null
     if (dust * 200n < dep) return null // <0.5% — noise
-    const t = side === 0 ? t0 : t1
-    return `${fmtAmount(dust, t.decimals)} ${t.symbol}`
+    const token = side === 0 ? t0 : t1
+    return `${fmtAmount(dust, token.decimals)} ${token.symbol}`
   }
   const dusts = [dustNote(0), dustNote(1)].filter(Boolean)
 
   const run = async () => {
-    if (!user || amount === 0n || running) return
+    const frozen = plan.data
+    if (!user || !frozen || amount === 0n || running) return
+    const executionSlippage = frozen.legs.length === 0 ? 0 : effectiveSlip
+    if (executionSlippage === undefined) return
+    setRunPlan(frozen)
     setRunning(true)
     setDone(false)
     setRunAt({ i: 0, failed: false })
     try {
-      // plan fresh for execution — the preview may be up to 30s old
-      let fresh: ZapPlan
-      try {
-        fresh = await planZap({ target, tokenIn: tokenInAddr, amountIn: amount })
-      } catch (e) {
-        txlog.push('err', t('zap.replanFailed', { err: (e as Error).message }))
-        setRunAt({ i: 0, failed: true })
-        setRunPlan(null)
-        return
-      }
-      setRunPlan(fresh)
       const res = await executeZap({
-        plan: fresh,
+        plan: frozen,
         target,
         user,
-        slipBps: slip,
+        slipBps: executionSlippage,
+        stake: autoStake,
+        tIn,
         t0,
         t1,
         onStage: (i) => setRunAt({ i, failed: false }),
@@ -163,9 +246,15 @@ export function ZapPanel(props: {
         setRunAt(null)
         setRunPlan(null)
         setDone(true)
+        setSlipFloor(null)
         setAmtStr('')
       } else {
-        setRunAt({ i: res.failedAt ?? 0, failed: true })
+        const reason = res.reason ?? 'other'
+        setRunAt({ i: res.failedAt ?? 0, failed: true, reason, slip: executionSlippage })
+        // AUTO must not re-offer the tolerance that just failed — only ever raise
+        if (reason === 'slippage') setSlipFloor((prev) => Math.max(prev ?? 0, retrySlippage(executionSlippage)))
+        // and the retry must re-plan from a live quote, not the ≤30s cached one
+        void plan.refetch()
       }
     } finally {
       setRunning(false)
@@ -173,48 +262,153 @@ export function ZapPanel(props: {
   }
 
   const failed = runAt?.failed ?? false
+  let runLabel = t('zap.run')
+  if (!user) runLabel = t('common.connectWallet')
+  else if (slippageRequired) runLabel = t('zap.chooseSlippage')
+  else if (stages.length > 0) runLabel = t('zap.runSteps', { n: stages.length })
+
+  // slippage: one summary line; the full editor unfolds on demand (or when a
+  // choice is REQUIRED — no impact probe / invalid custom value)
+  const slipForced = slippageRequired || customInvalid
+  const showSlipEditor = slipOpen || slipForced
+  const slipSummaryTone = customInvalid
+    ? 'red'
+    : effectiveSlip !== undefined
+      ? slippageTone(effectiveSlip)
+      : 'dim'
+  const slipSummary = customInvalid
+    ? t('common.slipInvalid')
+    : effectiveSlip !== undefined
+      ? `${manualSlip === null && customSlip === '' ? 'AUTO · ' : ''}${effectiveSlip / 100}%`
+      : t('zap.chooseSlippage')
+
+  const totalSwapIn = p ? p.legs.reduce((s, l) => s + l.swapIn, 0n) : 0n
+  const legRows = p
+    ? p.legs.map((leg, i) => {
+        const tOut = leg.buyIs0 ? t0 : t1
+        return (
+          <div className="spec-row" key={i}>
+            <span className="sk">{p.legs.length > 1 ? t('zap.swapN', { n: i + 1 }) : t('zap.swapRow')}</span>
+            <span className="sv">
+              {fmtAmount(leg.swapIn, tIn.decimals)} {tIn.symbol} → ≈ {fmtAmount(leg.estOut, tOut.decimals)}{' '}
+              {tOut.symbol}
+            </span>
+            <span className="sd">
+              {effectiveSlip === undefined
+                ? t('zap.chooseSlippage')
+                : t('zap.swapMin', {
+                    amt: fmtAmount(applySlippage(leg.estOut, effectiveSlip), tOut.decimals),
+                    slip: effectiveSlip / 100,
+                  })}
+              {leg.impactBps === null ? (
+                <span className="dim"> · {t('zap.impactOff')}</span>
+              ) : (
+                <span className={slippageTone(leg.impactBps)}>
+                  {' '}
+                  · {t('zap.impact', { pct: (leg.impactBps / 100).toFixed(2) })}
+                </span>
+              )}
+              {/* zap still charges while market swaps are free — keep it bright */}
+              <span className="fg"> · {t('zap.terminalFee', { pct: (ENV.zapFeeBps / 100).toFixed(2) })}</span>
+              {' · '}
+              {t('zap.via', { route: zapRouteLabel(leg.via) })}
+            </span>
+          </div>
+        )
+      })
+    : null
 
   return (
     <div className="zap">
       <div className="form-row">
         <span className="lbl">{t('zap.zapIn')}</span>
-        <button className={`chip ${sel === '0' ? 'on' : ''}`} onClick={() => setSel('0')} disabled={running}>
-          {t0.symbol}
-        </button>
-        <button className={`chip ${sel === '1' ? 'on' : ''}`} onClick={() => setSel('1')} disabled={running}>
-          {t1.symbol}
-        </button>
-        {hasWeth && (
+        {candidates.map((c) => (
           <button
-            className={`chip ${sel === 'eth' ? 'on' : ''}`}
-            onClick={() => setSel('eth')}
+            key={c.address}
+            className={`chip ${tokenInAddr.toLowerCase() === c.address.toLowerCase() ? 'on' : ''}`}
+            onClick={() => setSelTok(c)}
             disabled={running}
-            title={t('zap.ethTip')}
+            title={c.native ? t('zap.ethTip') : undefined}
           >
-            ETH
+            {c.symbol}
           </button>
-        )}
+        ))}
+        {customSel && <button className="chip on">{tIn.symbol}</button>}
+        <TokenSelect list={tokenList.tokens} value={tIn} onChange={setSelTok} label={t('zap.pickOther')} />
+      </div>
+      <div className="form-row">
         <NumInput value={amtStr} onChange={setAmtStr} disabled={running} width={220} />
         {spendable !== undefined && (
           <>
-            <span className="dim mono-sm">
-              {t('common.bal')} {fmtAmount(spendable, tIn.decimals)}
-            </span>
             <button className="chip" disabled={running} onClick={() => setAmtStr(formatUnits(spendable, tIn.decimals))}>
               {t('common.max')}
             </button>
+            <span className="dim mono-sm">
+              {t('common.bal')} {fmtAmount(spendable, tIn.decimals)} {tIn.symbol}
+            </span>
           </>
         )}
         {insufficient && <span className="red mono-sm">{t('common.exceedsBalance')}</span>}
       </div>
       <div className="form-row">
         <span className="lbl">{t('zap.slip')}</span>
-        {[50, 100, 300].map((b) => (
-          <button key={b} className={`chip ${slip === b ? 'on' : ''}`} onClick={() => setSlip(b)} disabled={running}>
-            {b / 100}%
+        {!showSlipEditor ? (
+          <button
+            className={`chip ${slipSummaryTone}`}
+            onClick={() => setSlipOpen(true)}
+            disabled={running}
+            title={t('zap.slipHint')}
+          >
+            {slipSummary} ▾
           </button>
-        ))}
-        <span className="dim mono-sm">{t('zap.slipHint')}</span>
+        ) : (
+          <>
+            <button
+              className={`chip ${manualSlip === null && customSlip === '' ? 'on' : ''}`}
+              onClick={() => {
+                setManualSlip(null)
+                setCustomSlip('')
+              }}
+              disabled={running}
+            >
+              AUTO {automaticSlippage ? `${automaticSlippage.bps / 100}%` : '—'}
+            </button>
+            {SLIPPAGE_CHOICES.map((b) => (
+              <button
+                key={b}
+                className={`chip ${manualSlip === b && customSlip === '' ? 'on' : ''}`}
+                onClick={() => {
+                  setManualSlip(b)
+                  setCustomSlip('')
+                }}
+                disabled={running}
+              >
+                {b / 100}%
+              </button>
+            ))}
+            <NumInput
+              value={customSlip}
+              onChange={(v) => {
+                setCustomSlip(v)
+                setManualSlip(slippagePctToBps(v))
+              }}
+              disabled={running}
+              placeholder={t('common.slipCustom')}
+              width={96}
+              invalid={customInvalid}
+            />
+            <span className="dim mono-sm">%</span>
+            {customInvalid && <span className="red mono-sm">{t('common.slipInvalid')}</span>}
+            {effectiveSlip !== undefined && (
+              <span className={`${slippageTone(effectiveSlip)} mono-sm`}>→ {effectiveSlip / 100}%</span>
+            )}
+            {!slipForced && (
+              <button className="chip" onClick={() => setSlipOpen(false)} disabled={running} title={t('zap.slipHint')}>
+                ▴
+              </button>
+            )}
+          </>
+        )}
       </div>
 
       {amount > 0n && plan.isLoading && (
@@ -233,39 +427,37 @@ export function ZapPanel(props: {
           <div className="spec-row">
             <span className="sk">{t('zap.split')}</span>
             <span className="sv">
-              {p.swapIn === 0n
-                ? t('zap.keepAll', { amt: fmtAmount(p.keep, tIn.decimals), sym: p.inIs0 ? t0.symbol : t1.symbol })
-                : t('zap.keepSwap', {
-                    keep: fmtAmount(p.keep, tIn.decimals),
-                    swap: fmtAmount(p.swapIn, tIn.decimals),
-                    sym: p.inIs0 ? t0.symbol : t1.symbol,
-                  })}
+              {p.inIs0 !== null
+                ? p.legs.length === 0
+                  ? t('zap.keepAll', { amt: fmtAmount(p.keep, tIn.decimals), sym: tIn.symbol })
+                  : t('zap.keepSwap', {
+                      keep: fmtAmount(p.keep, tIn.decimals),
+                      swap: fmtAmount(totalSwapIn, tIn.decimals),
+                      sym: tIn.symbol,
+                    })
+                : p.legs.length === 2
+                  ? t('zap.outsideSplit', {
+                      a0: fmtAmount(p.legs.find((l) => l.buyIs0)?.swapIn ?? 0n, tIn.decimals),
+                      a1: fmtAmount(p.legs.find((l) => !l.buyIs0)?.swapIn ?? 0n, tIn.decimals),
+                      sym: tIn.symbol,
+                      sym0: t0.symbol,
+                      sym1: t1.symbol,
+                    })
+                  : t('zap.outsideOne', {
+                      amt: fmtAmount(totalSwapIn, tIn.decimals),
+                      sym: tIn.symbol,
+                      outSym: p.legs[0]?.buyIs0 ? t0.symbol : t1.symbol,
+                    })}
             </span>
-            <span className="sd">{p.swapIn === 0n ? t('zap.splitSdSingle') : t('zap.splitSd')}</span>
+            <span className="sd">
+              {p.inIs0 !== null
+                ? p.legs.length === 0
+                  ? t('zap.splitSdSingle')
+                  : t('zap.splitSd')
+                : t('zap.outsideSd')}
+            </span>
           </div>
-          {p.swapIn > 0n && tOut && (
-            <div className="spec-row">
-              <span className="sk">{t('zap.swapRow')}</span>
-              <span className="sv">
-                → ≈ {fmtAmount(p.estOut, tOut.decimals)} {tOut.symbol}
-              </span>
-              <span className="sd">
-                {t('zap.swapMin', { amt: fmtAmount(applySlippage(p.estOut, slip), tOut.decimals), slip: slip / 100 })}
-                {p.impactBps !== null &&
-                  (p.impactBps < -500 ? (
-                    // a >5% "gain" means kyber's USD marks are off for this token
-                    // (common for launchpad tokens) — the number isn't actionable
-                    <span> · {t('zap.impactOff')}</span>
-                  ) : (
-                    <span className={p.impactBps > 300 ? ' red' : p.impactBps > 150 ? ' amber' : ''}>
-                      {' '}
-                      · {t('zap.impact', { pct: (p.impactBps / 100).toFixed(2) })}
-                    </span>
-                  ))}
-                {p.routeLabel && <> · {t('zap.via', { route: p.routeLabel })}</>}
-              </span>
-            </div>
-          )}
+          {legRows}
           <div className="spec-row">
             <span className="sk">{t('zap.depositRow')}</span>
             <span className="sv">
@@ -317,21 +509,29 @@ export function ZapPanel(props: {
         </div>
       )}
 
+      {planPaused && (
+        <div className="form-row">
+          <button
+            className="chip amber"
+            onClick={() => void plan.refetch()}
+            title={t('zap.refreshTip', { s: ZAP_PLAN_REFRESH_MS / 1000, n: SOLVER_AUTO_REFRESHES })}
+          >
+            {plan.isFetching ? <span className="spin">▮</span> : `↻ ${t('zap.refreshPlan')}`}
+          </button>
+        </div>
+      )}
+
       {stages.length > 0 && (
         <div className="zap-steps mono-sm">
           {stages.map((s, i) => {
-            const state = !runAt
-              ? 'todo'
-              : i < runAt.i
-                ? 'done'
-                : i === runAt.i
-                  ? failed
-                    ? 'fail'
-                    : running
-                      ? 'run'
-                      : 'todo'
-                  : 'todo'
-            const mark = state === 'done' ? '✓' : state === 'run' ? '▮' : state === 'fail' ? '✗' : '·'
+            let state: 'todo' | 'done' | 'fail' | 'run' = 'todo'
+            if (runAt && i < runAt.i) state = 'done'
+            else if (runAt && i === runAt.i && failed) state = 'fail'
+            else if (runAt && i === runAt.i && running) state = 'run'
+            let mark = '·'
+            if (state === 'done') mark = '✓'
+            else if (state === 'run') mark = '▮'
+            else if (state === 'fail') mark = '✗'
             return (
               <div key={i} className={`zstep ${state}`}>
                 <span className="zn">{i + 1}</span>
@@ -343,17 +543,30 @@ export function ZapPanel(props: {
         </div>
       )}
 
-      {failed && <div className="red mono-sm">{t('zap.halted', { n: (runAt?.i ?? 0) + 1 })}</div>}
+      {failed && (
+        <div className="red mono-sm">
+          {runAt?.reason === 'slippage'
+            ? t('zap.haltedSwap', {
+                n: (runAt.i ?? 0) + 1,
+                slip: (runAt.slip ?? 0) / 100,
+                next: (automaticSlippage?.bps ?? retrySlippage(runAt.slip ?? 0)) / 100,
+              })
+            : runAt?.reason === 'deposit-moved'
+              ? t('zap.haltedDeposit', { n: (runAt.i ?? 0) + 1, band: DEPOSIT_MINS_BPS / 100 })
+              : t('zap.halted', { n: (runAt?.i ?? 0) + 1 })}
+        </div>
+      )}
       {done && <div className="green mono-sm">{t('zap.done')}</div>}
 
       <div className="form-row">
-        <Btn busy={running} onClick={run} disabled={!user || amount === 0n || !plan.data || insufficient || running}>
-          {!user
-            ? t('common.connectWallet')
-            : stages.length > 0
-              ? t('zap.runTx', { n: stages.length })
-              : t('zap.run')}
+        <Btn
+          busy={running}
+          onClick={run}
+          disabled={!user || amount === 0n || !plan.data || insufficient || slippageRequired || running}
+        >
+          {runLabel}
         </Btn>
+        {stakeable && <StakeAfterToggle disabled={running} />}
         <span className="dim mono-sm">{t('zap.runHint')}</span>
       </div>
     </div>

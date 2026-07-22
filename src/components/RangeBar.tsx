@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { sqrtPriceToPrice, tickToPrice } from '../lib/clmath'
+import { MAX_TICK, MIN_TICK, sqrtPriceToPrice, tickToPrice } from '../lib/clmath'
 import { fmtNum } from '../lib/format'
 import { Flash } from './Flash'
+
+// a bound within this many ticks of the tick-space extreme is a FULL-RANGE
+// edge — its price is astronomical/zero, so render ∞/0 instead of the number.
+// The widest tick spacing in use is ~200, so 1000 clears every aligned extreme
+// without ever catching a real band (real bands sit near the current tick).
+const UNBOUNDED_MARGIN = 1000
+const INF = '∞'
 
 /**
  * The LP range bar:
@@ -60,6 +67,18 @@ export function RangeBar(props: {
   const nearEdge = inRange && (posPct < 12 || posPct > 88)
   const tone = order ? '' : !inRange ? 'red' : nearEdge ? 'amber' : ''
 
+  // full-range edges: detect in tick space, map to display space (dLower → 0,
+  // dUpper → ∞; the two swap when flipped). A full-range side has no finite
+  // bound and no single-token "out here" state, so its number/label is dropped.
+  const upperUnbounded = tickUpper >= MAX_TICK - UNBOUNDED_MARGIN
+  const lowerUnbounded = tickLower <= MIN_TICK + UNBOUNDED_MARGIN
+  const leftUnbounded = flipped ? upperUnbounded : lowerUnbounded
+  const rightUnbounded = flipped ? lowerUnbounded : upperUnbounded
+  // which single token you hold once price leaves the band (display space):
+  // the low side (left) is 100% base, the high side (right) is 100% quote
+  const heldLow = !order && !inRange && dCur < dLower
+  const heldHigh = !order && !inRange && dCur > dUpper
+
   // phosphor trail: on a real price move, smear a decaying gradient over the
   // path the marker just glided across (oscilloscope persistence). Suppressed
   // on flip (display-space jump, price didn't move) and on sub-pixel jitter.
@@ -92,6 +111,10 @@ export function RangeBar(props: {
   const toRight = (dUpper / dCur - 1) * 100
   // band half-width, geometric: ±x% around mid
   const bandPct = (Math.sqrt(dUpper / dLower) - 1) * 100
+  // ∞ on an unbounded (full-range) side rather than an astronomical number
+  const leftMove = leftUnbounded ? INF : `${toLeft >= 0 ? '+' : ''}${fmtNum(toLeft, 3)}%`
+  const rightMove = rightUnbounded ? INF : `${toRight >= 0 ? '+' : ''}${fmtNum(toRight, 3)}%`
+  const bandStr = leftUnbounded || rightUnbounded ? INF : fmtNum(bandPct, 3)
 
   let statusText: string
   let statusTone: string
@@ -108,7 +131,7 @@ export function RangeBar(props: {
       statusTone = 'cyan'
     }
   } else if (inRange) {
-    statusText = t('rbar.inRange', { pct: posPct.toFixed(1), band: fmtNum(bandPct, 3) })
+    statusText = t('rbar.inRange')
     statusTone = nearEdge ? 'amber' : 'green'
   } else if (dCur < dLower) {
     statusText = t('rbar.outRise', { pct: fmtNum(toLeft, 3) })
@@ -120,8 +143,22 @@ export function RangeBar(props: {
 
   return (
     <div className="rbar-wrap">
+      {!order && (!leftUnbounded || !rightUnbounded) && (
+        <div className="rbar-holds mono-sm">
+          {leftUnbounded ? (
+            <span />
+          ) : (
+            <span className={heldLow ? 'red' : 'dim'}>↓ {t('rbar.allOf', { sym: base })}</span>
+          )}
+          {rightUnbounded ? (
+            <span />
+          ) : (
+            <span className={heldHigh ? 'red' : 'dim'}>{t('rbar.allOf', { sym: quote })} ↑</span>
+          )}
+        </div>
+      )}
       <div className="rbar">
-        <span className="rbar-price">{fmtNum(dLower)}</span>
+        <span className="rbar-price">{leftUnbounded ? '0' : fmtNum(dLower)}</span>
         <div
           className="rbar-track"
           title={t('rbar.ticksTip', { lo: tickLower, hi: tickUpper, tick })}
@@ -142,12 +179,11 @@ export function RangeBar(props: {
           )}
           <div className={`rbar-marker ${tone}`} style={{ left: `${fracPct}%` }} />
         </div>
-        <span className="rbar-price">{fmtNum(dUpper)}</span>
+        <span className="rbar-price">{rightUnbounded ? INF : fmtNum(dUpper)}</span>
       </div>
       <div className="rbar-sub">
-        <span className={!order && !inRange && dCur < dLower ? 'red' : 'dim'}>
-          {toLeft >= 0 ? '+' : ''}
-          {fmtNum(toLeft, 3)}% {t('rbar.toLow')}
+        <span className={heldLow ? 'red' : 'dim'}>
+          {leftMove} {t('rbar.toLow')}
         </span>
         <span>
           px{' '}
@@ -161,14 +197,20 @@ export function RangeBar(props: {
             ⇄
           </button>
         </span>
-        <span className={!order && !inRange && dCur > dUpper ? 'red' : 'dim'}>
-          {t('rbar.fromHigh')} {toRight >= 0 ? '+' : ''}
-          {fmtNum(toRight, 3)}%
+        <span className={heldHigh ? 'red' : 'dim'}>
+          {t('rbar.fromHigh')} {rightMove}
         </span>
       </div>
       <div className="rbar-sub">
         <Flash v={order ? order.fillFrac : undefined} arrow>
-          <span className={statusTone}>{statusText}</span>
+          <span
+            className={statusTone}
+            title={
+              !order && inRange ? t('rbar.inRangeTip', { pct: posPct.toFixed(1), band: bandStr }) : undefined
+            }
+          >
+            {statusText}
+          </span>
         </Flash>
       </div>
     </div>

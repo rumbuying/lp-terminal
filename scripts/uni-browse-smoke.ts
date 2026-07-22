@@ -8,21 +8,8 @@ import { uniV3FactoryAbi, uniV3PmAbi, uniV3PoolAbi } from '../src/abi/index'
 import { ADDR, UNI } from '../src/config/addresses'
 import { getLiquidityForAmounts, getSqrtRatioAtTick, minAmountsForLiquidity } from '../src/lib/clmath'
 
-// duplicated rather than imported: src/config/env.ts reads import.meta.env,
-// which is vite-only and does not load under node/tsx.
-const PUBLIC_RPC = 'https://rpc.mainnet.chain.robinhood.com'
-
-/** repo-root .env `RPC` (SECRET — never print it). No .env / no key: public RPC. */
-const rpc = (() => {
-  const fromEnv = process.env.RPC?.trim()
-  if (fromEnv) return fromEnv
-  try {
-    const text = readFileSync(new URL('../.env', import.meta.url), 'utf8')
-    return text.match(/^\s*RPC\s*=\s*(\S+)\s*$/m)?.[1] ?? PUBLIC_RPC
-  } catch {
-    return PUBLIC_RPC
-  }
-})()
+const envText = readFileSync(new URL('../../.env', import.meta.url), 'utf8')
+const rpc = envText.match(/^\s*RPC\s*=\s*(\S+)\s*$/m)?.[1] ?? 'https://rpc.mainnet.chain.robinhood.com'
 const chain = defineChain({
   id: 4663,
   name: 'Robinhood Chain',
