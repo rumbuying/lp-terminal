@@ -5,6 +5,7 @@
 //            side (≈$) or the WETH side × WETH price derived from DexScreener.
 import { ADDR } from '../config/addresses'
 import { ENV } from '../config/env'
+import { pickDsTokenUsd, type DsPair } from './tokenPrice'
 import type { Pool, V2Pool } from '../types'
 
 export type PoolStat = {
@@ -15,9 +16,8 @@ export type PoolStat = {
 
 // in same-origin proxy mode (server deploys) these route through nginx so
 // users behind restrictive networks keep TVL/volume/USD features
-const DS_BASE = ENV.proxied
-  ? '/dexscreener/latest/dex/pairs/robinhood/'
-  : 'https://api.dexscreener.com/latest/dex/pairs/robinhood/'
+const DS_ROOT = ENV.proxied ? '/dexscreener' : 'https://api.dexscreener.com'
+const DS_BASE = DS_ROOT + '/latest/dex/pairs/robinhood/'
 const V2_SUBGRAPH =
   (ENV.proxied ? '/goldsky' : 'https://api.goldsky.com') +
   '/api/public/project_cmhef02640198x7p2cz2w70u8/subgraphs/up-robinhood-v2-mainnet/0.1.0/gn'
@@ -25,7 +25,7 @@ const V2_SUBGRAPH =
 const WETH = ADDR.WETH.toLowerCase()
 const USDG = ADDR.USDG.toLowerCase()
 
-async function fetchDexscreener(
+export async function fetchDexscreener(
   addrs: string[],
 ): Promise<{ stats: Record<string, PoolStat>; wethUsd: number | null }> {
   const stats: Record<string, PoolStat> = {}
@@ -54,6 +54,17 @@ async function fetchDexscreener(
     }
   }
   return { stats, wethUsd }
+}
+
+/** venue USD price of a token — its most-liquid robinhood pair on dexscreener
+ *  (see tokenPrice.ts for why aggregator unit-quotes are not used) */
+export async function fetchDsTokenUsd(token: string, signal?: AbortSignal): Promise<number> {
+  const r = await fetch(`${DS_ROOT}/latest/dex/tokens/${token}`, { signal })
+  if (!r.ok) throw new Error(`dexscreener ${r.status}`)
+  const j = (await r.json()) as { pairs?: DsPair[] }
+  const price = pickDsTokenUsd(j?.pairs ?? [], token)
+  if (price === null) throw new Error('no liquid dexscreener pair prices this token')
+  return price
 }
 
 async function fetchV2Subgraph(

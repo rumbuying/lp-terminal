@@ -1,5 +1,5 @@
-import { createPublicClient, defineChain, http, type PublicClient } from 'viem'
-import { log, PUBLIC_RPC, TUNE, rpcUrl, sleep } from './config'
+import { createPublicClient, defineChain, fallback, http, type PublicClient } from 'viem'
+import { log, PUBLIC_RPC, TUNE, rpcUrls, sleep } from './config'
 
 // duplicated from src/config/chain.ts — that module imports src/config/env.ts
 // (import.meta.env, vite-only) so it can't be loaded under node
@@ -11,20 +11,26 @@ const robinhood = defineChain({
   contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } },
 })
 
-const url = rpcUrl()
-export const usingPrivateRpc = url !== PUBLIC_RPC
+const urls = rpcUrls()
+export const usingPrivateRpc = urls.some((url) => url !== PUBLIC_RPC)
 // timeout is deliberately tight: a healthy 400-call aggregate answers in 2-4s
 // (measured 2026-07-16); a stalled attempt should fail fast and retry, not
 // pin the whole boot for 30s. Bad chunks degrade to sub-chunks in mc().
 export const pc: PublicClient = createPublicClient({
   chain: robinhood,
-  transport: http(url, { timeout: 10_000, retryCount: 2, retryDelay: 400 }),
+  transport: fallback(
+    urls.map((url) => http(url, { timeout: 10_000 })),
+    { retryCount: 2, retryDelay: 400 },
+  ),
 })
 
 /** error text safe to log — the RPC url (secret) is redacted */
-const redact = (e: unknown) =>
-  String(e instanceof Error ? `${e.name}: ${e.message.split('\n')[0]}` : e)
-    .replaceAll(url, '<rpc>')
+export const safeError = (e: unknown) =>
+  urls
+    .reduce(
+      (text, url) => text.replaceAll(url, '<rpc>'),
+      String(e instanceof Error ? `${e.name}: ${e.message.split('\n')[0]}` : e),
+    )
     .slice(0, 120)
 
 // loose call shape — abi fragments come from parseAbi, results are narrowed by ok<T>()
@@ -49,7 +55,7 @@ export async function mc(calls: Call[]): Promise<McRes[]> {
     try {
       out.push(...(await agg(chunk)))
     } catch (e) {
-      log('[rpc] chunk failed, retrying:', redact(e))
+      log('[rpc] chunk failed, retrying:', safeError(e))
       await sleep(600)
       try {
         out.push(...(await agg(chunk)))
@@ -59,7 +65,7 @@ export async function mc(calls: Call[]): Promise<McRes[]> {
           try {
             out.push(...(await agg(part)))
           } catch (e2) {
-            log(`[rpc] dropped ${part.length}-call sub-chunk:`, redact(e2))
+            log(`[rpc] dropped ${part.length}-call sub-chunk:`, safeError(e2))
             out.push(...part.map(() => ({ status: 'failure' as const })))
           }
         }

@@ -8,6 +8,7 @@
 // NOTE: GT has no UP33 dex entry — UP33 pool stats stay on the frontend's
 // existing dexscreener path; this indexer only serves the Uniswap catalog.
 import { GT, TUNE, log, sleep } from './config'
+import { plausibleUsd } from './state'
 import { poolRow, setTokenPrice, upsertStats } from './store'
 
 const LISTS = [
@@ -60,15 +61,17 @@ function ingest(p: GtPool): boolean {
   const h24 = a.transactions?.h24
   const txns = h24 ? (h24.buys ?? 0) + (h24.sells ?? 0) : null
   upsertStats(addr, num(a.volume_usd?.h24), txns, reserve, 'geckoterminal')
-  // token price seeds: ground truth while fresh; depth = half the pool's reserve
+  // Token price seeds — these are the CREDIBLE roots the whole pricing graph
+  // hangs off, and they're the one input the propagation rails can't second-
+  // guess, so an implausible GT quote is dropped rather than seeded.
   const depth = (reserve ?? 0) / 2
   if (depth > 0) {
     const base = tokenOfId(p.relationships?.base_token?.data?.id)
     const quote = tokenOfId(p.relationships?.quote_token?.data?.id)
     const bp = num(a.base_token_price_usd)
     const qp = num(a.quote_token_price_usd)
-    if (base && bp && bp > 0) setTokenPrice(base, bp, depth, 'gt')
-    if (quote && qp && qp > 0) setTokenPrice(quote, qp, depth, 'gt')
+    if (base && plausibleUsd(bp)) setTokenPrice(base, bp, depth, 'gt')
+    if (quote && plausibleUsd(qp)) setTokenPrice(quote, qp, depth, 'gt')
   }
   return true
 }

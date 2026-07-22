@@ -3,8 +3,8 @@
 // strings). Served same-origin in production (nginx /api → this) and through
 // the vite dev/preview proxy locally.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { PORT, log, now } from './config'
-import { db, kvGet, poolCounts } from './store'
+import { PORT, TUNE, log } from './config'
+import { db, kvGet, notePoolsHit, poolCounts } from './store'
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8' }
 
@@ -54,8 +54,13 @@ function poolsWhere(params: Params): { where: string; args: (string | number)[] 
   return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', args }
 }
 
+// TVL ranking sinks corrupt figures to the bottom instead of filtering them:
+// this chain's whole TVL is ~8 orders under maxPoolTvlUsd, so anything above it
+// is a pricing artefact, not a whale — but it must stay reachable by address or
+// symbol search so it can still be diagnosed. (2026-07-22: without this guard
+// 120 of the 120 rows the POOLS tab fetches were fabricated.)
 const ORDER: Record<string, string> = {
-  tvl: 'ORDER BY (s.tvl_usd IS NULL), s.tvl_usd DESC',
+  tvl: `ORDER BY (s.tvl_usd IS NULL OR s.tvl_usd >= ${TUNE.maxPoolTvlUsd}), s.tvl_usd DESC`,
   vol: 'ORDER BY (st.vol24h_usd IS NULL), st.vol24h_usd DESC',
   created: 'ORDER BY (p.created_block IS NULL), p.created_block DESC, p.pair_index DESC',
 }
@@ -118,7 +123,7 @@ function getPools(params: Params) {
   }
 
   const totals = Object.fromEntries(poolCounts().map((c) => [c.proto, c.n]))
-  return { ready: kvGet('ready') === '1', asof: now(), totals, count, pools, tokens }
+  return { ready: kvGet('ready') === '1', asof: Number(kvGet('snapshot_asof')) || null, totals, count, pools, tokens }
 }
 
 function getTokens(params: Params) {
@@ -141,13 +146,23 @@ function getHealth() {
   const tokens = (db.prepare('SELECT COUNT(*) AS n FROM tokens').get() as { n: number }).n
   const priced = (db.prepare('SELECT COUNT(*) AS n FROM tokens WHERE price_usd > 0').get() as { n: number }).n
   const tvl = (db.prepare('SELECT COUNT(*) AS n FROM pool_state WHERE tvl_usd IS NOT NULL').get() as { n: number }).n
+  // pricing-health canary: a healthy chain has zero of these
+  const corrupt = (
+    db.prepare('SELECT COUNT(*) AS n FROM pool_state WHERE tvl_usd >= ?').get(TUNE.maxPoolTvlUsd) as { n: number }
+  ).n
+  const stateFreshness = db.prepare('SELECT MIN(updated) AS oldest, MAX(updated) AS newest FROM pool_state').get()
+  const statsFreshness = db.prepare('SELECT MAX(updated) AS newest FROM pool_stats').get()
   return {
     ready: kvGet('ready') === '1',
-    asof: now(),
+    asof: Number(kvGet('snapshot_asof')) || null,
+    lastBootError: kvGet('boot_error') || null,
     pools: totals,
     tokens,
     pricedTokens: priced,
     tvlPools: tvl,
+    corruptTvlPools: corrupt,
+    stateFreshness,
+    statsFreshness,
     v3Cursor: Number(kvGet('v3_cursor') ?? 0),
     v2Count: Number(kvGet('v2_count') ?? 0),
     rssMb: Math.round(process.memoryUsage.rss() / 1e6),
@@ -166,7 +181,10 @@ export function startApi(): void {
       }
       let body: unknown
       let cache = 'public, max-age=10'
-      if (url.pathname === '/api/pools') body = getPools(url.searchParams)
+      if (url.pathname === '/api/pools') {
+        notePoolsHit() // open the frontpage-sweep demand gate
+        body = getPools(url.searchParams)
+      }
       else if (url.pathname === '/api/tokens') body = getTokens(url.searchParams)
       else if (url.pathname === '/api/health') {
         body = getHealth()

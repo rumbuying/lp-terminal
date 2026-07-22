@@ -4,7 +4,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { DB_PATH, now } from './config'
+import { DB_PATH, TUNE, now } from './config'
 
 mkdirSync(dirname(DB_PATH), { recursive: true })
 export const db = new DatabaseSync(DB_PATH)
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS pool_state (
   reserve1     TEXT NOT NULL DEFAULT '0',
   total_supply TEXT,    -- univ2 LP supply
   tvl_usd      REAL,
-  tvl_approx   INTEGER NOT NULL DEFAULT 0, -- 1 = only one side priced (tvl = 2× that side)
+  tvl_approx   INTEGER NOT NULL DEFAULT 0, -- 1 = bounded figure: one side unpriced (2× priced side) or junk-side clamp (see tvlOf)
   updated      INTEGER NOT NULL
 );
 
@@ -129,6 +129,17 @@ const priceQ = db.prepare(`
 export const setTokenPrice = (addr: string, usd: number, depthUsd: number, src: string) =>
   void priceQ.run(addr.toLowerCase(), usd, depthUsd, src, now())
 
+// Drop every pool-derived price (reprice rebuilds them from the credible seeds
+// on the same pass) plus anything outside the plausibility band, whatever its
+// source — a GT quote can be garbage too, and a stored fantasy price is how one
+// broken pool poisoned 138 tokens. Runs inside reprice's transaction, so the
+// API never observes the gap.
+const clearDerivedQ = db.prepare(
+  `UPDATE tokens SET price_usd = NULL, price_depth_usd = 0, price_src = NULL, price_updated = NULL
+   WHERE price_src = 'pool' OR (price_usd IS NOT NULL AND (price_usd < ? OR price_usd > ?))`,
+)
+export const clearDerivedPrices = () => void clearDerivedQ.run(TUNE.minTokenUsd, TUNE.maxTokenUsd)
+
 export type TokenRow = {
   address: string
   symbol: string
@@ -184,16 +195,40 @@ const upStatsQ = db.prepare(`
 export const upsertStats = (addr: string, vol24h: number | null, txns24h: number | null, liqUsd: number | null, source: string) =>
   void upStatsQ.run(addr.toLowerCase(), vol24h, txns24h, liqUsd, source, now())
 
+/**
+ * Frontpage set: the top-N pools by TVL — exactly what /api/pools?sort=tvl
+ * returns to the POOLS tab, so sweeping these keeps every on-screen row fresh.
+ * The maxPoolTvlUsd ceiling matches the API's ranking guard: a corrupt figure
+ * must not be able to spend the fast tier's whole RPC budget on itself.
+ */
+export const frontpageAddrs = (n: number): string[] =>
+  (
+    db
+      .prepare('SELECT address FROM pool_state WHERE tvl_usd IS NOT NULL AND tvl_usd < ? ORDER BY tvl_usd DESC LIMIT ?')
+      .all(TUNE.maxPoolTvlUsd, n) as { address: string }[]
+  ).map((r) => r.address)
+
+// ---- demand gate ----
+// The frontpage sweep only spends RPC while the POOLS tab is actually being
+// polled: the API stamps `lastPoolsHit` on every /api/pools request, the sweep
+// loop checks its age. Idle site → no fast sweeps → no cost. Starts "closed"
+// (lastPoolsHit = 0) so nothing sweeps until the first request lands.
+let lastPoolsHit = 0
+export const notePoolsHit = (): void => {
+  lastPoolsHit = Date.now()
+}
+export const poolsHitAgeMs = (): number => Date.now() - lastPoolsHit
+
 /** hot set: real TVL, or GT-visible activity, or freshly created */
 export const hotAddrs = (): string[] =>
   (
     db
       .prepare(
-        `SELECT address FROM pool_state WHERE tvl_usd >= ?
+        `SELECT address FROM pool_state WHERE tvl_usd BETWEEN ? AND ?
          UNION SELECT address FROM pool_stats WHERE vol24h_usd > 0
          UNION SELECT address FROM pools WHERE added_ts > ?`,
       )
-      .all(10_000, now() - 3_600) as { address: string }[]
+      .all(TUNE.hotTvlUsd, TUNE.maxPoolTvlUsd, now() - 3_600) as { address: string }[]
   ).map((r) => r.address)
 
 /**
