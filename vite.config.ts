@@ -6,16 +6,20 @@ import { fileURLToPath } from 'node:url'
 // envPrefix exposes exactly those keys to the client bundle.
 //
 // SECRET RULE: `RPC` (private key-bearing URL) is for personal/local builds only —
-// a build meant for public serving must NOT have it set (see README "Chain reads").
+// a build meant for public serving must NOT have it set (see README "Deploy").
 // A public build reads the chain through same-origin `/rpc` instead; the dev and
 // preview servers below emulate that reverse proxy so the mode is testable locally.
 export default defineConfig(({ mode }) => {
   const envDir = fileURLToPath(new URL('.', import.meta.url))
-  const env = loadEnv(mode, envDir, ['RPC'])
+  const env = loadEnv(mode, envDir, ['RPC', 'KYBERSWAP_'])
+  const feeReceiver = (process.env.KYBERSWAP_FEE_RECEIVER ?? env.KYBERSWAP_FEE_RECEIVER ?? '').trim()
+  if (!/^0x[0-9a-fA-F]{40}$/.test(feeReceiver)) {
+    throw new Error('KYBERSWAP_FEE_RECEIVER must be a valid address; the swap/zap fee sweep requires a configured receiver (see .env.example)')
+  }
   // local emulation of the production reverse proxies, so the server deployment
   // mode is fully testable via `RPC="" npm run build && npm run preview`:
   //  - /rpc   -> the .env RPC (or RPC_PROXY_TARGET override); key stays in node
-  //  - /kyber -> the public kyber aggregator
+  //  - /kyber -> read-only Kyber valuation endpoint
   const upstream = (process.env.RPC_PROXY_TARGET ?? env.RPC ?? '').trim()
   const passthru = (prefix: string, target: string) => ({
     target,
@@ -23,7 +27,6 @@ export default defineConfig(({ mode }) => {
     rewrite: (p: string) => p.replace(new RegExp(`^${prefix}`), ''),
   })
   const proxy: Record<string, object> = {
-    '/kyber-setting': passthru('/kyber-setting', 'https://ks-setting.kyberswap.com'),
     '/kyber': passthru('/kyber', 'https://aggregator-api.kyberswap.com'),
     '/dexscreener': passthru('/dexscreener', 'https://api.dexscreener.com'),
     '/goldsky': passthru('/goldsky', 'https://api.goldsky.com'),

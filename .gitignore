@@ -10,3 +10,18 @@ indexer-dist
 tsconfig.tsbuildinfo
 *.log
 .vite
+
+# local tool caches/artifacts
+.codegraph/
+graphify-out/
+# Claude Code worktrees — nested checkouts of THIS repo; committing one would
+# bury a duplicate copy of the tree. Project config under .claude/ stays tracked.
+.claude/worktrees/
+
+# Internal notes stay internal. Docs are written for the private tree and get
+# copied in by mistake during a sync; ignoring them means `git add -A` can never
+# publish one. Publishing a doc is opt-in: add it below, deliberately.
+*.md
+!README.md
+# The contract map is on-chain fact, and the source comments cite it by path.
+!docs/up33-contract-map.md
