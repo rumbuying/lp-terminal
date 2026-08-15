@@ -21,3 +21,22 @@ export function ThemeControl() {
     </span>
   )
 }
+
+/** compact phone control — the desktop footer is hidden below 720px, so the
+ * light mode still needs a reachable switch in the header. */
+export function MobileThemeControl() {
+  const { t } = useTranslation()
+  const cur = useTheme()
+  const light = THEMES[cur].scheme === 'light'
+  const next: ThemeId = light ? 'mono' : 'light'
+  return (
+    <button
+      className="chip mobile-theme"
+      onClick={() => applyTheme(next)}
+      title={t('theme.switchTip', { name: next })}
+      aria-label={t('theme.switchTip', { name: next })}
+    >
+      {light ? '☾' : '☀'}
+    </button>
+  )
+}

@@ -37,6 +37,7 @@ export function PairAddrs(props: {
   className?: string
 }) {
   const { t } = useTranslation()
+  const pairLabel = `${props.sym0}/${props.sym1}`
   const [at, setAt] = useState<At | null>(null)
   // both hold the address they apply to, not a flag: three rows share this
   // state, and a bare boolean made one row's failure light up all three
@@ -127,11 +128,11 @@ export function PairAddrs(props: {
       <button
         className={`pair-btn ${props.className ?? ''} ${at ? 'on' : ''}`}
         onClick={open}
-        title={t('pools.addrTip')}
+        title={`${pairLabel} · ${t('pools.addrTip')}`}
         aria-haspopup="dialog"
         aria-expanded={!!at}
       >
-        {props.sym0}/{props.sym1}
+        {pairLabel}
       </button>
       {/* Portaled to <body>: the trigger sits inside a table cell that mobile
           gives `overflow: hidden` and `white-space: nowrap`. The portal escapes

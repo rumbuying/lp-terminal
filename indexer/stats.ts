@@ -1,4 +1,4 @@
-// GeckoTerminal enrichment — volume/liquidity/txn stats + token USD price
+// GeckoTerminal enrichment — 5m/1h/6h/24h volume, liquidity/txn stats + token USD price
 // seeds for the pricing waterfall. GT fully covers this chain's Uniswap
 // deployments (network `robinhood`, per-dex top lists) but each list is capped
 // at 10 pages × 20 = top 200 — the long tail keeps chain-derived TVL only.
@@ -21,7 +21,7 @@ type GtPool = {
   attributes?: {
     address?: string
     reserve_in_usd?: string
-    volume_usd?: { h24?: string }
+    volume_usd?: { m5?: string; h1?: string; h6?: string; h24?: string }
     transactions?: { h24?: { buys?: number; sells?: number } }
     base_token_price_usd?: string
     quote_token_price_usd?: string
@@ -47,6 +47,7 @@ async function gtJson(url: string): Promise<{ data?: GtPool[] } | null> {
 }
 
 const num = (x: unknown): number | null => {
+  if (x === null || x === undefined || x === '') return null
   const n = Number(x)
   return Number.isFinite(n) ? n : null
 }
@@ -60,7 +61,18 @@ function ingest(p: GtPool): boolean {
   const reserve = num(a.reserve_in_usd)
   const h24 = a.transactions?.h24
   const txns = h24 ? (h24.buys ?? 0) + (h24.sells ?? 0) : null
-  upsertStats(addr, num(a.volume_usd?.h24), txns, reserve, 'geckoterminal')
+  upsertStats(
+    addr,
+    {
+      m5: num(a.volume_usd?.m5),
+      h1: num(a.volume_usd?.h1),
+      h6: num(a.volume_usd?.h6),
+      h24: num(a.volume_usd?.h24),
+    },
+    txns,
+    reserve,
+    'geckoterminal',
+  )
   // Token price seeds — these are the CREDIBLE roots the whole pricing graph
   // hangs off, and they're the one input the propagation rails can't second-
   // guess, so an implausible GT quote is dropped rather than seeded.

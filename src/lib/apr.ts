@@ -12,18 +12,44 @@ import type { ClPool, Pool, V2Pool } from '../types'
 
 const YEAR = 31_536_000
 
-export function fees24Of(p: Pool, stat?: PoolStat): number | null {
-  if (stat?.vol24hUsd == null) return null
-  const feePct = p.kind === 'v2' ? p.feeBps / 100 : p.feePpm / 10_000
-  return (stat.vol24hUsd * feePct) / 100
+export type VolumeWindow = 'm5' | 'h1' | 'h6' | 'h24'
+
+const VOLUME_FIELD: Record<VolumeWindow, keyof Pick<PoolStat, 'vol5mUsd' | 'vol1hUsd' | 'vol6hUsd' | 'vol24hUsd'>> = {
+  m5: 'vol5mUsd',
+  h1: 'vol1hUsd',
+  h6: 'vol6hUsd',
+  h24: 'vol24hUsd',
 }
 
-/** pool-average fee APR for an UNSTAKED LP (net of the CL unstaked levy) */
-export function feeAprOf(p: Pool, stat?: PoolStat): number | null {
-  if (stat?.vol24hUsd == null || stat.liqUsd == null || stat.liqUsd <= 0) return null
-  const feeFrac = p.kind === 'v2' ? p.feeBps / 10_000 : p.feePpm / 1e6
+const WINDOW_SECONDS: Record<VolumeWindow, number> = {
+  m5: 5 * 60,
+  h1: 60 * 60,
+  h6: 6 * 60 * 60,
+  h24: 24 * 60 * 60,
+}
+
+export function volumeOf(stat: PoolStat | undefined, window: VolumeWindow): number | null {
+  return stat?.[VOLUME_FIELD[window]] ?? null
+}
+
+export function feesOf(p: Pool, stat: PoolStat | undefined, window: VolumeWindow): number | null {
+  const volume = volumeOf(stat, window)
+  if (volume == null) return null
+  const feePct = p.kind === 'v2' ? p.feeBps / 100 : p.feePpm / 10_000
+  return (volume * feePct) / 100
+}
+
+export const fees24Of = (p: Pool, stat?: PoolStat): number | null => feesOf(p, stat, 'h24')
+
+/** Pool-average fee APR for an UNSTAKED LP, annualized from the selected
+ * rolling window and net of the CL unstaked levy. Short windows are intentionally
+ * not smoothed: the UI labels the active window so spikes remain recognizable. */
+export function feeAprOf(p: Pool, stat: PoolStat | undefined, window: VolumeWindow = 'h24'): number | null {
+  if (stat?.liqUsd == null || stat.liqUsd <= 0) return null
+  const grossFees = feesOf(p, stat, window)
+  if (grossFees == null) return null
   const keep = p.kind === 'cl' ? 1 - p.unstakedFeePpm / 1e6 : 1
-  return ((stat.vol24hUsd * feeFrac * keep * 365) / stat.liqUsd) * 100
+  return ((grossFees * keep * (YEAR / WINDOW_SECONDS[window])) / stat.liqUsd) * 100
 }
 
 export function stakedShareOf(p: Pool): number {

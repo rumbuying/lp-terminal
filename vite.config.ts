@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 
 // envDir points at the repo root so `.env` (RPC / KYBERSWAP_*) is picked up.
 // envPrefix exposes exactly those keys to the client bundle.
@@ -26,6 +27,18 @@ export default defineConfig(({ mode }) => {
     changeOrigin: true,
     rewrite: (p: string) => p.replace(new RegExp(`^${prefix}`), ''),
   })
+  const executorToken = (() => {
+    const tokenFile = process.env.LP_EXECUTOR_API_TOKEN_FILE?.trim()
+      || fileURLToPath(new URL('.local-executor/secrets/api.token', import.meta.url))
+    try { return readFileSync(tokenFile, 'utf8').trim() } catch { return '' }
+  })()
+  const executorProxy: ReturnType<typeof passthru> & { configure?: (proxy: any) => void } =
+    passthru('/executor', `http://127.0.0.1:${process.env.LP_EXECUTOR_PORT || 8790}`)
+  if (executorToken) {
+    executorProxy.configure = (proxy) => proxy.on('proxyReq', (proxyReq: any) => {
+      if (!proxyReq.getHeader('authorization')) proxyReq.setHeader('authorization', `Bearer ${executorToken}`)
+    })
+  }
   const proxy: Record<string, object> = {
     '/kyber': passthru('/kyber', 'https://aggregator-api.kyberswap.com'),
     '/dexscreener': passthru('/dexscreener', 'https://api.dexscreener.com'),
@@ -34,6 +47,9 @@ export default defineConfig(({ mode }) => {
     // production nginx route; the frontend falls back to client-side
     // dexscreener discovery when it isn't running
     '/api': { target: `http://localhost:${process.env.INDEXER_PORT || 8787}`, changeOrigin: true },
+    // The admin token remains server-side in the local Vite process. Direct
+    // executor access still requires bearer auth; the browser gets no secret.
+    '/executor': executorProxy,
   }
   if (/^https?:\/\//.test(upstream)) proxy['/rpc'] = passthru('/rpc', upstream)
 

@@ -111,6 +111,7 @@ async function main() {
   })) as Res[]
   let tickOk = 0
   let tickBad = 0
+  const tickBadPools: string[] = []
   const clPools: {
     addr: Address
     sqrtP: bigint
@@ -135,10 +136,15 @@ async function main() {
     if (s0[0] === 0n) return
     const lo = getSqrtRatioAtTick(s0[1])
     const hi = getSqrtRatioAtTick(s0[1] + 1)
-    if (lo <= s0[0] && s0[0] < hi) tickOk++
-    else tickBad++
+    // At an initialized boundary UP33 may retain the lower tick while sqrtP
+    // equals the next tick exactly (direction-dependent crossing semantics).
+    if (lo <= s0[0] && s0[0] <= hi) tickOk++
+    else {
+      tickBad++
+      tickBadPools.push(`${p}@${s0[1]}`)
+    }
   })
-  check('slot0 sqrtPrice within [tick, tick+1) for all CL pools', tickBad === 0, `${tickOk} ok / ${tickBad} bad`)
+  check('slot0 sqrtPrice within [tick, tick+1] for all CL pools', tickBad === 0, `${tickOk} ok / ${tickBad} bad${tickBadPools.length ? ` (${tickBadPools.join(',')})` : ''}`)
 
   // 6. WETH/UP: raw UP33 quoter plus the product's direct comparison module
   const wethUp = clPools
@@ -205,6 +211,23 @@ async function main() {
       weight: 0n,
       rewardRate: 0n,
       periodFinish: 0n,
+    }
+
+    try {
+      const r = await fetch(
+        `https://aggregator-api.kyberswap.com/robinhood/api/v1/routes?tokenIn=${ADDR.WETH}&tokenOut=${ADDR.UP}&amountIn=${oneWeth}`,
+        { headers: { 'x-client-id': 'up33-terminal-smoke' } },
+      )
+      const j: any = await r.json()
+      const aggOut = BigInt(j?.data?.routeSummary?.amountOut ?? '0')
+      if (aggOut > 0n && quoterOut) {
+        const rel = Math.abs(Number(aggOut - quoterOut)) / Number(aggOut)
+        check('kyber agg vs our single-pool quote (<25%)', rel < 0.25, `agg=${aggOut} ours=${quoterOut}`)
+      } else {
+        check('swap quote path available (Kyber or UP33 on-chain fallback)', Boolean(quoterOut && quoterOut > 0n), j?.message ?? 'Kyber unavailable; on-chain quote is ready')
+      }
+    } catch (e) {
+      check('swap quote path available (Kyber or UP33 on-chain fallback)', Boolean(quoterOut && quoterOut > 0n), `Kyber unavailable; on-chain quote is ready (${String(e)})`)
     }
     const direct = await quoteDirectCandidates(pc, [smokePool], ADDR.WETH, ADDR.UP, oneWeth, 9)
     check(

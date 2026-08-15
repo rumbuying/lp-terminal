@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { usePublicClient } from 'wagmi'
 import type { Address, PublicClient } from 'viem'
-import { clGaugeAbi, clPmAbi, erc20Abi, uniV2PairAbi, uniV3FactoryAbi, uniV3PmAbi, uniV3PoolAbi, v2GaugeAbi, v2PoolAbi } from '../abi'
+import { clGaugeAbi, clPmAbi, clPoolAbi, erc20Abi, uniV2PairAbi, uniV3FactoryAbi, uniV3PmAbi, uniV3PoolAbi, v2GaugeAbi, v2PoolAbi } from '../abi'
 import { ADDR, CHAIN_ID, EXPLORER, UNI } from '../config/addresses'
 import { MAX_UINT128, getAmountsForLiquidity, getSqrtRatioAtTick } from '../lib/clmath'
 import { previewV2ClaimFees } from '../lib/v2Fees'
@@ -15,6 +15,28 @@ async function mc(pc: PublicClient, contracts: unknown[]): Promise<McRes[]> {
 }
 function ok<T>(r: McRes | undefined): T | undefined {
   return r && r.status === 'success' ? (r.result as T) : undefined
+}
+
+/**
+ * Enumerate the complete ERC-721 owner inventory in bounded multicalls.
+ * Closed LP NFTs remain in the wallet forever, so a fixed first-N cap will
+ * eventually hide every newly minted strategy position once the wallet has
+ * accumulated N old NFTs.
+ */
+async function ownerTokenIds(pc: PublicClient, abi: typeof clPmAbi | typeof uniV3PmAbi, manager: Address, owner: Address, count: number): Promise<bigint[]> {
+  const ids: bigint[] = []
+  const batchSize = 100
+  for (let start = 0; start < count; start += batchSize) {
+    const end = Math.min(count, start + batchSize)
+    const results = await mc(pc, Array.from({ length: end - start }, (_, offset) => ({
+      abi,
+      address: manager,
+      functionName: 'tokenOfOwnerByIndex',
+      args: [owner, BigInt(start + offset)],
+    })))
+    ids.push(...results.map((result) => ok<bigint>(result)).filter((id): id is bigint => id !== undefined))
+  }
+  return ids
 }
 
 type RawPos = readonly [
@@ -159,16 +181,7 @@ async function fetchUniPositions(
   const count = Number(ok<bigint>(cntRes[0]) ?? 0n)
   if (count === 0) return none
 
-  const idRes = await mc(
-    pc,
-    Array.from({ length: Math.min(count, 100) }, (_, i) => ({
-      abi: uniV3PmAbi,
-      address: UNI.V3_NPM,
-      functionName: 'tokenOfOwnerByIndex',
-      args: [user, BigInt(i)],
-    })),
-  )
-  const ids = idRes.map((r) => ok<bigint>(r)).filter((x): x is bigint => x !== undefined)
+  const ids = await ownerTokenIds(pc, uniV3PmAbi, UNI.V3_NPM, user, count)
   if (ids.length === 0) return none
 
   const posRes = await mc(
@@ -293,7 +306,7 @@ async function fetchUniPositions(
   return { cl, tokens }
 }
 
-async function fetchPositions(
+async function fetchPositionsFull(
   pc: PublicClient,
   user: Address,
   pools: PoolsData,
@@ -358,16 +371,7 @@ async function fetchPositions(
   }
 
   // pass 2: wallet tokenIds
-  const idRes = await mc(
-    pc,
-    Array.from({ length: Math.min(walletCount, 100) }, (_, i) => ({
-      abi: clPmAbi,
-      address: ADDR.CL_PM,
-      functionName: 'tokenOfOwnerByIndex',
-      args: [user, BigInt(i)],
-    })),
-  )
-  const walletIds = idRes.map((r) => ok<bigint>(r)).filter((x): x is bigint => x !== undefined)
+  const walletIds = await ownerTokenIds(pc, clPmAbi, ADDR.CL_PM, user, walletCount)
 
   // pass 3: position structs (+ earned for staked)
   const stakedFlat = stakedIdsByGauge.flatMap(({ pool, ids }) => ids.map((id) => ({ pool, id })))
@@ -506,13 +510,187 @@ async function fetchPositions(
   return { cl, v2, tokens: { ...uni.tokens, ...uniV2.tokens } }
 }
 
-export function usePositions(user?: Address) {
+const POSITION_DISCOVERY_TTL_MS = 60_000
+const positionDiscoveryCache = new Map<string, { discoveredAt: number; data: PositionsData }>()
+const positionKey = (position: ClPosition) => `${position.pool.protocol}:${position.tokenId.toString()}`
+
+/**
+ * Refreshes every known position in one Multicall while the slower inventory
+ * discovery is cached. Ownership changes force immediate rediscovery, so a
+ * rebalance/stake/unstake still appears on the next 15-second UI refresh.
+ */
+export async function refreshKnownPositions(pc: PublicClient, user: Address, pools: PoolsData, known: PositionsData): Promise<PositionsData> {
+  const calls: unknown[] = []
+  for (const position of known.cl) {
+    const pmAbi = position.pool.protocol === 'univ3' ? uniV3PmAbi : clPmAbi
+    const manager = position.pool.protocol === 'univ3' ? UNI.V3_NPM : ADDR.CL_PM
+    calls.push(
+      { abi: pmAbi, address: manager, functionName: 'ownerOf', args: [position.tokenId] },
+      { abi: pmAbi, address: manager, functionName: 'positions', args: [position.tokenId] },
+    )
+    if (position.staked && position.pool.gauge)
+      calls.push({ abi: clGaugeAbi, address: position.pool.gauge, functionName: 'earned', args: [user, position.tokenId] })
+  }
+  const uniquePools = [...new Map(known.cl.map((position) => [position.pool.address.toLowerCase(), position.pool])).values()]
+  for (const pool of uniquePools) {
+    const abi = pool.protocol === 'univ3' ? uniV3PoolAbi : clPoolAbi
+    calls.push(
+      { abi, address: pool.address, functionName: 'slot0' },
+      { abi, address: pool.address, functionName: 'liquidity' },
+    )
+    if (pool.protocol === 'up33') calls.push({ abi: clPoolAbi, address: pool.address, functionName: 'stakedLiquidity' })
+  }
+  for (const position of known.v2) {
+    if (position.pool.protocol === 'univ2') {
+      calls.push(
+        { abi: uniV2PairAbi, address: position.pool.address, functionName: 'getReserves' },
+        { abi: uniV2PairAbi, address: position.pool.address, functionName: 'totalSupply' },
+        { abi: uniV2PairAbi, address: position.pool.address, functionName: 'balanceOf', args: [user] },
+      )
+    } else {
+      calls.push(
+        { abi: v2PoolAbi, address: position.pool.address, functionName: 'balanceOf', args: [user] },
+        { abi: v2PoolAbi, address: position.pool.address, functionName: 'claimable0', args: [user] },
+        { abi: v2PoolAbi, address: position.pool.address, functionName: 'claimable1', args: [user] },
+      )
+      if (position.pool.gauge) calls.push(
+        { abi: v2GaugeAbi, address: position.pool.gauge, functionName: 'balanceOf', args: [user] },
+        { abi: v2GaugeAbi, address: position.pool.gauge, functionName: 'earned', args: [user] },
+      )
+    }
+  }
+
+  const results = await mc(pc, calls)
+  let cursor = 0
+  const rawByPosition = new Map<string, RawPos>()
+  const earnedByPosition = new Map<string, bigint>()
+  for (const position of known.cl) {
+    const nftOwner = ok<Address>(results[cursor++])
+    const raw = ok<RawPos>(results[cursor++])
+    const expectedOwner = position.staked ? position.pool.gauge : user
+    if (!nftOwner || !expectedOwner || nftOwner.toLowerCase() !== expectedOwner.toLowerCase() || !raw)
+      throw new Error('E_POSITION_INVENTORY_CHANGED')
+    rawByPosition.set(positionKey(position), raw)
+    if (position.staked && position.pool.gauge) {
+      const earned = ok<bigint>(results[cursor++])
+      if (earned === undefined) throw new Error('E_POSITION_INVENTORY_CHANGED')
+      earnedByPosition.set(positionKey(position), earned)
+    }
+  }
+
+  const livePools = new Map<string, ClPool>()
+  for (const pool of uniquePools) {
+    const slot0 = ok<readonly [bigint, number, ...unknown[]]>(results[cursor++])
+    const liquidity = ok<bigint>(results[cursor++])
+    const stakedLiquidity = pool.protocol === 'up33' ? ok<bigint>(results[cursor++]) : 0n
+    if (!slot0 || liquidity === undefined || stakedLiquidity === undefined) throw new Error('E_POSITION_POOL_CHANGED')
+    const latest = pools.pools.find((candidate): candidate is ClPool => candidate.kind === 'cl' && candidate.address.toLowerCase() === pool.address.toLowerCase()) ?? pool
+    livePools.set(pool.address.toLowerCase(), {
+      ...latest,
+      sqrtPriceX96: slot0[0],
+      tick: Number(slot0[1]),
+      liquidity,
+      stakedLiquidity,
+    })
+  }
+
+  const cl: ClPosition[] = known.cl.map((position) => {
+    const raw = rawByPosition.get(positionKey(position))!
+    const pool = livePools.get(position.pool.address.toLowerCase())!
+    if (raw[2].toLowerCase() !== pool.token0.toLowerCase() || raw[3].toLowerCase() !== pool.token1.toLowerCase())
+      throw new Error('E_POSITION_POOL_CHANGED')
+    if (raw[7] === 0n && raw[10] === 0n && raw[11] === 0n) throw new Error('E_POSITION_INVENTORY_CHANGED')
+    const amounts = getAmountsForLiquidity(pool.sqrtPriceX96, getSqrtRatioAtTick(raw[5]), getSqrtRatioAtTick(raw[6]), raw[7])
+    return {
+      ...position,
+      pool,
+      tickLower: raw[5],
+      tickUpper: raw[6],
+      liquidity: raw[7],
+      amount0: amounts.amount0,
+      amount1: amounts.amount1,
+      fees0: raw[10],
+      fees1: raw[11],
+      earned: earnedByPosition.get(positionKey(position)) ?? 0n,
+    }
+  })
+
+  await Promise.all(cl.filter((position) => !position.staked).map(async (position) => {
+    try {
+      const simulation = await pc.simulateContract({
+        abi: clPmAbi,
+        address: position.pool.protocol === 'univ3' ? UNI.V3_NPM : ADDR.CL_PM,
+        functionName: 'collect',
+        args: [{ tokenId: position.tokenId, recipient: user, amount0Max: MAX_UINT128, amount1Max: MAX_UINT128 }],
+        account: user,
+      })
+      const [fee0, fee1] = simulation.result as readonly [bigint, bigint]
+      position.fees0 = fee0
+      position.fees1 = fee1
+    } catch { /* tokensOwed fallback remains honest */ }
+  }))
+
+  const v2: V2Position[] = []
+  for (const position of known.v2) {
+    if (position.pool.protocol === 'univ2') {
+      const reserves = ok<readonly [bigint, bigint, number]>(results[cursor++])
+      const totalSupply = ok<bigint>(results[cursor++])
+      const walletLp = ok<bigint>(results[cursor++])
+      if (!reserves || !totalSupply || walletLp === undefined || walletLp === 0n) throw new Error('E_POSITION_INVENTORY_CHANGED')
+      const pool = { ...position.pool, reserve0: reserves[0], reserve1: reserves[1], totalSupply }
+      v2.push({ ...position, pool, walletLp, amount0: (walletLp * reserves[0]) / totalSupply, amount1: (walletLp * reserves[1]) / totalSupply })
+      continue
+    }
+    const walletLp = ok<bigint>(results[cursor++]) ?? 0n
+    let claimable0 = ok<bigint>(results[cursor++]) ?? 0n
+    let claimable1 = ok<bigint>(results[cursor++]) ?? 0n
+    const stakedLp = position.pool.gauge ? ok<bigint>(results[cursor++]) ?? 0n : 0n
+    const earned = position.pool.gauge ? ok<bigint>(results[cursor++]) ?? 0n : 0n
+    if (walletLp === 0n && stakedLp === 0n && claimable0 === 0n && claimable1 === 0n && earned === 0n)
+      throw new Error('E_POSITION_INVENTORY_CHANGED')
+    const latest = pools.pools.find((candidate): candidate is V2Pool => candidate.kind === 'v2' && candidate.address.toLowerCase() === position.pool.address.toLowerCase()) ?? position.pool
+    if (walletLp > 0n) [claimable0, claimable1] = await previewV2ClaimFees(pc, latest.address, user, [claimable0, claimable1])
+    const lp = walletLp + stakedLp
+    v2.push({
+      ...position,
+      pool: latest,
+      walletLp,
+      stakedLp,
+      earned,
+      claimable0,
+      claimable1,
+      amount0: latest.totalSupply > 0n ? (lp * latest.reserve0) / latest.totalSupply : 0n,
+      amount1: latest.totalSupply > 0n ? (lp * latest.reserve1) / latest.totalSupply : 0n,
+    })
+  }
+  return { cl, v2, tokens: known.tokens }
+}
+
+async function fetchPositions(pc: PublicClient, user: Address, pools: PoolsData): Promise<PositionsData> {
+  const key = user.toLowerCase()
+  const cached = positionDiscoveryCache.get(key)
+  if (cached && Date.now() - cached.discoveredAt < POSITION_DISCOVERY_TTL_MS) {
+    try {
+      const data = await refreshKnownPositions(pc, user, pools, cached.data)
+      positionDiscoveryCache.set(key, { ...cached, data })
+      return data
+    } catch {
+      // A disappeared/changed NFT is normally an executor rebalance. Fall
+      // through to full discovery immediately instead of showing stale data.
+    }
+  }
+  const data = await fetchPositionsFull(pc, user, pools)
+  positionDiscoveryCache.set(key, { discoveredAt: Date.now(), data })
+  return data
+}
+
+export function usePositions(user?: Address, options: { refetchInterval?: number | false; poolsRefetchInterval?: number | false } = {}) {
   const pc = usePublicClient({ chainId: CHAIN_ID })
-  const pools = usePools()
+  const pools = usePools({ refetchInterval: options.poolsRefetchInterval })
   return useQuery({
     queryKey: ['positions', user],
     enabled: !!pc && !!user && !!pools.data,
-    refetchInterval: 15_000,
+    refetchInterval: options.refetchInterval ?? 15_000,
     queryFn: () => fetchPositions(pc as PublicClient, user!, pools.data!),
   })
 }

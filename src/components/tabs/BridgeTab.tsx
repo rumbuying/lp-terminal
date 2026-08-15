@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useConnectModal } from '@rainbow-me/rainbowkit'
 import { useAccount } from 'wagmi'
 import { formatUnits, parseUnits } from 'viem'
 import { CHAIN_ID, NATIVE } from '../../config/addresses'
@@ -28,6 +27,7 @@ import type { BridgeProviderId } from '../../lib/bridge/types'
 import { bpsDiff, fmtAmount, fmtNum, fmtUsd, sanitizeAmountInput } from '../../lib/format'
 import { slippageTone } from '../../lib/swapGate'
 import { txlog } from '../../lib/txlog'
+import { openWalletPicker } from '../../lib/walletConnect'
 import type { TokenInfo } from '../../types'
 import { Badge, Btn } from '../ui'
 
@@ -48,7 +48,6 @@ type RunState = { stage: BridgeStage | 'done'; hasApprove: boolean } | null
 export function BridgeTab() {
   const { t } = useTranslation()
   const { address: user } = useAccount()
-  const { openConnectModal } = useConnectModal()
 
   const [dir, setDir] = useState<BridgeDir>('in')
   const [symWanted, setSymWanted] = useState('ETH')
@@ -566,7 +565,7 @@ export function BridgeTab() {
         {progressStrip}
 
         <div className="swap-cta">
-          <Btn big busy={busy} disabled={ctaDisabled} onClick={!user ? () => openConnectModal?.() : doBridge}>
+          <Btn big busy={busy} disabled={ctaDisabled} onClick={!user ? openWalletPicker : doBridge}>
             {cta}
           </Btn>
         </div>

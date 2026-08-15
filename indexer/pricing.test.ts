@@ -62,6 +62,17 @@ test('a token price is the depth-weighted median of its quotes', () => {
   )
 })
 
+test('price storage converts non-finite numeric inputs to safe SQLite values', () => {
+  const token = A(0x77)
+  setTokenPrice(token, 1, Infinity, 'pool')
+  const row = db.prepare('SELECT price_usd, price_depth_usd FROM tokens WHERE address = ?').get(token) as {
+    price_usd: number | null
+    price_depth_usd: number
+  }
+  assert.equal(row.price_usd, 1)
+  assert.equal(row.price_depth_usd, 0)
+})
+
 test('tvl clamps a runaway pool-priced side to the credible side', () => {
   // the autopsied case: $387 credible USDG vs $10.85M pool-priced P → $774 approx
   assert.deepEqual(tvlOf(10_850_000, false, 387, true), { tvl: 774, approx: true })

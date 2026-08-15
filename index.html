@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230a0e0b'/><rect x='3' y='7' width='10' height='6' fill='%234af626'/><rect x='3' y='3' width='10' height='2' fill='%234af626'/></svg>"
@@ -15,7 +15,10 @@
       try {
         var m = location.search.match(/[?&]theme=(\w+)/)
         var t = (m && m[1]) || localStorage.getItem('up33.theme.v1')
-        if (/^(mono|phosphor|amber|ice|violet)$/.test(t)) document.documentElement.dataset.theme = t
+        if (/^(mono|light|phosphor|amber|ice|violet)$/.test(t)) {
+          document.documentElement.dataset.theme = t
+          document.documentElement.style.colorScheme = t === 'light' ? 'light' : 'dark'
+        }
       } catch (e) {}
     </script>
   </head>

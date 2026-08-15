@@ -1,0 +1,39 @@
+[Unit]
+Description=LP Terminal strategy executor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=lpexecutor
+Group=lpexecutor
+WorkingDirectory=/opt/lp-terminal-executor/app
+Environment=NODE_ENV=production
+Environment=LP_EXECUTOR_HOST=127.0.0.1
+Environment=LP_EXECUTOR_PORT=8790
+Environment=LP_EXECUTOR_DATA_DIR=/opt/lp-terminal-executor/data
+Environment=LP_EXECUTOR_MASTER_KEY_FILE=/etc/lp-terminal-executor/master.key
+Environment=LP_EXECUTOR_API_TOKEN_FILE=/etc/lp-terminal-executor/api.token
+Environment=LP_EXECUTOR_RPC_FILE=/etc/lp-terminal-executor/rpc.url
+Environment=LP_EXECUTOR_RPC_RETRY_COUNT=5
+Environment=LP_EXECUTOR_RPC_RETRY_DELAY_MS=400
+Environment=LP_EXECUTOR_RPC_TIMEOUT_MS=15000
+Environment=LP_EXECUTOR_MONITOR_MIN_SECONDS=10
+Environment=LP_EXECUTOR_MONITOR_IDENTITY_TTL_SECONDS=300
+# Optional alternative to the encrypted vault. Enable both lines together.
+# Environment=LP_EXECUTOR_PRIVATE_KEY_FILE=/etc/lp-terminal-executor/wallet.key
+# Environment=LP_EXECUTOR_PRIVATE_KEY_WALLET_ID=wallet_server_01
+Environment=LP_EXECUTOR_ALLOWED_ORIGIN=https://lp.coinfetcher.xyz
+Environment=PATH=/opt/node-v22/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/lp-terminal-executor/app/node_modules/.bin/tsx executor/main.ts
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/lp-terminal-executor
+ReadOnlyPaths=/etc/lp-terminal-executor
+
+[Install]
+WantedBy=multi-user.target

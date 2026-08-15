@@ -22,12 +22,14 @@ import {
 import {
   emitAprOf,
   feeAprOf,
-  fees24Of,
+  feesOf,
   fmtApr,
   simulateClAdd,
   simulateV2Add,
   stakedShareOf,
   type AddSim,
+  type VolumeWindow,
+  volumeOf,
 } from '../../lib/apr'
 import { fmtAmount, fmtCompact, fmtCompactAmount, fmtNum, fmtUsd, nowSec } from '../../lib/format'
 import { poolStatWithFallback } from '../../lib/poolStatFallback'
@@ -54,12 +56,20 @@ import { AmountRow, Btn, NumInput } from '../ui'
 
 const SLIP_BPS = 100
 
-type SortKey = 'vol' | 'fees24' | 'tvl' | 'feeApr' | 'rewards' | null
+type SortKey = 'vol' | 'fees' | 'tvl' | 'feeApr' | 'rewards' | null
 type ProtoFilter = 'all' | 'up33' | 'univ3' | 'univ2'
+
+const VOLUME_WINDOWS: readonly { key: VolumeWindow; label: string }[] = [
+  { key: 'm5', label: '5M' },
+  { key: 'h1', label: '1H' },
+  { key: 'h6', label: '6H' },
+  { key: 'h24', label: '24H' },
+]
 
 // Top-level tabs unmount; retain only the browsing choices for this session.
 let rememberedSort: SortKey = 'vol'
 let rememberedProto: ProtoFilter = 'all'
+let rememberedVolumeWindow: VolumeWindow = 'h24'
 
 export function PoolsTab() {
   const { t } = useTranslation()
@@ -73,6 +83,7 @@ export function PoolsTab() {
   const [sort, setSortState] = useState<SortKey>(rememberedSort)
   const [onlyMine, setOnlyMine] = useState(false)
   const [proto, setProtoState] = useState<ProtoFilter>(rememberedProto)
+  const [volumeWindow, setVolumeWindowState] = useState<VolumeWindow>(rememberedVolumeWindow)
   const [uniQuery, setUniQuery] = useState('') // '' = whole catalog by TVL (index) / WETH pools (fallback)
   const [hideDust, setHideDust] = useState(true) // 95% of the uniswap catalog is <$1k meme dust
   // APR explainer popover, anchored under the ⓘ that opened it (fixed: the
@@ -87,6 +98,10 @@ export function PoolsTab() {
   const setProto = (next: ProtoFilter) => {
     rememberedProto = next
     setProtoState(next)
+  }
+  const setVolumeWindow = (next: VolumeWindow) => {
+    rememberedVolumeWindow = next
+    setVolumeWindowState(next)
   }
 
   // typing filters the local list instantly; the catalog query follows 350ms behind
@@ -129,7 +144,12 @@ export function PoolsTab() {
     for (const p of [...(pools.data?.pools ?? []), ...(uni.data?.pools ?? [])]) {
       const a = p.address.toLowerCase()
       const s = byPool[a] ?? uniStats?.[a]
-      if (!s || s.vol24hUsd == null || s.liqUsd == null) out.push(a)
+      const missingExistingStat = !s || s.vol24hUsd == null || s.liqUsd == null
+      // Goldsky is intentionally 24h-only in this iteration. Do not spend the
+      // DexScreener fallback cap on its v2 rows just because intraday is null.
+      const missingIntraday =
+        s?.source !== 'subgraph' && (s?.vol5mUsd == null || s?.vol1hUsd == null || s?.vol6hUsd == null)
+      if (missingExistingStat || missingIntraday) out.push(a)
       if (out.length >= 90) break // 3 batched calls — rows past the cap keep their "—"
     }
     return out
@@ -149,6 +169,7 @@ export function PoolsTab() {
     return out
   }, [pools.data, uni.data, stats.data, dsFb.data])
   const statOf = (p: Pool) => mergedStats[p.address.toLowerCase()]
+  const volumeWindowLabel = VOLUME_WINDOWS.find((item) => item.key === volumeWindow)!.label
 
   if (pools.isLoading)
     return (
@@ -176,10 +197,10 @@ export function PoolsTab() {
   })
   if (sort) {
     list = [...list].sort((a, b) => {
-      if (sort === 'vol') return (statOf(b)?.vol24hUsd ?? -1) - (statOf(a)?.vol24hUsd ?? -1)
-      if (sort === 'fees24') return (fees24Of(b, statOf(b)) ?? -1) - (fees24Of(a, statOf(a)) ?? -1)
+      if (sort === 'vol') return (volumeOf(statOf(b), volumeWindow) ?? -1) - (volumeOf(statOf(a), volumeWindow) ?? -1)
+      if (sort === 'fees') return (feesOf(b, statOf(b), volumeWindow) ?? -1) - (feesOf(a, statOf(a), volumeWindow) ?? -1)
       if (sort === 'tvl') return (statOf(b)?.liqUsd ?? -1) - (statOf(a)?.liqUsd ?? -1)
-      if (sort === 'feeApr') return (feeAprOf(b, statOf(b)) ?? -1) - (feeAprOf(a, statOf(a)) ?? -1)
+      if (sort === 'feeApr') return (feeAprOf(b, statOf(b), volumeWindow) ?? -1) - (feeAprOf(a, statOf(a), volumeWindow) ?? -1)
       return (
         (emitAprOf(b, statOf(b), upPrice.data) ?? -1) - (emitAprOf(a, statOf(a), upPrice.data) ?? -1)
       )
@@ -289,8 +310,21 @@ export function PoolsTab() {
           )}
         </span>
       </div>
+      <div className="form-row stat-window-row">
+        <span className="dim mono-sm">{t('pools.window')}</span>
+        {VOLUME_WINDOWS.map(({ key, label }) => (
+          <button
+            key={key}
+            className={`chip ${volumeWindow === key ? 'on' : ''}`}
+            onClick={() => setVolumeWindow(key)}
+            title={t('pools.windowTip', { window: label })}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="tbl-wrap">
-        <table className="tbl">
+        <table className="tbl pools-table">
           <thead>
             <tr>
               <th>{t('pools.thPair')}</th>
@@ -300,10 +334,10 @@ export function PoolsTab() {
                   edge, and its content ("24.9M CASHCAT + 12.4 WETH") has no
                   natural width bound. */}
               <th className="hide-t">{t('pools.thPrice')}</th>
-              {th('tvl', t('pools.thTvl'), '', t('pools.thVol'))}
-              {th('vol', t('pools.thVol'), 'hide-m')}
-              {th('fees24', t('pools.thFees'), 'hide-m')}
-              {th('feeApr', t('pools.thFeeApr'), '', t('pools.thRewards'), true)}
+              {th('tvl', t('pools.thTvl'), '', t('pools.thVolWindow', { window: volumeWindowLabel }))}
+              {th('vol', t('pools.thVolWindow', { window: volumeWindowLabel }), 'hide-m')}
+              {th('fees', t('pools.thFeesWindow', { window: volumeWindowLabel }), 'hide-m')}
+              {th('feeApr', t('pools.thFeeAprWindow', { window: volumeWindowLabel }), '', t('pools.thRewards'), true)}
               {th('rewards', t('pools.thRewards'), 'hide-m')}
               {/* the row itself is the toggle everywhere, so this column is pure
                   width below a laptop — same trade the phone layout already made */}
@@ -317,6 +351,7 @@ export function PoolsTab() {
                 p={p}
                 data={data}
                 stat={statOf(p)}
+                volumeWindow={volumeWindow}
                 upUsd={upPrice.data}
                 wethUsd={stats.data?.wethUsd}
                 totalWeight={totalWeight}
@@ -345,6 +380,7 @@ function PoolRow(props: {
   p: Pool
   data: PoolsData
   stat?: PoolStat
+  volumeWindow: VolumeWindow
   upUsd?: number
   wethUsd?: number | null
   totalWeight: bigint
@@ -362,8 +398,9 @@ function PoolRow(props: {
   const emitting = p.periodFinish > BigInt(nowSec())
   const upWk = emitting ? p.rewardRate * BigInt(WEEK) : 0n
   const votePct = totalWeight > 0n ? Number((p.weight * 1_000_000n) / totalWeight) / 10_000 : 0
-  const fees24 = fees24Of(p, stat)
-  const feeApr = feeAprOf(p, stat)
+  const volume = volumeOf(stat, props.volumeWindow)
+  const fees = feesOf(p, stat, props.volumeWindow)
+  const feeApr = feeAprOf(p, stat, props.volumeWindow)
   const emitApr = emitAprOf(p, stat, props.upUsd)
   const stakedPct = stakedShareOf(p) * 100
 
@@ -450,20 +487,20 @@ function PoolRow(props: {
               <span className="dim">—</span>
             )}
           </Flash>
-          {/* phone: VOL 24H stacks under TVL */}
+          {/* phone: the selected volume window stacks under TVL */}
           <span className="cell-sub show-m">
-            {stat?.vol24hUsd != null ? `$${fmtCompact(stat.vol24hUsd)}` : '—'}
+            {volume != null ? `$${fmtCompact(volume)}` : '—'}
           </span>
         </td>
         <td className="num hide-m">
-          <Flash v={stat?.vol24hUsd}>
-            {stat?.vol24hUsd != null ? fmtUsd(stat.vol24hUsd) : <span className="dim">—</span>}
+          <Flash v={volume}>
+            {volume != null ? fmtUsd(volume) : <span className="dim">—</span>}
           </Flash>
         </td>
         <td className="num hide-m">
-          {fees24 != null ? <span className="amber">{fmtUsd(fees24)}</span> : <span className="dim">—</span>}
+          {fees != null ? <span className="amber">{fmtUsd(fees)}</span> : <span className="dim">—</span>}
         </td>
-        <td className="num" title="unstaked LP net fee yield (staked LPs earn 0 fees)">
+        <td className="num" title={t('pools.feeAprWindowTip', { window: props.volumeWindow === 'm5' ? '5M' : props.volumeWindow === 'h1' ? '1H' : props.volumeWindow === 'h6' ? '6H' : '24H' })}>
           {feeApr != null ? fmtApr(feeApr) : <span className="dim">—</span>}
           {/* phone: reward APR stacks under fee APR */}
           <span className="cell-sub show-m">

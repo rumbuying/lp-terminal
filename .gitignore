@@ -1,4 +1,5 @@
 node_modules
+.npm-cache
 dist
 .env
 .env.*
@@ -6,6 +7,7 @@ dist
 *.local
 .DS_Store
 indexer/data
+.local-executor
 indexer-dist
 tsconfig.tsbuildinfo
 *.log
@@ -25,3 +27,5 @@ graphify-out/
 !README.md
 # The contract map is on-chain fact, and the source comments cite it by path.
 !docs/up33-contract-map.md
+# Authoritative implementation/operations handoff for the unattended LP executor.
+!docs/LP_STRATEGY_HANDOFF.zh-CN.md

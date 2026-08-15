@@ -8,12 +8,18 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-test-module-mocks --import=tsx --test indexer/*.test.ts src/lib/*.test.ts src/lib/bridge/*.test.ts",
+    "test": "node --experimental-test-module-mocks --import=tsx --test executor/*.test.ts indexer/*.test.ts src/lib/*.test.ts src/lib/bridge/*.test.ts",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:bridge": "tsx scripts/bridge-smoke.ts",
     "smoke:uni": "tsx scripts/uni-browse-smoke.ts",
     "smoke:logtail": "tsx scripts/logtail-smoke.ts",
-    "indexer": "tsx indexer/main.ts"
+    "smoke:strategy": "tsx scripts/strategy-smoke.ts",
+    "smoke:executor": "tsx scripts/executor-smoke.ts",
+    "smoke:executor-api": "tsx scripts/executor-api-smoke.ts",
+    "smoke:executor-integration": "tsx scripts/executor-integration-smoke.ts",
+    "preflight:real": "tsx scripts/executor-real-preflight.ts",
+    "indexer": "tsx indexer/main.ts",
+    "executor": "tsx executor/main.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "2.2.11",
@@ -33,5 +39,9 @@
     "tsx": "4.23.1",
     "typescript": "5.6.3",
     "vite": "6.4.3"
+  },
+  "overrides": {
+    "axios": "1.19.0",
+    "ws": "8.21.3"
   }
 }

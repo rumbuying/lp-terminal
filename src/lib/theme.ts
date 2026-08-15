@@ -5,11 +5,12 @@
 import { useEffect, useState } from 'react'
 
 export const THEMES = {
-  mono: { label: 'MONO', acc: '#ffffff', accFg: '#000000' },
-  phosphor: { label: 'PHOSPHOR', acc: '#52ff2e', accFg: '#061006' },
-  amber: { label: 'AMBER', acc: '#ffb000', accFg: '#140d02' },
-  ice: { label: 'ICE', acc: '#4dc9ff', accFg: '#041019' },
-  violet: { label: 'VIOLET', acc: '#b18cff', accFg: '#120a20' },
+  mono: { label: 'MONO', acc: '#ffffff', accFg: '#000000', scheme: 'dark' },
+  light: { label: 'LIGHT', acc: '#111827', accFg: '#ffffff', scheme: 'light' },
+  phosphor: { label: 'PHOSPHOR', acc: '#52ff2e', accFg: '#061006', scheme: 'dark' },
+  amber: { label: 'AMBER', acc: '#ffb000', accFg: '#140d02', scheme: 'dark' },
+  ice: { label: 'ICE', acc: '#4dc9ff', accFg: '#041019', scheme: 'dark' },
+  violet: { label: 'VIOLET', acc: '#b18cff', accFg: '#120a20', scheme: 'dark' },
 } as const
 export type ThemeId = keyof typeof THEMES
 
@@ -30,6 +31,7 @@ export function currentTheme(): ThemeId {
 
 export function applyTheme(t: ThemeId): void {
   document.documentElement.dataset.theme = t
+  document.documentElement.style.colorScheme = THEMES[t].scheme
   try {
     localStorage.setItem(KEY, t)
   } catch {

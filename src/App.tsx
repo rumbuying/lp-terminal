@@ -1,55 +1,48 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { WagmiProvider, useAccount, useSwitchChain } from 'wagmi'
 import { QueryClientProvider } from '@tanstack/react-query'
-import { RainbowKitProvider, darkTheme } from '@rainbow-me/rainbowkit'
-import { robinhood } from './config/chain'
 import { wagmiConfig } from './config/wagmi'
 import { queryClient } from './config/query'
 import { CHAIN_ID, EXPLORER } from './config/addresses'
-import { currentLang } from './i18n'
 import { Header, type TabId } from './components/Header'
 import { RpcControl } from './components/RpcControl'
 import { ThemeControl } from './components/ThemeControl'
-import { THEMES, useTheme } from './lib/theme'
-import { BridgeTab } from './components/tabs/BridgeTab'
-import { LabTab } from './components/tabs/LabTab'
 import { PoolsTab } from './components/tabs/PoolsTab'
-import { PositionsTab } from './components/tabs/PositionsTab'
-import { SwapTab } from './components/tabs/SwapTab'
 import { Btn } from './components/ui'
 
+const BridgeTab = lazy(() => import('./components/tabs/BridgeTab').then(({ BridgeTab }) => ({ default: BridgeTab })))
+const LabTab = lazy(() => import('./components/tabs/LabTab').then(({ LabTab }) => ({ default: LabTab })))
+const PositionsTab = lazy(() => import('./components/tabs/PositionsTab').then(({ PositionsTab }) => ({ default: PositionsTab })))
+const SwapTab = lazy(() => import('./components/tabs/SwapTab').then(({ SwapTab }) => ({ default: SwapTab })))
+const StrategyTab = lazy(() => import('./components/tabs/StrategyTab').then(({ StrategyTab }) => ({ default: StrategyTab })))
+const StrategyHistoryTab = lazy(() => import('./components/tabs/StrategyHistoryTab').then(({ StrategyHistoryTab }) => ({ default: StrategyHistoryTab })))
+const PnlCalendarTab = lazy(() => import('./components/tabs/PnlCalendarTab').then(({ PnlCalendarTab }) => ({ default: PnlCalendarTab })))
+
 export default function App() {
-  const theme = useTheme() // wallet modal accent follows the terminal theme
-  const { i18n } = useTranslation() // wallet modal language follows too
-  void i18n.language
   return (
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
-        <RainbowKitProvider
-          theme={darkTheme({
-            accentColor: THEMES[theme].acc,
-            accentColorForeground: THEMES[theme].accFg,
-            borderRadius: 'none',
-            overlayBlur: 'small',
-          })}
-          locale={currentLang() === 'zh' ? 'zh-CN' : 'en-US'}
-          initialChain={robinhood}
-          modalSize="compact"
-        >
-          <Shell />
-        </RainbowKitProvider>
+        <Shell />
       </QueryClientProvider>
     </WagmiProvider>
   )
 }
 
-const KEYS: Record<string, TabId> = { '1': 'pools', '2': 'positions', '3': 'swap', '5': 'bridge' }
+const KEYS: Record<string, TabId> = {
+  '1': 'pools',
+  '2': 'positions',
+  '3': 'swap',
+  '5': 'bridge',
+  '6': 'strategy',
+  '7': 'strategy-history',
+  '8': 'pnl-calendar',
+}
 
 const validTab = (h: string): TabId | null => {
   if (h === 'limit') return 'swap' // LIMIT mode is a sub-view of the swap tab
   if (h === 'lab') return 'pools' // hidden component lab rides the pools slot
-  return (['pools', 'positions', 'swap', 'bridge'] as const).includes(h as TabId) ? (h as TabId) : null
+  return (['pools', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar'] as const).includes(h as TabId) ? (h as TabId) : null
 }
 
 function Shell() {
@@ -102,10 +95,15 @@ function Shell() {
             <Btn onClick={() => switchChain({ chainId: CHAIN_ID })}>{t('app.switch')}</Btn>
           </div>
         )}
-        {tab === 'pools' && (location.hash === '#lab' ? <LabTab /> : <PoolsTab />)}
-        {tab === 'positions' && <PositionsTab />}
-        {tab === 'swap' && <SwapTab />}
-        {tab === 'bridge' && <BridgeTab />}
+        <Suspense fallback={<div className="panel dim mono-sm">{t('app.loadingTab')}</div>}>
+          {tab === 'pools' && (location.hash === '#lab' ? <LabTab /> : <PoolsTab />)}
+          {tab === 'positions' && <PositionsTab />}
+          {tab === 'swap' && <SwapTab />}
+          {tab === 'bridge' && <BridgeTab />}
+          {tab === 'strategy' && <StrategyTab />}
+          {tab === 'strategy-history' && <StrategyHistoryTab />}
+          {tab === 'pnl-calendar' && <PnlCalendarTab />}
+        </Suspense>
       </div>
       <div className="footer">
         <span className="hide-m">{t('app.tagline')}</span>

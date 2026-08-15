@@ -344,7 +344,7 @@ export function reprice(): { priced: number; tvlPools: number } {
         // the depth backing the side it came from, so an inflated price can no
         // longer inflate its own authority
         const depth = kp.hops === 0 ? kb * kp.usd : Math.min(kb * kp.usd, kp.depth)
-        if (!(depth >= TUNE.minDepthUsd)) continue
+        if (!Number.isFinite(depth) || !(depth >= TUNE.minDepthUsd)) continue
         const usd = knownIs0 ? kp.usd / p1per0 : kp.usd * p1per0
         if (!plausibleUsd(usd)) continue
         const list = quotes.get(other)
@@ -363,8 +363,10 @@ export function reprice(): { priced: number; tvlPools: number } {
         src: 'pool',
         hops: hop,
       }
-      prices.set(addr, e)
-      derived.set(addr, e)
+      if (plausibleUsd(e.usd) && Number.isFinite(e.depth)) {
+        prices.set(addr, e)
+        derived.set(addr, e)
+      }
     }
   }
 

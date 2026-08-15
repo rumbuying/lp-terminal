@@ -1,15 +1,15 @@
-// 24h volume / liquidity stats per pool.
-// CL pools:  DexScreener batch API (rolling 24h, USD, one call per 30 addrs).
+// Rolling volume windows / liquidity stats per pool.
+// CL pools:  DexScreener batch API (5m/1h/6h/24h USD, one call per 30 addrs).
 // v2 pools:  official Goldsky v2 subgraph, pairHourDatas summed over the last
 //            24h; when the subgraph's tracked USD is 0, fall back to the USDG
 //            side (≈$) or the WETH side × WETH price derived from DexScreener.
 import { ADDR } from '../config/addresses'
 import { ENV } from '../config/env'
 import { pickDsTokenUsd, type DsPair } from './tokenPrice'
+import { volumeWindowsOf, type VolumeWindows } from './volumeWindows'
 import type { Pool, V2Pool } from '../types'
 
-export type PoolStat = {
-  vol24hUsd: number | null
+export type PoolStat = VolumeWindows & {
   liqUsd: number | null
   source: 'dexscreener' | 'subgraph' | 'geckoterminal' | 'chain'
 }
@@ -37,11 +37,11 @@ export async function fetchDexscreener(
     for (const p of j?.pairs ?? []) {
       const addr = String(p.pairAddress ?? '').toLowerCase()
       if (!addr) continue
-      const vol = Number(p?.volume?.h24)
-      const liq = Number(p?.liquidity?.usd)
+      const liqRaw = p?.liquidity?.usd
+      const liq = liqRaw === null || liqRaw === undefined || liqRaw === '' ? null : Number(liqRaw)
       stats[addr] = {
-        vol24hUsd: Number.isFinite(vol) ? vol : null,
-        liqUsd: Number.isFinite(liq) ? liq : null,
+        ...volumeWindowsOf(p?.volume),
+        liqUsd: liq !== null && Number.isFinite(liq) ? liq : null,
         source: 'dexscreener',
       }
       // derive WETH/USD once from any WETH-quoted pair (priceUsd / priceNative)
@@ -100,14 +100,28 @@ async function fetchV2Subgraph(
     const addr = pair.id.toLowerCase()
     if (!byAddr.has(addr)) continue
     const liq = Number(pair.reserveUSD)
-    stats[addr] = { vol24hUsd: 0, liqUsd: Number.isFinite(liq) ? liq : null, source: 'subgraph' }
+    stats[addr] = {
+      vol5mUsd: null,
+      vol1hUsd: null,
+      vol6hUsd: null,
+      vol24hUsd: 0,
+      liqUsd: Number.isFinite(liq) ? liq : null,
+      source: 'subgraph',
+    }
   }
   // rolling 24h volume from hour buckets
   for (const h of j.data?.pairHourDatas ?? []) {
     const addr = h.pair.id.toLowerCase()
     const pool = byAddr.get(addr)
     if (!pool) continue
-    const entry = (stats[addr] ??= { vol24hUsd: 0, liqUsd: null, source: 'subgraph' })
+    const entry = (stats[addr] ??= {
+      vol5mUsd: null,
+      vol1hUsd: null,
+      vol6hUsd: null,
+      vol24hUsd: 0,
+      liqUsd: null,
+      source: 'subgraph',
+    })
     const tracked = Number(h.hourlyVolumeUSD)
     let usd: number | null = Number.isFinite(tracked) && tracked > 0 ? tracked : null
     if (usd === null) {
@@ -131,7 +145,7 @@ export type PoolStatsResult = {
   wethUsd: number | null // WETH/USD derived from dexscreener, reused as a price anchor
 }
 
-/** merged 24h stats keyed by lowercase pool address; missing pools stay absent */
+/** merged pool stats keyed by lowercase pool address; missing pools stay absent */
 export async function fetchPoolStats(pools: Pool[]): Promise<PoolStatsResult> {
   const clAddrs = pools.filter((p) => p.kind === 'cl').map((p) => p.address.toLowerCase())
   const v2Pools = pools.filter((p): p is V2Pool => p.kind === 'v2')

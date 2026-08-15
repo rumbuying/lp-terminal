@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useConnectModal } from '@rainbow-me/rainbowkit'
 import { useAccount } from 'wagmi'
 import { writeContract } from 'wagmi/actions'
 import { formatUnits, parseUnits, type Address, type Hex, type ReplacementReason } from 'viem'
@@ -37,6 +36,7 @@ import {
 import { peekSwapIntent, takeSwapIntent } from '../../lib/swapIntent'
 import { step } from '../../lib/tx'
 import { txlog } from '../../lib/txlog'
+import { openWalletPicker } from '../../lib/walletConnect'
 import type { TokenInfo } from '../../types'
 import { Flash } from '../Flash'
 import { TokenSelect } from '../TokenSelect'
@@ -62,7 +62,6 @@ function routeDetail(candidate: DirectCandidate): string {
 export function SwapTab() {
   const { t } = useTranslation()
   const { address: user } = useAccount()
-  const { openConnectModal } = useConnectModal()
   const tokenList = useTokenList()
   const list = tokenList.tokens
 
@@ -657,7 +656,7 @@ export function SwapTab() {
               big
               busy={submitting}
               disabled={!!user && (amount === 0n || insufficient)}
-              onClick={!user ? () => openConnectModal?.() : isWrap ? doWrap : doUnwrap}
+              onClick={!user ? openWalletPicker : isWrap ? doWrap : doUnwrap}
             >
               {cta}
             </Btn>
@@ -974,7 +973,7 @@ export function SwapTab() {
             // banner above carries the live status + explorer link
             busy={!tradePending && (submitting || (refreshCta && (solver.isFetching || quote.isFetching)))}
             disabled={ctaDisabled}
-            onClick={!user ? () => openConnectModal?.() : refreshCta ? refreshQuotes : doSwap}
+            onClick={!user ? openWalletPicker : refreshCta ? refreshQuotes : doSwap}
           >
             {cta}
           </Btn>

@@ -10,6 +10,11 @@ layout, not a boxed console); domain will eventually move to `lp-terminal.xyz`,
 `up33-terminal.xyz` serves it for now. (Repo dir keeps the historical name.)
 Contract reference: `docs/up33-contract-map.md`.
 
+Unattended LP strategy development and production operations are documented in
+[`docs/LP_STRATEGY_HANDOFF.zh-CN.md`](docs/LP_STRATEGY_HANDOFF.zh-CN.md). Start
+there before changing the executor, recovery logic, production data, or wallet
+secrets.
+
 ## Run
 
 ```bash
@@ -39,7 +44,10 @@ Fee policy and slippage stay independent. Non-transactional valuation (UP reward
 APR, positions and add-LP simulations) uses a fee-free Kyber quote; that display
 price never enters route selection, Zap sizing, minimum output or execution.
 
-Signing is browser-wallet only (RainbowKit / injected EIP-6963). No private keys anywhere.
+Normal terminal writes are browser-wallet only (RainbowKit / injected EIP-6963).
+The optional unattended strategy executor is a separate opt-in service that can
+store a dedicated hot-wallet key in an encrypted server-side vault; see the
+handoff document above. Private keys are never stored by the static frontend.
 
 **i18n (en/zh)**: react-i18next with typed keys — catalogs in `src/i18n/en.ts` (source of
 truth) + `zh.ts` (`typeof en` enforces identical key structure at compile time). Language:
@@ -61,7 +69,7 @@ lives in `docs/up33-contract-map.md`. Epoch/flip were dropped from the header �
 an LP reads them off the emissions columns, and the countdown was re-rendering
 the header every second to show it.)
 
-- **[1] POOLS** — one table, three protocols, sorted by 24h volume by default (where the trading actually is; TVL is one click away). UP33 v2 + CL pools come from live factory enumeration; **Uniswap v2 + v3 pools** come from the pool indexer (`/api` — the FULL catalog built from factory events — six figures and growing ~20k pools/day, launchpads mint univ3 pools continuously — chain-derived TVL, GeckoTerminal 24h stats). Columns: fee rate, reserves/price (auto-oriented quote/base), **TVL / VOL 24H / FEES 24H** (UP33: DexScreener + Goldsky v2 subgraph; uniswap: indexer), **FEE APR / EMIT APR**, UP/wk emissions, vote share; all numeric headers sortable; `● MY POOLS` filter marks pools you're in. The `UNISWAP ⌕` row searches the whole catalog — token address / pool address / symbol / `sym0/sym1` pair, empty = everything by TVL — with a `HIDE <$1K` dust chip (on by default: 95% of the catalog is dust meme pools); if the indexer is down it falls back to DexScreener discovery with on-chain `factory.getPool` verification (v3 top 30, amber notice). Inline add-liquidity everywhere: v2 auto-ratio (UP33 Solidly router or vanilla Router02, per pool); CL/univ3 with the full range picker — symmetric presets (±0.5/1/2/5/10/20/30%, FULL), custom ±%, **one-sided ↑ABOVE / ↓BELOW** (single-token deposits that start earning when price enters — sell-the-rise / buy-the-dip), **price-bounds input** (snapped to tick spacing), raw ticks — with a live range-bar preview; amounts rebalance automatically when the range changes. univ3 mints go through the official NPM (fee-keyed mint struct, no levy, no gauge — fee APR only).
+- **[1] POOLS** — one table, three protocols, sorted by volume by default (where the trading actually is; TVL is one click away). UP33 v2 + CL pools come from live factory enumeration; **Uniswap v2 + v3 pools** come from the pool indexer (`/api` — the FULL catalog built from factory events — six figures and growing ~20k pools/day, launchpads mint univ3 pools continuously — chain-derived TVL, GeckoTerminal stats). Columns: fee rate, reserves/price, **TVL / VOL / FEES** with a synchronized **5M / 1H / 6H / 24H** selector (intraday windows for DexScreener/GeckoTerminal-covered pools; uncovered and Goldsky-only pools stay blank), **FEE APR / EMIT APR**, UP/wk emissions, vote share; fees use selected-window volume × pool rate while FEE APR remains 24h-based. All numeric headers are sortable; `● MY POOLS` marks pools you're in. The `UNISWAP ⌕` row searches the whole catalog — token address / pool address / symbol / `sym0/sym1` pair, empty = everything by TVL — with a `HIDE <$1K` dust chip (on by default: 95% of the catalog is dust meme pools); if the indexer is down it falls back to DexScreener discovery with on-chain `factory.getPool` verification (v3 top 30, amber notice). Inline add-liquidity everywhere: v2 auto-ratio (UP33 Solidly router or vanilla Router02, per pool); CL/univ3 with the full range picker — symmetric presets (±0.5/1/2/5/10/20/30%, FULL), custom ±%, **one-sided ↑ABOVE / ↓BELOW** (single-token deposits that start earning when price enters — sell-the-rise / buy-the-dip), **price-bounds input** (snapped to tick spacing), raw ticks — with a live range-bar preview; amounts rebalance automatically when the range changes. univ3 mints go through the official NPM (fee-keyed mint struct, no levy, no gauge — fee APR only).
 
   **⚡ ZAP — one-token add (all four pool kinds + increase)**: every add panel has a `FUND: PAIR | ⚡ ZAP` switch. ZAP funds the position with ONE token (either side, or native ETH when a side is WETH — wrapped as step 1): it solves how much to swap so the two piles match the deposit ratio the target needs (CL band math / v2 reserves), then compares direct Uniswap and UP33 CL quotes for that swap. It previews the plan (`SPLIT / SWAP` with net min-out + impact + route, `DEPOSIT` with est. dust, `PROJECTED` APRs), lists the exact tx sequence (numbered, live states), then runs it step by step: wrap? → approve → direct swap with atomic 9 bps fee → approve both sides → mint / increase / addLiquidity. There is no aggregator allocation or route splitting. The displayed plan and its minimum are frozen when execution starts; the deposit uses the amounts that **actually arrived** (receipt Transfer logs), never the quote. Any failure **halts** — every intermediate asset is a normal wallet balance, nothing strands. `REWARDS` column shows its full emissions sub-line only under the `UP33` filter (elsewhere it's a slim `—`/APR column).
 
@@ -83,7 +91,8 @@ the header every second to show it.)
 - MARKET and ZAP swap commits share one `lib/swapExec.ts` sequence: fresh quote/build for the selected direct route → fixed router/asset/recipient/minimum gate → exact approval → re-prepare after a real approval → chain-pinned send → receipt → actual output check. A selected route failure always stops; it never falls through to another protocol. Kyber is exposed only as a fee-free USD valuation function; the codebase has no Kyber transaction builder or execution intent.
 - Uniswap v2/v3 and UP33 CL swaps execute the swap and 9 bps terminal output fee atomically in router multicalls. Minimum output is expressed net of the fee and converted to the required gross router minimum, so lowering slippage never substitutes for fee collection.
 - Auto slippage is a small deterministic policy over quote-derived price impact: 0.5% green, 1% amber, 3% red. A manual choice replaces the automatic tier. ZAP additionally requires the fresh route's `tokenOut` to be the pool's counter-token and never widens the frozen preview minimum during execution. Deposits then use the received-amount ground truth from the receipt, and approvals stay exact-amount per step.
-- Exact-amount approvals only (no infinite approvals).
+- Browser-wallet flows use exact-amount approvals. The unattended executor has
+  a separately confirmed low-transaction option for persistent approvals.
 - All writes pinned to chainId 4663; wrong-network banner blocks confusion.
 - Everything reads live on-chain state each ~15s (protocol went live 2026-07-16; parameters are Safe-controlled and can change anytime). Pools hosting your range orders get a dedicated **4s slot0 feed** (single multicall) so fill %, holdings and the range bar track near-live; numeric updates flash **green ▲ / red ▼** by direction, and the range-bar marker glides so drift direction is visible.
 
@@ -111,7 +120,7 @@ node ≥ 22.13). One process, four loops, a read-only HTTP API:
   the first GT cycle. TVL = sum of priced sides (one side priced → 2×, flagged
   approximate). All REAL numbers are display/ranking only — never tx inputs.
 - **Stats** — GeckoTerminal top lists (network + uniswap-v2 + uniswap-v3, top
-  200 each, paced ≤ 30 calls/min free tier) every 5 min: 24h volume/txns +
+  200 each, paced ≤ 30 calls/min free tier) every 5 min: 5m/1h/6h/24h volume + 24h txns +
   GT's own reserve figure. GT has no UP33 entry — UP33 stats stay on the
   frontend's dexscreener/goldsky path.
 - **API** — `GET /api/pools?q=&proto=univ2,univ3&min_tvl=&sort=tvl|vol|created&limit=&offset=`
@@ -142,6 +151,28 @@ device-local in `localStorage`.
 Private RPC credentials are server concerns. Direct Uniswap and UP33 quotes are
 on-chain reads, so MARKET and ZAP need no aggregator API key. One frontend build
 serves every server deployment:
+The default wallet-confirmed app is a **fully static SPA**. Optional unattended
+strategies are an explicit opt-in through the separate loopback-only `executor/`
+service, which stores an imported hot-wallet key in a locally encrypted vault.
+UP33 CL strategies may also adopt an NFT already deposited in a live gauge.
+For those strategies the executor proves depositor custody, withdraws the old
+NFT when its range breaks (the withdrawal auto-claims UP), sells only the UP
+received by that withdrawal into WETH and, for non-WETH quote pairs, performs a
+second WETH-to-quote swap. The final quote asset is held or reinvested before the
+LP is rebuilt, then the replacement NFT is approved and deposited into the same gauge.
+Every added transaction is nonce/hash tracked and recovery can resume after the
+withdrawal, reward swap, mint, NFT approval, or gauge deposit. Unstaked and
+Uniswap strategies retain the original execution path.
+An optional **low-transaction mode** keeps the original exact-approval mode
+available while changing future cycles to: multicall decrease+collect, retain
+the empty old NFT, keep maximum ERC-20 allowances for the position manager and
+selected swap routers, and grant the configured gauge ERC-721 operator approval.
+Those persistent approvals survive disabling/deleting a strategy until revoked
+on-chain; switching the setting off changes future execution but is not itself
+an approval-revocation transaction.
+The browser otherwise talks directly to the chain RPC for reads; writes are
+signed and sent by the user's wallet. Limit-order tags remain device-local in
+browser `localStorage`.
 
 | mode | chain reads |
 |---|---|
@@ -151,6 +182,27 @@ serves every server deployment:
 
 Wallet-facing chain metadata (`wallet_addEthereumChain`) always advertises the
 **public** RPC — a private key-bearing URL never reaches users' wallets.
+
+The executor should read provider and signer secrets from root-owned/config-only
+files rather than command-line arguments:
+
+```bash
+LP_EXECUTOR_RPC_FILE=/etc/lp-terminal-executor/rpc.url
+LP_EXECUTOR_RPC_RETRY_COUNT=5
+LP_EXECUTOR_RPC_RETRY_DELAY_MS=400
+LP_EXECUTOR_RPC_TIMEOUT_MS=15000
+
+# Optional raw-file signer (use both variables together):
+LP_EXECUTOR_PRIVATE_KEY_FILE=/etc/lp-terminal-executor/wallet.key
+LP_EXECUTOR_PRIVATE_KEY_WALLET_ID=wallet_server_01
+```
+
+Each file must be a regular file with permissions `0600` or stricter. The RPC
+file contains one complete `http(s)` endpoint. The signer file contains one
+`0x`-prefixed 32-byte private key. `LP_EXECUTOR_RPC` and
+`LP_EXECUTOR_RPC_FILE` are mutually exclusive. Read/preflight calls retry short
+provider outages; raw broadcasts only retry the exact same locally hashed,
+durably recorded transaction.
 
 On top of all modes, **each user can bring their own RPC**: the footer `rpc:`
 control accepts any http(s) JSON-RPC url, sanity-checks it with an `eth_chainId`
@@ -212,9 +264,13 @@ stateless reverse proxy = minimal attack surface** — no accounts or applicatio
 database; server-side credentials are limited to upstream RPC access.
 
 **Wallet-interaction safety (the money paths)**
-- browser-wallet signing only; no key material anywhere in app, server, or storage
-- exact-amount approvals; selected direct router, route, assets, recipient and net
-  minimum are gated before signing; writes are chainId-pinned with deadlines
+- browser-wallet signing only in the standard frontend; no key material in the
+  app, server, or browser storage. The separately enabled local executor keeps
+  its hot-wallet key only in an AES-256-GCM encrypted local vault.
+- exact-amount approvals by default; the explicitly enabled executor low-tx
+  mode instead retains maximum token allowances and gauge operator approval.
+  Selected router, route, assets, recipient and net minimum remain gated before
+  signing; writes are chainId-pinned with deadlines
 - terminal fees execute atomically with the swap; native-route minimums come from
   fresh on-chain quotes
 - token picker rows always show the contract address (anti symbol-spoofing);

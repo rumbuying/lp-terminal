@@ -80,7 +80,8 @@ function getPools(params: Params) {
       `SELECT p.address, p.proto, p.token0, p.token1, p.fee_ppm, p.tick_spacing, p.created_block,
               s.sqrt_price, s.tick, s.liquidity, s.reserve0, s.reserve1, s.total_supply,
               s.tvl_usd, s.tvl_approx, s.updated AS state_updated,
-              st.vol24h_usd, st.txns24h, st.liq_usd, st.source AS stats_source
+              st.vol5m_usd, st.vol1h_usd, st.vol6h_usd, st.vol24h_usd,
+              st.txns24h, st.liq_usd, st.source AS stats_source
        ${base} ${order} LIMIT ? OFFSET ?`,
     )
     .all(...args, limit, offset) as Record<string, unknown>[]
@@ -105,6 +106,9 @@ function getPools(params: Params) {
       totalSupply: r.total_supply,
       tvlUsd: r.tvl_usd,
       tvlApprox: r.tvl_approx === 1,
+      vol5mUsd: r.vol5m_usd,
+      vol1hUsd: r.vol1h_usd,
+      vol6hUsd: r.vol6h_usd,
       vol24hUsd: r.vol24h_usd,
       txns24h: r.txns24h,
       gtLiqUsd: r.liq_usd,
@@ -202,5 +206,5 @@ export function startApi(): void {
       res.end(JSON.stringify({ error: String(e) }))
     }
   })
-  srv.listen(PORT, () => log(`[api] listening on :${PORT}`))
+  srv.listen(PORT, '127.0.0.1', () => log(`[api] listening on 127.0.0.1:${PORT}`))
 }

@@ -55,6 +55,9 @@ CREATE INDEX IF NOT EXISTS idx_state_tvl ON pool_state(tvl_usd);
 
 CREATE TABLE IF NOT EXISTS pool_stats (
   address    TEXT PRIMARY KEY,
+  vol5m_usd  REAL,
+  vol1h_usd  REAL,
+  vol6h_usd  REAL,
   vol24h_usd REAL,
   txns24h    INTEGER,
   liq_usd    REAL,     -- GT's own reserve figure (cross-check; tvl_usd is chain-derived)
@@ -64,6 +67,16 @@ CREATE TABLE IF NOT EXISTS pool_stats (
 
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 `)
+
+// Existing production databases predate the intraday windows. CREATE TABLE IF
+// NOT EXISTS does not evolve them, so add each nullable column in place without
+// discarding the accumulated catalog/state/stat rows.
+const poolStatColumns = new Set(
+  (db.prepare('PRAGMA table_info(pool_stats)').all() as { name: string }[]).map((column) => column.name),
+)
+for (const column of ['vol5m_usd', 'vol1h_usd', 'vol6h_usd']) {
+  if (!poolStatColumns.has(column)) db.exec(`ALTER TABLE pool_stats ADD COLUMN ${column} REAL`)
+}
 
 // ---- kv ----
 const kvGetQ = db.prepare('SELECT v FROM kv WHERE k = ?')
@@ -127,7 +140,13 @@ const priceQ = db.prepare(`
   ON CONFLICT(address) DO UPDATE SET price_usd = excluded.price_usd, price_depth_usd = excluded.price_depth_usd,
     price_src = excluded.price_src, price_updated = excluded.price_updated`)
 export const setTokenPrice = (addr: string, usd: number, depthUsd: number, src: string) =>
-  void priceQ.run(addr.toLowerCase(), usd, depthUsd, src, now())
+  void priceQ.run(
+    addr.toLowerCase(),
+    Number.isFinite(usd) ? usd : null,
+    Number.isFinite(depthUsd) && depthUsd >= 0 ? depthUsd : 0,
+    src,
+    now(),
+  )
 
 // Drop every pool-derived price (reprice rebuilds them from the credible seeds
 // on the same pass) plus anything outside the plausibility band, whatever its
@@ -185,15 +204,33 @@ export const upsertState = (
 
 const tvlQ = db.prepare('UPDATE pool_state SET tvl_usd = ?, tvl_approx = ? WHERE address = ?')
 export const setTvl = (addr: string, tvl: number | null, approx: boolean) =>
-  void tvlQ.run(tvl, approx ? 1 : 0, addr.toLowerCase())
+  void tvlQ.run(tvl !== null && Number.isFinite(tvl) ? tvl : null, approx ? 1 : 0, addr.toLowerCase())
 
 // ---- pool_stats ----
 const upStatsQ = db.prepare(`
-  INSERT INTO pool_stats (address, vol24h_usd, txns24h, liq_usd, source, updated) VALUES (?, ?, ?, ?, ?, ?)
-  ON CONFLICT(address) DO UPDATE SET vol24h_usd = excluded.vol24h_usd, txns24h = excluded.txns24h,
+  INSERT INTO pool_stats (address, vol5m_usd, vol1h_usd, vol6h_usd, vol24h_usd, txns24h, liq_usd, source, updated)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(address) DO UPDATE SET vol5m_usd = excluded.vol5m_usd, vol1h_usd = excluded.vol1h_usd,
+    vol6h_usd = excluded.vol6h_usd, vol24h_usd = excluded.vol24h_usd, txns24h = excluded.txns24h,
     liq_usd = excluded.liq_usd, source = excluded.source, updated = excluded.updated`)
-export const upsertStats = (addr: string, vol24h: number | null, txns24h: number | null, liqUsd: number | null, source: string) =>
-  void upStatsQ.run(addr.toLowerCase(), vol24h, txns24h, liqUsd, source, now())
+export const upsertStats = (
+  addr: string,
+  volumes: { m5: number | null; h1: number | null; h6: number | null; h24: number | null },
+  txns24h: number | null,
+  liqUsd: number | null,
+  source: string,
+) =>
+  void upStatsQ.run(
+    addr.toLowerCase(),
+    volumes.m5,
+    volumes.h1,
+    volumes.h6,
+    volumes.h24,
+    txns24h,
+    liqUsd,
+    source,
+    now(),
+  )
 
 /**
  * Frontpage set: the top-N pools by TVL — exactly what /api/pools?sort=tvl

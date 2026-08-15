@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { fetchDexscreener, fetchPoolStats } from '../lib/poolstats'
 import { usePools } from './usePools'
 
-/** 24h volume / liquidity USD per pool (dexscreener + official v2 subgraph) */
+/** rolling volume windows / liquidity USD (DexScreener; Goldsky v2 remains 24h-only) */
 export function usePoolStats() {
   const pools = usePools()
   return useQuery({

@@ -1,7 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { ccipRequest } from 'viem/utils'
-import '@rainbow-me/rainbowkit/styles.css'
 import './styles.css'
 import { t } from './i18n' // init before anything renders or pushes txlog lines
 import App from './App'
@@ -16,7 +15,7 @@ import { txlog } from './lib/txlog'
 // it into the eager bundle so it can never go stale.
 ;(globalThis as Record<string, unknown>).__viemCcipEagerPin = ccipRequest
 
-// Other lazy chunks (wallet SDKs, RainbowKit locales) can still 404 in a tab
+// Other lazy chunks (feature tabs) can still 404 in a tab
 // that outlives a deploy. Vite surfaces those failures as vite:preloadError —
 // reload once to pick up the new build instead of failing the user's action.
 // The timestamp guard stops reload loops on a genuinely broken build.

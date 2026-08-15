@@ -10,6 +10,8 @@ import { AddCl, AddV2 } from './PoolsTab'
 import { clPosMetrics } from '../../lib/posmetrics'
 import { ClCard, ClPoolGroup, IncreasePanel, V2Card } from './PositionsTab'
 
+const NO_INTRADAY_VOLUME = { vol5mUsd: null, vol1hUsd: null, vol6hUsd: null } as const
+
 const LAB_POOL: ClPool = {
   kind: 'cl',
   protocol: 'up33',
@@ -178,7 +180,7 @@ export function LabTab() {
           gauge: '0x00000000000000000000000000000000000000aa',
           rewardRate: 5_000_000_000_000_000n, // 0.005 UP/s to the whole gauge
         }
-        const stat = { vol24hUsd: 155_000, liqUsd: 184_000, source: 'dexscreener' as const }
+        const stat = { ...NO_INTRADAY_VOLUME, vol24hUsd: 155_000, liqUsd: 184_000, source: 'dexscreener' as const }
         const stakedIn: ClPosition = {
           ...labPos(100000, 104000, 500_000_000_000_000_000_000n),
           pool: gaugePool,
@@ -226,7 +228,7 @@ export function LabTab() {
             <ClCard pos={stakedIn} data={LAB_DATA} xtokens={{}} user={LAB_USER} stat={stat} {...labUsd} />
             <ClCard pos={stakedOut} data={LAB_DATA} xtokens={{}} user={LAB_USER} stat={stat} {...labUsd} />
             <ClCard pos={uniWallet} data={LAB_DATA} xtokens={{}} user={LAB_USER} stat={{ ...stat, vol24hUsd: 351_000 }} {...labUsd} />
-            <V2Card pos={v2Pos} data={LAB_DATA} user={LAB_USER} stat={{ vol24hUsd: 82_000, liqUsd: 46_000, source: 'geckoterminal' }} {...labUsd} />
+            <V2Card pos={v2Pos} data={LAB_DATA} user={LAB_USER} stat={{ ...NO_INTRADAY_VOLUME, vol24hUsd: 82_000, liqUsd: 46_000, source: 'geckoterminal' }} {...labUsd} />
           </>
         )
       })()}
@@ -238,7 +240,7 @@ export function LabTab() {
           gauge: '0x00000000000000000000000000000000000000aa',
           rewardRate: 5_000_000_000_000_000n,
         }
-        const stat = { vol24hUsd: 155_000, liqUsd: 184_000, source: 'dexscreener' as const }
+        const stat = { ...NO_INTRADAY_VOLUME, vol24hUsd: 155_000, liqUsd: 184_000, source: 'dexscreener' as const }
         const labUsd = { upUsd: 0.0688, wethUsd: 1928 }
         const staked1: ClPosition = {
           ...labPos(100000, 104000, 500_000_000_000_000_000_000n),
@@ -356,7 +358,7 @@ export function LabTab() {
         <AddCl
           pool={LAB_POOL}
           data={LAB_DATA}
-          stat={{ vol24hUsd: 155_000, liqUsd: 184_000, source: 'dexscreener' }}
+          stat={{ ...NO_INTRADAY_VOLUME, vol24hUsd: 155_000, liqUsd: 184_000, source: 'dexscreener' }}
           upUsd={0.0688}
           wethUsd={1928}
         />
@@ -370,7 +372,7 @@ export function LabTab() {
         <AddCl
           pool={{ ...LAB_POOL, protocol: 'univ3', gauge: null, unstakedFeePpm: 0, feePpm: 3000, tickSpacing: 60 }}
           data={LAB_DATA}
-          stat={{ vol24hUsd: 351_000, liqUsd: 363_000, source: 'dexscreener' }}
+          stat={{ ...NO_INTRADAY_VOLUME, vol24hUsd: 351_000, liqUsd: 363_000, source: 'dexscreener' }}
           upUsd={0.0688}
           wethUsd={1928}
         />
@@ -381,7 +383,7 @@ export function LabTab() {
           <span className="card-title">WETH/UP</span>
           <ProtoBadge proto="univ2" />
         </div>
-        <AddV2 pool={LAB_V2_PAIR} data={LAB_DATA} stat={{ vol24hUsd: 82_000, liqUsd: 46_000, source: 'geckoterminal' }} upUsd={0.0688} />
+        <AddV2 pool={LAB_V2_PAIR} data={LAB_DATA} stat={{ ...NO_INTRADAY_VOLUME, vol24hUsd: 82_000, liqUsd: 46_000, source: 'geckoterminal' }} upUsd={0.0688} />
       </div>
     </div>
   )

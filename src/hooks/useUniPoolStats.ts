@@ -27,7 +27,14 @@ export function useUniPoolStats(addrs: Address[]) {
       )
       const gaps = addrs.filter((a) => {
         const stat = out[a.toLowerCase()]
-        return !stat || stat.vol24hUsd == null || stat.liqUsd == null
+        return (
+          !stat ||
+          stat.vol5mUsd == null ||
+          stat.vol1hUsd == null ||
+          stat.vol6hUsd == null ||
+          stat.vol24hUsd == null ||
+          stat.liqUsd == null
+        )
       })
       const fallback = gaps.length ? await fetchDexscreener(gaps).catch(() => null) : null
       for (const address of gaps) {

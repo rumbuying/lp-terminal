@@ -89,6 +89,10 @@ export const clPoolAbi = parseAbi([
 ])
 
 export const clPmAbi = parseAbi([
+  'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
   'function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, int24 tickSpacing, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
   'function mint((address token0, address token1, int24 tickSpacing, int24 tickLower, int24 tickUpper, uint256 amount0Desired, uint256 amount1Desired, uint256 amount0Min, uint256 amount1Min, address recipient, uint256 deadline, uint160 sqrtPriceX96) params) payable returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
   'function increaseLiquidity((uint256 tokenId, uint256 amount0Desired, uint256 amount1Desired, uint256 amount0Min, uint256 amount1Min, uint256 deadline) params) payable returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
@@ -98,7 +102,10 @@ export const clPmAbi = parseAbi([
   'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
   'function ownerOf(uint256 tokenId) view returns (address)',
   'function getApproved(uint256 tokenId) view returns (address)',
+  'function isApprovedForAll(address owner, address operator) view returns (bool)',
   'function approve(address to, uint256 tokenId)',
+  'function setApprovalForAll(address operator, bool approved)',
+  'function multicall(bytes[] data) payable returns (bytes[] results)',
   'function burn(uint256 tokenId) payable',
 ])
 
@@ -125,7 +132,19 @@ export const uniV3FactoryAbi = parseAbi([
 ])
 
 export const uniV3PmAbi = parseAbi([
+  'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
   'function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function decreaseLiquidity((uint256 tokenId, uint128 liquidity, uint256 amount0Min, uint256 amount1Min, uint256 deadline) params) payable returns (uint256 amount0, uint256 amount1)',
+  'function collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max) params) payable returns (uint256 amount0, uint256 amount1)',
+  'function burn(uint256 tokenId) payable',
+  'function approve(address to, uint256 tokenId)',
+  'function isApprovedForAll(address owner, address operator) view returns (bool)',
+  'function setApprovalForAll(address operator, bool approved)',
+  'function multicall(bytes[] data) payable returns (bytes[] results)',
   'function balanceOf(address owner) view returns (uint256)',
   'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
   // mint is the ONE write that differs from Slipstream (uint24 fee instead of

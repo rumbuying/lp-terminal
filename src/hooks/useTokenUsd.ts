@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { queryOptions, useQuery } from '@tanstack/react-query'
 import { parseUnits } from 'viem'
 import { ADDR } from '../config/addresses'
 import { kyberUsdValue } from '../lib/kyber'
@@ -10,9 +10,9 @@ import type { TokenInfo } from '../types'
  *  the volume actually is. Fallback for tokens dexscreener hasn't indexed: a
  *  fee-free Kyber unit quote, which cherry-picks the best stale mid across
  *  venues and runs high on everything but ETH (measured +7% on UP). */
-export function useTokenUsd(token: TokenInfo | null) {
+export function tokenUsdQueryOptions(token: TokenInfo | null) {
   const addr = token?.address
-  return useQuery({
+  return queryOptions({
     queryKey: ['tokenUsd', addr?.toLowerCase()],
     enabled: !!token,
     refetchInterval: 60_000,
@@ -28,4 +28,8 @@ export function useTokenUsd(token: TokenInfo | null) {
       }
     },
   })
+}
+
+export function useTokenUsd(token: TokenInfo | null) {
+  return useQuery(tokenUsdQueryOptions(token))
 }

@@ -1,5 +1,5 @@
-import { getDefaultConfig } from '@rainbow-me/rainbowkit'
-import { fallback, http } from 'wagmi'
+import { createConfig, fallback, http } from 'wagmi'
+import { injected } from 'wagmi/connectors'
 import { arbitrum, base, mainnet, optimism } from 'wagmi/chains'
 import { customRpc } from '../lib/rpcPref'
 import { robinhood } from './chain'
@@ -41,9 +41,8 @@ const remoteTransport = (alchemyNet: string, proxyPath: string, publics: string[
   return fallback(urls.map((u) => http(u, { batch: true })))
 }
 
-export const wagmiConfig = getDefaultConfig({
-  appName: 'UP33 Terminal',
-  projectId: ENV.wcProjectId,
+export const wagmiConfig = createConfig({
+  connectors: [injected({ shimDisconnect: true })],
   chains: [robinhood, mainnet, arbitrum, base, optimism],
   transports: {
     [robinhood.id]: transport,

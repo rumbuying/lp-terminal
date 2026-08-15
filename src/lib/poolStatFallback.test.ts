@@ -4,15 +4,28 @@ import type { PoolStat } from './poolstats'
 import { poolStatWithFallback } from './poolStatFallback'
 
 const fallback: PoolStat = {
+  vol5mUsd: 2_000,
+  vol1hUsd: 12_000,
+  vol6hUsd: 48_000,
   vol24hUsd: 130_000,
   liqUsd: 900_000,
   source: 'dexscreener',
 }
 
 test('fills missing volume without replacing chain liquidity', () => {
-  const primary: PoolStat = { vol24hUsd: null, liqUsd: 1_000_000, source: 'chain' }
+  const primary: PoolStat = {
+    vol5mUsd: null,
+    vol1hUsd: null,
+    vol6hUsd: null,
+    vol24hUsd: null,
+    liqUsd: 1_000_000,
+    source: 'chain',
+  }
 
   assert.deepEqual(poolStatWithFallback(primary, fallback), {
+    vol5mUsd: 2_000,
+    vol1hUsd: 12_000,
+    vol6hUsd: 48_000,
     vol24hUsd: 130_000,
     liqUsd: 1_000_000,
     source: 'dexscreener',
@@ -20,9 +33,19 @@ test('fills missing volume without replacing chain liquidity', () => {
 })
 
 test('preserves valid zero volume and only fills missing liquidity', () => {
-  const primary: PoolStat = { vol24hUsd: 0, liqUsd: null, source: 'chain' }
+  const primary: PoolStat = {
+    vol5mUsd: 0,
+    vol1hUsd: 0,
+    vol6hUsd: 0,
+    vol24hUsd: 0,
+    liqUsd: null,
+    source: 'chain',
+  }
 
   assert.deepEqual(poolStatWithFallback(primary, fallback), {
+    vol5mUsd: 0,
+    vol1hUsd: 0,
+    vol6hUsd: 0,
     vol24hUsd: 0,
     liqUsd: 900_000,
     source: 'chain',

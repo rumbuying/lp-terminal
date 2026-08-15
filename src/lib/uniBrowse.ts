@@ -17,6 +17,7 @@ import { ADDR, UNI } from '../config/addresses'
 import { ENV } from '../config/env'
 import { loadTokenCache, saveTokenCache } from '../hooks/usePools'
 import type { PoolStat } from './poolstats'
+import { volumeWindowsOf } from './volumeWindows'
 import type { ClPool, TokenInfo } from '../types'
 
 const DS = ENV.proxied ? '/dexscreener' : 'https://api.dexscreener.com'
@@ -27,7 +28,7 @@ type DsPair = {
   dexId?: string
   labels?: string[]
   pairAddress?: string
-  volume?: { h24?: number }
+  volume?: { m5?: number; h1?: number; h6?: number; h24?: number }
   liquidity?: { usd?: number }
 }
 
@@ -88,10 +89,9 @@ export async function fetchUniBrowse(pc: PublicClient, query: string): Promise<U
 
   const stats: Record<string, PoolStat> = {}
   for (const p of picks) {
-    const vol = Number(p.volume?.h24)
     const liq = Number(p.liquidity?.usd)
     stats[p.pairAddress!.toLowerCase()] = {
-      vol24hUsd: Number.isFinite(vol) ? vol : null,
+      ...volumeWindowsOf(p.volume),
       liqUsd: Number.isFinite(liq) ? liq : null,
       source: 'dexscreener',
     }
