@@ -20,6 +20,9 @@ Environment=LP_EXECUTOR_RPC_RETRY_DELAY_MS=400
 Environment=LP_EXECUTOR_RPC_TIMEOUT_MS=15000
 Environment=LP_EXECUTOR_MONITOR_MIN_SECONDS=10
 Environment=LP_EXECUTOR_MONITOR_IDENTITY_TTL_SECONDS=300
+# Solver routing remains disabled unless both explicit contract allowlists are set.
+# Environment=LP_EXECUTOR_SOLVER_SETTLERS=0x...
+# Environment=LP_EXECUTOR_SOLVER_ALLOWANCE_TARGETS=0x...
 # Optional alternative to the encrypted vault. Enable both lines together.
 # Environment=LP_EXECUTOR_PRIVATE_KEY_FILE=/etc/lp-terminal-executor/wallet.key
 # Environment=LP_EXECUTOR_PRIVATE_KEY_WALLET_ID=wallet_server_01

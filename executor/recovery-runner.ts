@@ -9,7 +9,7 @@ import { applySlippage } from '../src/lib/clmath'
 import { grantStrategyAllowance, revokeStrategyAllowance } from './allowance'
 import { publicClient, readPoolState, readStrategySnapshot, readTokenBalances } from './chain'
 import { EXECUTOR } from './config'
-import { gatedKyberTx, quoteKyber } from './kyber'
+import { gatedKyberTx, quoteKyber, routeAudit } from './kyber'
 import { automaticDailyTurnoverLimit } from './limits'
 import { preflightStrategy } from './preflight'
 import { allocateSwapExecution, allocateSwapOutput, planCycleSwaps, type CycleFunds, type SwapIntent } from './rebalance'
@@ -57,7 +57,7 @@ type PrecheckContext = {
   priorHeld?: Record<string, string>
   trackedTokens: Address[]
 }
-type SwapPlanRecord = { txIndex: number; purpose?: 'strategy' | 'fee_tax'; tokenIn: Address; tokenOut: Address; amountIn: string; quotedOut: string; principalIn: string; feeIn: string }
+type SwapPlanRecord = { txIndex: number; purpose?: 'strategy' | 'fee_tax'; tokenIn: Address; tokenOut: Address; amountIn: string; quotedOut: string; principalIn: string; feeIn: string; route?: unknown }
 type SwapPlanContext = { swaps: SwapPlanRecord[]; tick?: number; sqrtPriceX96?: string; tickLower?: number; tickUpper?: number }
 type ExecutedSwap = { intent: SwapIntent; spent: bigint; gained: bigint; receipt: TransactionReceipt }
 type FeeTaxContext = { selectionVersion?: number; applied: boolean; totalFeeUsdg: string; totalIncomeUsdg?: string; tax0: string; tax1: string; rewardTax?: string; retainedUsdg: string }
@@ -413,18 +413,20 @@ export async function finishHoldQuote(job: RunnableJob, privateKey: `0x${string}
     const quote = await quoteKyber(intent.tokenIn, ADDR.USDG, intent.amountIn)
     const quotedOut = BigInt(quote.routeSummary.amountOut)
     const txIndex = record?.txIndex ?? nextSwapTx++
-    record = { txIndex, purpose: 'fee_tax', tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, amountIn: intent.amountIn.toString(), quotedOut: quotedOut.toString(), principalIn: '0', feeIn: intent.amountIn.toString() }
+    record = { txIndex, purpose: 'fee_tax', tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, amountIn: intent.amountIn.toString(), quotedOut: quotedOut.toString(), principalIn: '0', feeIn: intent.amountIn.toString(), route: routeAudit(quote.routeSummary) }
     swapPlan = { ...swapPlan, swaps: upsertSwapRecords(swapPlan.swaps, [record]) }
     setJobContext(job.id, 'swap_plan', swapPlan)
     const approvalGate = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-    await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender: approvalGate.to, amount: intent.amountIn })
-    const gated = await gatedKyberTx({ routeSummary: (await quoteKyber(intent.tokenIn, ADDR.USDG, intent.amountIn)).routeSummary, tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+    await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender: approvalGate.approvalTarget, amount: intent.amountIn, forceExact: approvalGate.exactApproval })
+    const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+    if (gated.approvalTarget.toLowerCase() !== approvalGate.approvalTarget.toLowerCase()) throw new Error('E_SWAP_SPENDER_CHANGED')
     const before = await readTokenBalances(job.config.owner, [intent.tokenIn, ADDR.USDG])
     const receipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 5, txIndex, privateKey, tx: gated })
     const after = await readTokenBalances(job.config.owner, [intent.tokenIn, ADDR.USDG])
     const spent = before[low(intent.tokenIn)] - after[low(intent.tokenIn)]
     const gained = after[low(ADDR.USDG)] - before[low(ADDR.USDG)]
     allocateSwapExecution(intent, spent, gained, gated.minOut)
+    await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender: gated.approvalTarget, forceExact: gated.exactApproval })
     for (const spender of [EXECUTOR.kyberRouter, ADDR.CL_SWAP_ROUTER, UNI.V3_SWAP_ROUTER])
       await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender })
     taxReceipts.push({ intent, quotedOut, spent, gained, receipt, txIndex })
@@ -456,19 +458,20 @@ export async function finishHoldQuote(job: RunnableJob, privateKey: `0x${string}
       if (job.config.safeguards.enabled && job.config.safeguards.maxSwapImpactBps !== undefined && swapImpactBps(amountIn, quotedOut, job.config.riskToken, job.config.quoteToken, snapshot, pool.sqrtPriceX96) > BigInt(Math.floor(job.config.safeguards.maxSwapImpactBps)))
         throw new Error('E_SWAP_IMPACT')
       const txIndex = existingRecord?.txIndex ?? nextSwapTx++
-      const strategyRecord: SwapPlanRecord = { txIndex, purpose: 'strategy', tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, amountIn: amountIn.toString(), quotedOut: quotedOut.toString(), principalIn: amountIn.toString(), feeIn: '0' }
+      const strategyRecord: SwapPlanRecord = { txIndex, purpose: 'strategy', tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, amountIn: amountIn.toString(), quotedOut: quotedOut.toString(), principalIn: amountIn.toString(), feeIn: '0', route: routeAudit(quote.routeSummary) }
       swapPlan = { ...swapPlan, tick: pool.tick, sqrtPriceX96: pool.sqrtPriceX96.toString(), swaps: upsertSwapRecords(swapPlan.swaps, [strategyRecord]) }
       setJobContext(job.id, 'swap_plan', swapPlan)
       const approvalGate = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-      await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: job.config.riskToken, spender: approvalGate.to, amount: amountIn })
-      const freshQuote = await quoteKyber(job.config.riskToken, job.config.quoteToken, amountIn, { protocol: job.config.protocol, tickSpacing: snapshot.tickSpacing, feePpm: snapshot.feePpm })
-      const gated = await gatedKyberTx({ routeSummary: freshQuote.routeSummary, tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+      await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: job.config.riskToken, spender: approvalGate.approvalTarget, amount: amountIn, forceExact: approvalGate.exactApproval })
+      const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+      if (gated.approvalTarget.toLowerCase() !== approvalGate.approvalTarget.toLowerCase()) throw new Error('E_SWAP_SPENDER_CHANGED')
       const before = await readTokenBalances(job.config.owner, [job.config.riskToken, job.config.quoteToken])
       swapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 5, txIndex, privateKey, tx: gated })
       const after = await readTokenBalances(job.config.owner, [job.config.riskToken, job.config.quoteToken])
       spent = before[low(job.config.riskToken)] - after[low(job.config.riskToken)]
       gained = after[low(job.config.quoteToken)] - before[low(job.config.quoteToken)]
       allocateSwapExecution({ purpose: 'strategy', tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, amountIn, quotedOut, routeSummary: quote.routeSummary, principalIn: amountIn, feeIn: 0n }, spent, gained, gated.minOut)
+      await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: job.config.riskToken, spender: gated.approvalTarget, forceExact: gated.exactApproval })
       records = await confirmedReceipts(job.id)
     }
     for (const spender of [EXECUTOR.kyberRouter, ADDR.CL_SWAP_ROUTER, UNI.V3_SWAP_ROUTER])
@@ -581,19 +584,20 @@ export async function finishFeeCollection(job: RunnableJob, privateKey: `0x${str
     const quote = await quoteKyber(intent.tokenIn, ADDR.USDG, intent.amountIn)
     const quotedOut = BigInt(quote.routeSummary.amountOut)
     const txIndex = record?.txIndex ?? nextSwapTx++
-    record = { txIndex, purpose: 'fee_tax', tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, amountIn: intent.amountIn.toString(), quotedOut: quotedOut.toString(), principalIn: '0', feeIn: intent.amountIn.toString() }
+    record = { txIndex, purpose: 'fee_tax', tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, amountIn: intent.amountIn.toString(), quotedOut: quotedOut.toString(), principalIn: '0', feeIn: intent.amountIn.toString(), route: routeAudit(quote.routeSummary) }
     swapPlan = { ...swapPlan, swaps: upsertSwapRecords(swapPlan.swaps, [record]) }
     setJobContext(job.id, 'swap_plan', swapPlan)
     const approvalGate = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-    await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender: approvalGate.to, amount: intent.amountIn })
-    const freshQuote = await quoteKyber(intent.tokenIn, ADDR.USDG, intent.amountIn)
-    const gated = await gatedKyberTx({ routeSummary: freshQuote.routeSummary, tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+    await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender: approvalGate.approvalTarget, amount: intent.amountIn, forceExact: approvalGate.exactApproval })
+    const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: intent.tokenIn, tokenOut: ADDR.USDG, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+    if (gated.approvalTarget.toLowerCase() !== approvalGate.approvalTarget.toLowerCase()) throw new Error('E_SWAP_SPENDER_CHANGED')
     const before = await readTokenBalances(job.config.owner, [intent.tokenIn, ADDR.USDG])
     const receipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 5, txIndex, privateKey, tx: gated })
     const after = await readTokenBalances(job.config.owner, [intent.tokenIn, ADDR.USDG])
     const spent = before[low(intent.tokenIn)] - after[low(intent.tokenIn)]
     const gained = after[low(ADDR.USDG)] - before[low(ADDR.USDG)]
     allocateSwapExecution(intent, spent, gained, gated.minOut)
+    await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender: gated.approvalTarget, forceExact: gated.exactApproval })
     for (const spender of [EXECUTOR.kyberRouter, ADDR.CL_SWAP_ROUTER, UNI.V3_SWAP_ROUTER])
       await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: intent.tokenIn, spender })
     taxReceipts.push({ intent, quotedOut, spent, gained, receipt, txIndex })
@@ -627,19 +631,20 @@ export async function finishFeeCollection(job: RunnableJob, privateKey: `0x${str
       const impact = swapImpactBps(riskAmount, quotedOut, job.config.riskToken, job.config.quoteToken, snapshot, pool.sqrtPriceX96)
       if (job.config.safeguards.enabled && job.config.safeguards.maxSwapImpactBps !== undefined && impact > BigInt(Math.floor(job.config.safeguards.maxSwapImpactBps))) throw new Error('E_SWAP_IMPACT')
       const txIndex = existingRecord?.txIndex ?? nextSwapTx++
-      const strategyRecord: SwapPlanRecord = { txIndex, purpose: 'strategy', tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, amountIn: riskAmount.toString(), quotedOut: quotedOut.toString(), principalIn: '0', feeIn: riskAmount.toString() }
+      const strategyRecord: SwapPlanRecord = { txIndex, purpose: 'strategy', tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, amountIn: riskAmount.toString(), quotedOut: quotedOut.toString(), principalIn: '0', feeIn: riskAmount.toString(), route: routeAudit(quote.routeSummary) }
       swapPlan = { ...swapPlan, tick: pool.tick, sqrtPriceX96: pool.sqrtPriceX96.toString(), swaps: upsertSwapRecords(swapPlan.swaps, [strategyRecord]) }
       setJobContext(job.id, 'swap_plan', swapPlan)
       const approvalGate = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn: riskAmount, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-      await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: job.config.riskToken, spender: approvalGate.to, amount: riskAmount })
-      const freshQuote = await quoteKyber(job.config.riskToken, job.config.quoteToken, riskAmount, { protocol: job.config.protocol, tickSpacing: snapshot.tickSpacing, feePpm: snapshot.feePpm })
-      const gated = await gatedKyberTx({ routeSummary: freshQuote.routeSummary, tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn: riskAmount, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+      await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: job.config.riskToken, spender: approvalGate.approvalTarget, amount: riskAmount, forceExact: approvalGate.exactApproval })
+      const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn: riskAmount, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+      if (gated.approvalTarget.toLowerCase() !== approvalGate.approvalTarget.toLowerCase()) throw new Error('E_SWAP_SPENDER_CHANGED')
       const before = await readTokenBalances(job.config.owner, [job.config.riskToken, job.config.quoteToken])
       swapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 5, txIndex, privateKey, tx: gated })
       const after = await readTokenBalances(job.config.owner, [job.config.riskToken, job.config.quoteToken])
       strategySpent = before[low(job.config.riskToken)] - after[low(job.config.riskToken)]
       gained = after[low(job.config.quoteToken)] - before[low(job.config.quoteToken)]
       allocateSwapExecution({ purpose: 'strategy', tokenIn: job.config.riskToken, tokenOut: job.config.quoteToken, amountIn: riskAmount, quotedOut, routeSummary: quote.routeSummary, principalIn: 0n, feeIn: riskAmount }, strategySpent, gained, gated.minOut)
+      await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: nextTransactionIndex(job.id, 4), privateKey, token: job.config.riskToken, spender: gated.approvalTarget, forceExact: gated.exactApproval })
       records = await confirmedReceipts(job.id)
     }
     for (const spender of [EXECUTOR.kyberRouter, ADDR.CL_SWAP_ROUTER, UNI.V3_SWAP_ROUTER])
@@ -932,7 +937,7 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
     const reusableIndex = reusableStrategyRecords.findIndex((record) => low(record.tokenIn) === low(intent.tokenIn) && low(record.tokenOut) === low(intent.tokenOut))
     const reusable = reusableIndex >= 0 ? reusableStrategyRecords.splice(reusableIndex, 1)[0] : undefined
     const txIndex = reusable?.txIndex ?? nextSwapTx++
-    return { txIndex, purpose: intent.purpose, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, amountIn: intent.amountIn.toString(), quotedOut: intent.quotedOut.toString(), principalIn: intent.principalIn.toString(), feeIn: intent.feeIn.toString() }
+    return { txIndex, purpose: intent.purpose, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, amountIn: intent.amountIn.toString(), quotedOut: intent.quotedOut.toString(), principalIn: intent.principalIn.toString(), feeIn: intent.feeIn.toString(), route: routeAudit(intent.routeSummary) }
   })
   const pendingSwaps = [...pendingTax, ...cycle.swaps.map((intent, index) => ({ intent, txIndex: strategyRecords[index].txIndex }))]
   setJobContext(job.id, 'swap_plan', {
@@ -957,9 +962,9 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
     const fallback = intent.purpose === 'fee_tax' ? undefined : { protocol: job.config.protocol, tickSpacing: snapshot.tickSpacing, feePpm: snapshot.feePpm }
     const approvalQuote = await quoteKyber(intent.tokenIn, intent.tokenOut, intent.amountIn, fallback)
     const approvalGate = await gatedKyberTx({ routeSummary: approvalQuote.routeSummary, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-    const approvals = await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: approvalTx, privateKey, token: intent.tokenIn, spender: approvalGate.to, amount: intent.amountIn })
+    const approvals = await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: approvalTx, privateKey, token: intent.tokenIn, spender: approvalGate.approvalTarget, amount: intent.amountIn, forceExact: approvalGate.exactApproval })
     approvalTx += approvals.length
-    const quote = await quoteKyber(intent.tokenIn, intent.tokenOut, intent.amountIn, fallback)
+    const quote = approvalQuote
     const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
     const before = await readTokenBalances(job.config.owner, [intent.tokenIn, intent.tokenOut])
     const receipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 5, txIndex, privateKey, tx: gated })
@@ -967,7 +972,8 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
     const spent = before[low(intent.tokenIn)] - after[low(intent.tokenIn)]
     const gained = after[low(intent.tokenOut)] - before[low(intent.tokenOut)]
     const execution = allocateSwapExecution(intent, spent, gained, gated.minOut)
-    const revokeReceipts = await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: approvalTx, privateKey, token: intent.tokenIn, spender: gated.to })
+    if (gated.approvalTarget.toLowerCase() !== approvalGate.approvalTarget.toLowerCase()) throw new Error('E_SWAP_SPENDER_CHANGED')
+    const revokeReceipts = await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: approvalTx, privateKey, token: intent.tokenIn, spender: gated.approvalTarget, forceExact: gated.exactApproval })
     approvalTx += revokeReceipts.length
     if (intent.purpose === 'fee_tax') {
       const refundToLp = job.config.fees.handling === 'reinvest'

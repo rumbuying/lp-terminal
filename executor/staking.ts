@@ -3,7 +3,7 @@ import { clGaugeAbi, clPmAbi } from '../src/abi'
 import { ADDR } from '../src/config/addresses'
 import { grantStrategyAllowance, revokeStrategyAllowance } from './allowance'
 import { publicClient, readTokenBalances } from './chain'
-import { gatedKyberTx, quoteWithNativeFallback } from './kyber'
+import { gatedKyberTx, quoteWithNativeFallback, routeAudit } from './kyber'
 import { quoteRewardToWeth } from './reward'
 import { receiptTokenDelta } from './receipts'
 import { sendTracked } from './signer'
@@ -37,6 +37,8 @@ export type StakingRewardContext = {
   withdrawTxHash?: Hex
   swapTxHash?: Hex
   quoteSwapTxHash?: Hex
+  wethRoute?: unknown
+  quoteRoute?: unknown
 }
 
 /** Idempotently withdraw the old NFT and settle newly claimed UP through WETH into quote. */
@@ -82,7 +84,8 @@ export async function ensureUnstakedAndRewardConverted(job: RunnableJob, private
     quotedWeth = BigInt(quote.routeSummary.amountOut)
     setJobContext(job.id, 'staking_reward', { rewardUp: rewardUp.toString(), rewardWeth: '0', rewardQuote: '0', quotedWeth: quotedWeth.toString(), quotedQuote: '0', settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash })
     const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: ADDR.UP, tokenOut: ADDR.WETH, sender: job.config.owner, recipient: job.config.owner, amountIn: rewardUp, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.UP, spender: gated.to, amount: rewardUp }))
+    setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'), wethRoute: routeAudit(quote.routeSummary, gated) })
+    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.UP, spender: gated.approvalTarget, amount: rewardUp, forceExact: gated.exactApproval }))
     const before = await readTokenBalances(job.config.owner, [ADDR.UP, ADDR.WETH])
     swapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 14, txIndex: nextTransactionIndex(job.id, 14), privateKey, tx: gated })
     receipts.push(swapReceipt)
@@ -90,9 +93,9 @@ export async function ensureUnstakedAndRewardConverted(job: RunnableJob, private
     const spent = before[low(ADDR.UP)] - after[low(ADDR.UP)]
     rewardWeth = after[low(ADDR.WETH)] - before[low(ADDR.WETH)]
     if (spent !== rewardUp || rewardWeth < gated.minOut) throw new Error('E_REWARD_ACCOUNTING')
-    receipts.push(...await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.UP, spender: gated.to }))
+    receipts.push(...await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.UP, spender: gated.approvalTarget, forceExact: gated.exactApproval }))
   }
-  setJobContext(job.id, 'staking_reward', { rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: low(job.config.quoteToken) === low(ADDR.WETH) ? rewardWeth.toString() : '0', quotedWeth: quotedWeth.toString(), quotedQuote: low(job.config.quoteToken) === low(ADDR.WETH) ? quotedWeth.toString() : '0', settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash, swapTxHash: swapReceipt.transactionHash })
+  setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'), rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: low(job.config.quoteToken) === low(ADDR.WETH) ? rewardWeth.toString() : '0', quotedWeth: quotedWeth.toString(), quotedQuote: low(job.config.quoteToken) === low(ADDR.WETH) ? quotedWeth.toString() : '0', settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash, swapTxHash: swapReceipt.transactionHash })
 
   if (low(job.config.quoteToken) === low(ADDR.WETH))
     return { rewardUp, rewardWeth, rewardQuote: rewardWeth, quotedWeth, quotedQuote: quotedWeth, receipts }
@@ -109,7 +112,8 @@ export async function ensureUnstakedAndRewardConverted(job: RunnableJob, private
     quotedQuote = BigInt(quote.routeSummary.amountOut)
     setJobContext(job.id, 'staking_reward', { rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: '0', quotedWeth: quotedWeth.toString(), quotedQuote: quotedQuote.toString(), settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash, swapTxHash: swapReceipt.transactionHash })
     const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: ADDR.WETH, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn: rewardWeth, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.WETH, spender: gated.to, amount: rewardWeth }))
+    setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'), quoteRoute: routeAudit(quote.routeSummary, gated) })
+    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.WETH, spender: gated.approvalTarget, amount: rewardWeth, forceExact: gated.exactApproval }))
     const before = await readTokenBalances(job.config.owner, [ADDR.WETH, job.config.quoteToken])
     quoteSwapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 14, txIndex: 1, privateKey, tx: gated })
     receipts.push(quoteSwapReceipt)
@@ -117,9 +121,9 @@ export async function ensureUnstakedAndRewardConverted(job: RunnableJob, private
     const spent = before[low(ADDR.WETH)] - after[low(ADDR.WETH)]
     rewardQuote = after[low(job.config.quoteToken)] - before[low(job.config.quoteToken)]
     if (spent !== rewardWeth || rewardQuote < gated.minOut) throw new Error('E_REWARD_ACCOUNTING')
-    receipts.push(...await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.WETH, spender: gated.to }))
+    receipts.push(...await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.WETH, spender: gated.approvalTarget, forceExact: gated.exactApproval }))
   }
-  setJobContext(job.id, 'staking_reward', { rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: rewardQuote.toString(), quotedWeth: quotedWeth.toString(), quotedQuote: quotedQuote.toString(), settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash, swapTxHash: swapReceipt.transactionHash, quoteSwapTxHash: quoteSwapReceipt.transactionHash })
+  setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'), rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: rewardQuote.toString(), quotedWeth: quotedWeth.toString(), quotedQuote: quotedQuote.toString(), settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash, swapTxHash: swapReceipt.transactionHash, quoteSwapTxHash: quoteSwapReceipt.transactionHash })
   return { rewardUp, rewardWeth, rewardQuote, quotedWeth, quotedQuote, receipts }
 }
 

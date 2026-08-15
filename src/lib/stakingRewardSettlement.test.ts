@@ -49,7 +49,8 @@ mock.module('../../executor/reward', {
 mock.module('../../executor/kyber', {
   namedExports: {
     quoteWithNativeFallback: async (_tokenIn: Address, _tokenOut: Address, amountIn: bigint) => ({ routeSummary: { tokenIn: ADDR.WETH, tokenOut: quoteToken, amountIn: amountIn.toString(), amountOut: '90', route: [[]] } }),
-    gatedKyberTx: async ({ tokenIn, tokenOut }: { tokenIn: Address; tokenOut: Address }) => ({ to: router, data: '0x' as Hex, value: 0n, minOut: tokenIn.toLowerCase() === ADDR.UP.toLowerCase() ? 100n : 90n, tokenOut }),
+    gatedKyberTx: async ({ tokenIn, tokenOut }: { tokenIn: Address; tokenOut: Address }) => ({ to: router, approvalTarget: router, exactApproval: false, data: '0x' as Hex, value: 0n, minOut: tokenIn.toLowerCase() === ADDR.UP.toLowerCase() ? 100n : 90n, tokenOut }),
+    routeAudit: () => ({ source: 'kyber' }),
   },
 })
 mock.module('../../executor/receipts', {

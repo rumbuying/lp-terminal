@@ -4,10 +4,13 @@ import { ADDR, UNI } from '../src/config/addresses'
 import { applySlippage } from '../src/lib/clmath'
 import { publicClient } from './chain'
 import { EXECUTOR } from './config'
+import { buildSolverTx, quoteSolver, type SolverRouteSummary } from './solver'
 
 const HEADERS = { 'x-client-id': 'lp-terminal-executor', 'content-type': 'application/json' }
-export type KyberRouteSummary = { tokenIn: string; tokenOut: string; amountIn: string; amountOut: string; route: unknown[][]; executorSource?: 'up33_cl' | 'univ3'; tickSpacing?: number; feePpm?: number; [key: string]: unknown }
+export type RouteSource = 'kyber' | 'solver' | 'up33_cl' | 'univ3'
+export type KyberRouteSummary = { tokenIn: string; tokenOut: string; amountIn: string; amountOut: string; route: unknown[][]; executorSource?: Exclude<RouteSource, 'kyber'>; tickSpacing?: number; feePpm?: number; [key: string]: unknown }
 export type KyberRoute = { routeSummary: KyberRouteSummary; routerAddress: Address }
+export type GatedSwapTx = { to: Address; approvalTarget: Address; exactApproval: boolean; data: Hex; value: bigint; minOut: bigint }
 type Build = { data: Hex; routerAddress: Address; amountIn: string; amountOut: string; transactionValue?: string }
 const api = () => `${EXECUTOR.kyberBase}/${EXECUTOR.kyberChain}/api/v1`
 let aggregatorUnavailableUntil = 0
@@ -93,33 +96,12 @@ async function nativeRoutes(tokenIn: Address, tokenOut: Address): Promise<Native
   return routes
 }
 
-/**
- * Prefer the aggregator, then fail over to every canonical direct CL/V3 pool
- * for the pair. Direct candidates are quoted independently and the best live
- * output wins; an empty, paused or otherwise unusable pool cannot suppress a
- * healthy sibling fee tier.
- */
+/** Compare every executable source and return the best live output. */
 export async function quoteWithNativeFallback(tokenIn: Address, tokenOut: Address, amountIn: bigint): Promise<KyberRoute> {
-  if (amountIn <= 0n) throw new Error('E_KYBER_QUOTE')
-  try {
-    return await quoteKyber(tokenIn, tokenOut, amountIn)
-  } catch {
-    const candidates = await Promise.allSettled((await nativeRoutes(tokenIn, tokenOut)).map((route) =>
-      route.protocol === 'up33'
-        ? quoteUp33Cl(tokenIn, tokenOut, amountIn, route.tickSpacing)
-        : quoteUniv3(tokenIn, tokenOut, amountIn, route.feePpm),
-    ))
-    let best: KyberRoute | undefined
-    for (const candidate of candidates) {
-      if (candidate.status !== 'fulfilled') continue
-      if (!best || BigInt(candidate.value.routeSummary.amountOut) > BigInt(best.routeSummary.amountOut)) best = candidate.value
-    }
-    if (!best) throw new Error('E_KYBER_QUOTE')
-    return best
-  }
+  return quoteKyber(tokenIn, tokenOut, amountIn)
 }
 
-export async function quoteKyber(tokenIn: Address, tokenOut: Address, amountIn: bigint, fallback?: { protocol: 'up33' | 'univ3'; tickSpacing: number; feePpm?: number }): Promise<KyberRoute> {
+async function quoteKyberOnly(tokenIn: Address, tokenOut: Address, amountIn: bigint): Promise<KyberRoute> {
   const url = new URL(`${api()}/routes`)
   url.searchParams.set('tokenIn', tokenIn)
   url.searchParams.set('tokenOut', tokenOut)
@@ -139,13 +121,53 @@ export async function quoteKyber(tokenIn: Address, tokenOut: Address, amountIn: 
   }
   if (response?.ok && body?.code === 0 && body?.data?.routeSummary && body?.data?.routerAddress)
     return validateKyberRoute(body.data as KyberRoute, tokenIn, tokenOut, amountIn)
-  if (fallback?.protocol === 'up33') return quoteUp33Cl(tokenIn, tokenOut, amountIn, fallback.tickSpacing)
-  if (fallback?.protocol === 'univ3' && fallback.feePpm !== undefined) return quoteUniv3(tokenIn, tokenOut, amountIn, fallback.feePpm)
   throw new Error('E_KYBER_QUOTE')
 }
 
+export async function quoteKyber(tokenIn: Address, tokenOut: Address, amountIn: bigint, fallback?: { protocol: 'up33' | 'univ3'; tickSpacing: number; feePpm?: number }): Promise<KyberRoute> {
+  if (amountIn <= 0n) throw new Error('E_KYBER_QUOTE')
+  const routes = await nativeRoutes(tokenIn, tokenOut).catch(() => [] as NativeRoute[])
+  if (fallback?.protocol === 'up33' && !routes.some((route) => route.protocol === 'up33' && route.tickSpacing === fallback.tickSpacing))
+    routes.push({ protocol: 'up33', tickSpacing: fallback.tickSpacing })
+  if (fallback?.protocol === 'univ3' && fallback.feePpm !== undefined && !routes.some((route) => route.protocol === 'univ3' && route.feePpm === fallback.feePpm))
+    routes.push({ protocol: 'univ3', feePpm: fallback.feePpm })
+  const candidates = await Promise.allSettled([
+    quoteKyberOnly(tokenIn, tokenOut, amountIn),
+    quoteSolver(tokenIn, tokenOut, amountIn).then((routeSummary) => ({ routeSummary, routerAddress: zeroAddress })),
+    ...routes.map((route) => route.protocol === 'up33'
+      ? quoteUp33Cl(tokenIn, tokenOut, amountIn, route.tickSpacing)
+      : quoteUniv3(tokenIn, tokenOut, amountIn, route.feePpm)),
+  ])
+  let best: KyberRoute | undefined
+  for (const candidate of candidates) {
+    if (candidate.status !== 'fulfilled') continue
+    const value = candidate.value as KyberRoute
+    if (!best || BigInt(value.routeSummary.amountOut) > BigInt(best.routeSummary.amountOut)) best = value
+  }
+  if (!best) throw new Error('E_KYBER_QUOTE')
+  return best
+}
+
+export function routeAudit(routeSummary: KyberRouteSummary, gated?: Pick<GatedSwapTx, 'to' | 'approvalTarget' | 'minOut'>) {
+  return {
+    source: routeSummary.executorSource ?? 'kyber',
+    amountOut: routeSummary.amountOut,
+    router: gated?.to,
+    approvalTarget: gated?.approvalTarget,
+    minOut: gated?.minOut.toString(),
+    tickSpacing: routeSummary.tickSpacing,
+    feePpm: routeSummary.feePpm,
+    route: routeSummary.route,
+  }
+}
+
 /** Build and validate opaque aggregator calldata immediately before signing. */
-export async function gatedKyberTx(args: { routeSummary: KyberRouteSummary; tokenIn: Address; tokenOut: Address; sender: Address; recipient: Address; amountIn: bigint; slippageBps: number; nativeIn: boolean }): Promise<{ to: Address; data: Hex; value: bigint; minOut: bigint }> {
+export async function gatedKyberTx(args: { routeSummary: KyberRouteSummary; tokenIn: Address; tokenOut: Address; sender: Address; recipient: Address; amountIn: bigint; slippageBps: number; nativeIn: boolean }): Promise<GatedSwapTx> {
+  if (args.routeSummary.executorSource === 'solver') {
+    if (args.nativeIn) throw new Error('E_SOLVER_VALUE')
+    const built = await buildSolverTx({ ...args, routeSummary: args.routeSummary as SolverRouteSummary })
+    return { ...built, exactApproval: true }
+  }
   if (args.routeSummary.executorSource === 'up33_cl') {
     if (args.nativeIn || getAddress(args.routeSummary.tokenIn) !== getAddress(args.tokenIn) || getAddress(args.routeSummary.tokenOut) !== getAddress(args.tokenOut) || BigInt(args.routeSummary.amountIn) !== args.amountIn || BigInt(args.routeSummary.amountOut) <= 0n)
       throw new Error('E_NATIVE_QUOTE_IDENTITY')
@@ -161,6 +183,8 @@ export async function gatedKyberTx(args: { routeSummary: KyberRouteSummary; toke
       }),
       value: 0n,
       minOut,
+      approvalTarget: ADDR.CL_SWAP_ROUTER,
+      exactApproval: false,
     }
   }
   if (args.routeSummary.executorSource === 'univ3') {
@@ -178,6 +202,8 @@ export async function gatedKyberTx(args: { routeSummary: KyberRouteSummary; toke
       }),
       value: 0n,
       minOut,
+      approvalTarget: UNI.V3_SWAP_ROUTER,
+      exactApproval: false,
     }
   }
   validateKyberRoute({ routeSummary: args.routeSummary, routerAddress: EXECUTOR.kyberRouter }, args.tokenIn, args.tokenOut, args.amountIn)
@@ -193,5 +219,5 @@ export async function gatedKyberTx(args: { routeSummary: KyberRouteSummary; toke
   if (value !== (args.nativeIn ? args.amountIn : 0n)) throw new Error('E_KYBER_VALUE')
   const minOut = applySlippage(BigInt(args.routeSummary.amountOut), args.slippageBps)
   if (BigInt(built.amountIn) !== args.amountIn || BigInt(built.amountOut) < minOut) throw new Error('E_KYBER_DRIFT')
-  return { to: EXECUTOR.kyberRouter, data: built.data, value, minOut }
+  return { to: EXECUTOR.kyberRouter, approvalTarget: EXECUTOR.kyberRouter, exactApproval: false, data: built.data, value, minOut }
 }

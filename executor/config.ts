@@ -10,6 +10,10 @@ function boundedInteger(key: string, fallback: number, min: number, max: number)
   return value
 }
 
+function addressList(key: string) {
+  return (env(key)?.split(',').map((value) => getAddress(value.trim())).filter(Boolean) ?? [])
+}
+
 function readSecretFile(path: string, label: string): Buffer {
   const stat = statSync(path)
   if (!stat.isFile()) throw new Error(`${label} is not a regular file`)
@@ -97,6 +101,11 @@ export const EXECUTOR = {
   kyberBase: (env('LP_EXECUTOR_KYBER_BASE') ?? 'https://aggregator-api.kyberswap.com').replace(/\/+$/, ''),
   kyberChain: env('LP_EXECUTOR_KYBER_CHAIN') ?? 'robinhood',
   kyberRouter: getAddress(env('LP_EXECUTOR_KYBER_ROUTER') ?? '0x6131B5fae19EA4f9D964eAc0408E4408b66337b5'),
+  solverBase: (env('LP_EXECUTOR_SOLVER_BASE') ?? 'https://solver.lp-terminal.xyz').replace(/\/+$/, ''),
+  // Solver calldata is opaque. It is never executable unless both returned
+  // addresses are explicitly allowlisted by the operator.
+  solverSettlers: addressList('LP_EXECUTOR_SOLVER_SETTLERS'),
+  solverAllowanceTargets: addressList('LP_EXECUTOR_SOLVER_ALLOWANCE_TARGETS'),
   masterSecret: masterSecret(),
   apiToken: apiToken(),
   allowedOrigins: (env('LP_EXECUTOR_ALLOWED_ORIGIN')?.split(',').map((value) => value.trim()).filter(Boolean) ?? [

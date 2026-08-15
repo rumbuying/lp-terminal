@@ -6,6 +6,7 @@
 // (the AllowanceHolder) is the ONLY approval target — never the settler
 // address.
 import { getAddress, type Address, type Hex } from 'viem'
+import { CHAIN_ID } from '../config/addresses'
 import { ENV } from '../config/env'
 import { parseSolverMidAmountOut, parseSolverPriceImpactBps } from './solverResponse'
 
@@ -78,6 +79,7 @@ export async function fetchSolverQuote(args: {
     headers: { 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(SOLVER_TIMEOUT_MS),
     body: JSON.stringify({
+      chainId: CHAIN_ID,
       tokenIn: args.tokenIn,
       tokenOut: args.tokenOut,
       amountIn: args.amountIn.toString(),

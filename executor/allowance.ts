@@ -16,6 +16,8 @@ type AllowanceArgs = {
   token: Address
   spender: Address
   amount: bigint
+  /** Opaque solver spenders never receive a persistent allowance. */
+  forceExact?: boolean
 }
 
 export async function exactAllowance(args: AllowanceArgs) {
@@ -36,7 +38,7 @@ export async function exactAllowance(args: AllowanceArgs) {
 
 /** Grant either the exact cycle amount or a persistent maximum allowance. */
 export async function grantStrategyAllowance(args: AllowanceArgs) {
-  if (!args.config.execution.lowTransactionMode) return exactAllowance(args)
+  if (args.forceExact || !args.config.execution.lowTransactionMode) return exactAllowance(args)
   let txIndex = args.txIndexStart ?? 0
   const current = await readAllowance(args.token, args.config.owner, args.spender)
   if (current >= args.amount) {
@@ -52,7 +54,7 @@ export async function grantStrategyAllowance(args: AllowanceArgs) {
 
 /** Exact mode revokes after use; low-transaction mode deliberately retains it. */
 export async function revokeStrategyAllowance(args: Omit<AllowanceArgs, 'amount'>) {
-  if (args.config.execution.lowTransactionMode) {
+  if (!args.forceExact && args.config.execution.lowTransactionMode) {
     const current = await readAllowance(args.token, args.config.owner, args.spender)
     markStep({ jobId: args.jobId, index: args.stepIndex, state: 'confirmed', result: { skipped: true, persistent: true, allowance: current.toString() } })
     return [] as TransactionReceipt[]

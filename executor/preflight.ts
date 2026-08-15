@@ -78,7 +78,7 @@ export async function preflightStrategy(config: StrategyConfig) {
     fee1: collectableFees.amount1,
   }
 
-  const routes: { source: 'kyber' | 'up33_cl' | 'univ3'; tokenIn: Address; tokenOut: Address; amountIn: string; quotedOut: string; minOut: string; impactBps: string }[] = []
+  const routes: { source: 'kyber' | 'solver' | 'up33_cl' | 'univ3'; tokenIn: Address; tokenOut: Address; amountIn: string; quotedOut: string; minOut: string; impactBps: string }[] = []
   let rewardTurnover = 0n
   let rewardSettlement = 0n
   let rewardRouteCount = 0
@@ -89,7 +89,7 @@ export async function preflightStrategy(config: StrategyConfig) {
     const rewardAmount = BigInt(snapshot.rewardOwed!)
     const reward = await quoteRewardToQuote(rewardAmount, config.quoteToken)
     const wethGate = await gatedKyberTx({ routeSummary: reward.weth.routeSummary, tokenIn: ADDR.UP, tokenOut: ADDR.WETH, sender: config.owner, recipient: config.owner, amountIn: rewardAmount, slippageBps: config.safeguards.maxSlippageBps, nativeIn: false })
-    routes.push({ source: reward.weth.routeSummary.executorSource === 'up33_cl' ? 'up33_cl' : 'kyber', tokenIn: ADDR.UP, tokenOut: ADDR.WETH, amountIn: rewardAmount.toString(), quotedOut: reward.weth.routeSummary.amountOut, minOut: wethGate.minOut.toString(), impactBps: '0' })
+    routes.push({ source: reward.weth.routeSummary.executorSource ?? 'kyber', tokenIn: ADDR.UP, tokenOut: ADDR.WETH, amountIn: rewardAmount.toString(), quotedOut: reward.weth.routeSummary.amountOut, minOut: wethGate.minOut.toString(), impactBps: '0' })
     if (reward.quote) {
       const quoteGate = await gatedKyberTx({ routeSummary: reward.quote.routeSummary, tokenIn: ADDR.WETH, tokenOut: config.quoteToken, sender: config.owner, recipient: config.owner, amountIn: reward.wethAmountOut, slippageBps: config.safeguards.maxSlippageBps, nativeIn: false })
       routes.push({ source: reward.quote.routeSummary.executorSource ?? 'kyber', tokenIn: ADDR.WETH, tokenOut: config.quoteToken, amountIn: reward.wethAmountOut.toString(), quotedOut: reward.quote.routeSummary.amountOut, minOut: quoteGate.minOut.toString(), impactBps: '0' })
