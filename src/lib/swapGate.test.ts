@@ -5,8 +5,10 @@ import {
   AUTO_IMPACT_LIMIT_BPS,
   autoSlippage,
   clampSlippageBps,
+  CONFIRM_SLIPPAGE_BPS,
   MAX_SLIPPAGE_BPS,
   MIN_SLIPPAGE_BPS,
+  needsSlippageConfirm,
   retrySlippage,
   slippagePctToBps,
 } from './swapGate'
@@ -52,6 +54,31 @@ test('retry floor after a slippage halt: 1.5x, ceil to 0.1%, clamped', () => {
   assert.equal(retrySlippage(10), 20) // floor value still moves up
   assert.equal(retrySlippage(4000), MAX_SLIPPAGE_BPS) // never past the 50% ceiling
   assert.equal(retrySlippage(0), MIN_SLIPPAGE_BPS)
+})
+
+test('a tolerance past 10% has to be confirmed a second time', () => {
+  assert.equal(CONFIRM_SLIPPAGE_BPS, 1000)
+  assert.equal(needsSlippageConfirm(CONFIRM_SLIPPAGE_BPS + 1), true)
+  assert.equal(needsSlippageConfirm(2500), true)
+  assert.equal(needsSlippageConfirm(MAX_SLIPPAGE_BPS), true)
+  // exactly 10% is a number the user landed on at the editor, and stands
+  assert.equal(needsSlippageConfirm(CONFIRM_SLIPPAGE_BPS), false)
+  assert.equal(needsSlippageConfirm(300), false)
+  assert.equal(needsSlippageConfirm(MIN_SLIPPAGE_BPS), false)
+  // no tolerance chosen yet is not a wide one — that button says CHOOSE SLIPPAGE
+  assert.equal(needsSlippageConfirm(undefined), false)
+})
+
+test('the tolerances AUTO derives on its own reach past the confirm line', () => {
+  // the guard has to be reachable without anyone typing a number: AUTO covers
+  // impact + pool fee + a pad, and a thin pool crosses 10% by itself
+  const derived = autoSlippage(800, 100) as { bps: number }
+  assert.equal(needsSlippageConfirm(derived.bps), true) // 13%
+  // while an ordinary trade on a 0.30% pool stays under it, unasked
+  assert.equal(needsSlippageConfirm((autoSlippage(100, 30) as { bps: number }).bps), false) // 1.8%
+  // and the post-halt retry floor climbs there too, without a second opinion
+  assert.equal(needsSlippageConfirm(retrySlippage(700)), true) // 7% -> 10.5%
+  assert.equal(needsSlippageConfirm(retrySlippage(600)), false) // 6% -> 9%
 })
 
 test('typed slippage percent parses to clamped bps or null', () => {
@@ -104,7 +131,7 @@ const UP_MID_OUT = 15631003702256628545100n
 const UP_IMPACT_BPS = 59 // the whole headline before this change
 const UP_ROUTE_FEE_BPS = 93.48 // share-weighted across the split
 
-test('the headline is the all-in cost, not the size move and not the naive sum', () => {
+test('the headline is baseline-relative cost, not raw probe degradation or a naive sum', () => {
   const allIn = allInCostBps(UP_NET_OUT, UP_MID_OUT) as number
   assert.equal(allIn, 88) // 88.36, to the display's resolution
 
@@ -118,11 +145,11 @@ test('the headline is the all-in cost, not the size move and not the naive sum',
 
 test('the cost is unavailable for a missing or stale baseline', () => {
   assert.equal(allInCostBps(SOLVER_OUT * 2n, MID_OUT), null)
-  assert.equal(allInCostBps(MID_OUT, MID_OUT), 0) // free size and free fees
+  assert.equal(allInCostBps(MID_OUT, MID_OUT), 0) // no gap to the selected baseline
   assert.equal(allInCostBps(SOLVER_OUT, null), null)
 })
 
-test('autoSlippage takes the RAW size move, never the all-in cost', () => {
+test('autoSlippage takes raw probe degradation, never baseline-relative cost', () => {
   // it adds the pool fee itself, so handing it a fee-inclusive number counts
   // that fee twice — this pins the two apart
   const impact = 40

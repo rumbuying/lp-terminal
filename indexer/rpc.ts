@@ -1,13 +1,14 @@
 import { createPublicClient, defineChain, fallback, http, type PublicClient } from 'viem'
-import { log, PUBLIC_RPC, TUNE, rpcUrls, sleep } from './config'
+import { CHAIN, log, PUBLIC_RPC, TUNE, rpcUrls, sleep } from './config'
 
 // duplicated from src/config/chain.ts — that module imports src/config/env.ts
 // (import.meta.env, vite-only) so it can't be loaded under node
-const robinhood = defineChain({
-  id: 4663,
-  name: 'Robinhood Chain',
-  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+const indexerChain = defineChain({
+  id: CHAIN.id,
+  name: CHAIN.name,
+  nativeCurrency: CHAIN.nativeCurrency,
   rpcUrls: { default: { http: [PUBLIC_RPC] } },
+  blockExplorers: { default: { name: CHAIN.explorer.name, url: CHAIN.explorer.url } },
   contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } },
 })
 
@@ -17,21 +18,99 @@ export const usingPrivateRpc = urls.some((url) => url !== PUBLIC_RPC)
 // (measured 2026-07-16); a stalled attempt should fail fast and retry, not
 // pin the whole boot for 30s. Bad chunks degrade to sub-chunks in mc().
 export const pc: PublicClient = createPublicClient({
-  chain: robinhood,
+  chain: indexerChain,
   transport: fallback(
     urls.map((url) => http(url, { timeout: 10_000 })),
     { retryCount: 2, retryDelay: 400 },
   ),
 })
 
-/** error text safe to log — the RPC url (secret) is redacted */
-export const safeError = (e: unknown) =>
-  urls
-    .reduce(
-      (text, url) => text.replaceAll(url, '<rpc>'),
-      String(e instanceof Error ? `${e.name}: ${e.message.split('\n')[0]}` : e),
+/**
+ * Allocate independent requests round-robin across the direct transports.
+ * Selection happens synchronously before the request starts, so a concurrent
+ * batch fans out instead of viem's aggregate fallback always leading with the
+ * same endpoint. A direct failure is retried through the aggregate client,
+ * which preserves failover/retry behaviour across the whole configured set.
+ */
+export function createRpcRequestRotator<TClient>(
+  directClients: readonly TClient[],
+  aggregateClient: TClient,
+) {
+  if (!directClients.length) throw new Error('no direct RPC clients configured')
+  let nextIndex = 0
+  return async function withRpcClient<T>(
+    request: (client: TClient) => Promise<T>,
+  ): Promise<T> {
+    const direct = directClients[nextIndex % directClients.length]
+    nextIndex = (nextIndex + 1) % directClients.length
+    try {
+      return await request(direct)
+    } catch {
+      return request(aggregateClient)
+    }
+  }
+}
+
+const directClients: PublicClient[] = urls.map((url) =>
+  createPublicClient({
+    chain: indexerChain,
+    transport: http(url, { timeout: 10_000 }),
+  }),
+)
+
+/** Direct round-robin request with aggregate fallback; configured URLs stay private. */
+export const withRotatingRpcClient = createRpcRequestRotator(directClients, pc)
+
+/** Fatal configuration error: continuing would write one chain into another's DB. */
+export class RpcChainMismatchError extends Error {
+  constructor(actualChainId: number) {
+    super(
+      `RPC chain mismatch: configured ${CHAIN.key}:${CHAIN.id}, endpoint returned chain id ${actualChainId}`,
     )
-    .slice(0, 120)
+    this.name = 'RpcChainMismatchError'
+  }
+}
+
+export function assertConfiguredChainId(actualChainId: number): void {
+  if (actualChainId !== CHAIN.id) throw new RpcChainMismatchError(actualChainId)
+}
+
+export function assertConfiguredRpcChainIds(actualChainIds: readonly number[]): void {
+  if (!actualChainIds.length) throw new Error('no RPC endpoints configured')
+  for (const chainId of actualChainIds) assertConfiguredChainId(chainId)
+}
+
+/**
+ * Probe EVERY fallback endpoint before discovery. Verifying only the aggregate
+ * client proves whichever endpoint happened to answer first; a wrong-chain
+ * fallback could later take over during rate limiting and poison the bound DB.
+ */
+export async function verifyRpcChain(): Promise<number> {
+  const actualChainIds = await Promise.all(
+    urls.map((url) =>
+      createPublicClient({ transport: http(url, { timeout: 10_000 }) }).getChainId(),
+    ),
+  )
+  assertConfiguredRpcChainIds(actualChainIds)
+  return actualChainIds[0]
+}
+
+/** Redact every configured endpoint before any error text reaches a log. */
+export const redactRpcUrls = (text: string, configuredUrls: readonly string[] = urls): string => {
+  // Longest-first prevents a host-only endpoint from exposing the secret suffix
+  // of another endpoint on the same host. The final generic pass also covers a
+  // transport that normalizes an endpoint before including it in an error.
+  const exact = [...configuredUrls]
+    .sort((a, b) => b.length - a.length)
+    .reduce((redacted, url) => redacted.replaceAll(url, '<rpc>'), text)
+  return exact.replace(/https?:\/\/[^\s"'`)}\]]+/gi, '<rpc>')
+}
+
+/** error text safe to log — RPC urls (and embedded credentials) are redacted */
+export const safeError = (e: unknown) =>
+  redactRpcUrls(
+    String(e instanceof Error ? `${e.name}: ${e.message.split('\n')[0]}` : e),
+  ).slice(0, 120)
 
 // loose call shape — abi fragments come from parseAbi, results are narrowed by ok<T>()
 export type Call = { abi: unknown; address: `0x${string}`; functionName: string; args?: unknown[] }

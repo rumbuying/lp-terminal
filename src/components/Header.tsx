@@ -1,22 +1,40 @@
 import { ConnectButton } from '@rainbow-me/rainbowkit'
+import { useQuery } from '@tanstack/react-query'
+import { usePublicClient } from 'wagmi'
+import type { PublicClient } from 'viem'
+import { CHAIN_ID } from '../config/addresses'
+import { FEATURES } from '../config/features'
+import { HEADER_BLOCK_QUERY_POLICY } from '../config/query'
 import { useTranslation } from 'react-i18next'
-import { usePools } from '../hooks/usePools'
+import { ChainControl } from './ChainControl'
 import { HistoryButton } from './HistoryButton'
 import { LangControl } from './LangControl'
 import { NewsButton } from './NewsButton'
 
 export type TabId = 'pools' | 'positions' | 'swap' | 'bridge'
-const TABS = [
+// Reading order is the order of the trade: find a market, take it, then watch
+// what you are left holding. POOLS now carries the swap form beside the market
+// list, so SWAP sits next to it as the same act at full width; POSITIONS is
+// what comes after, and BRIDGE is how funds arrive. The digits follow the eye —
+// [5] keeps its old binding because the bridge never moved.
+const ALL_TABS = [
   { id: 'pools', labelKey: 'hdr.pools', key: '1' },
-  { id: 'positions', labelKey: 'hdr.positions', key: '2' },
-  { id: 'swap', labelKey: 'hdr.swap', key: '3' },
+  { id: 'swap', labelKey: 'hdr.swap', key: '2' },
+  { id: 'positions', labelKey: 'hdr.positions', key: '3' },
   { id: 'bridge', labelKey: 'hdr.bridge', key: '5' },
 ] as const
+// a chain with no bridge route model never shows the tab (FEATURES.bridge)
+const TABS = ALL_TABS.filter((tb) => tb.id !== 'bridge' || FEATURES.bridge)
 
 export function Header(props: { tab: TabId; onTab: (t: TabId) => void }) {
   const { t } = useTranslation()
-  const pools = usePools()
-  const p = pools.data?.protocol
+  const pc = usePublicClient({ chainId: CHAIN_ID })
+  const block = useQuery({
+    queryKey: ['headerBlockNumber', CHAIN_ID],
+    enabled: !!pc,
+    ...HEADER_BLOCK_QUERY_POLICY,
+    queryFn: () => (pc as PublicClient).getBlockNumber(),
+  })
 
   return (
     <div className="hdr">
@@ -38,14 +56,17 @@ export function Header(props: { tab: TabId; onTab: (t: TabId) => void }) {
           </button>
         ))}
       </div>
-      {p && (
+      {block.data !== undefined && (
         <span className="hdr-meta">
-          {t('hdr.blk')} <b>{p.blockNumber.toString()}</b>
+          {t('hdr.blk')} <b>{block.data.toString()}</b>
         </span>
       )}
       <HistoryButton />
       <NewsButton />
       <LangControl />
+      {/* immediately left of the wallet, where every DApp puts it — the two
+          answer the same question from different sides */}
+      <ChainControl />
       <ConnectButton.Custom>
         {({ account, chain, openAccountModal, openChainModal, openConnectModal, mounted }) => {
           if (!mounted) return <button className="btn ghost">…</button>

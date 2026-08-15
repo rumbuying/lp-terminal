@@ -63,7 +63,7 @@ export function RpcControl() {
         value={val}
         autoFocus
         spellCheck={false}
-        placeholder={t('rpc.placeholder')}
+        placeholder={t('rpc.placeholder', { id: CHAIN_ID })}
         onChange={(e) => {
           setVal(e.target.value)
           setErr('')

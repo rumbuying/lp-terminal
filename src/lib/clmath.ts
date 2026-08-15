@@ -166,6 +166,61 @@ export function applySlippage(x: bigint, bps: number): bigint {
 }
 
 /**
+ * The largest liquidity the given amounts can fund at ANY price the deposit
+ * might land on — the off-chain half of a v4 deposit.
+ *
+ * A v3 NPM derives liquidity from the live price INSIDE `increaseLiquidity`, so
+ * the amounts it pulls are capped by the `desired` values the caller passed.
+ * v4 takes the liquidity as an input and caps the pull with `amountMax`, which
+ * moves the sizing decision off-chain: size at the live price and a move
+ * between signing and mining pulls more of one side than the user typed.
+ *
+ * Sizing at the EDGES of the slippage band instead makes the typed amounts the
+ * true ceiling. token0 is dearest at the bottom of the band and token1 at the
+ * top, so each side is measured where it binds, and the smaller of the two
+ * liquidities is the one both sides can pay for anywhere in between.
+ *
+ * The band is clamped to the position's own range because cost stops growing
+ * there: below the lower tick the deposit is all token0 and its size no longer
+ * depends on price, above the upper tick likewise for token1.
+ *
+ * A position already OUT of range collapses the band to a point, deliberately.
+ * Its cost does not move with price while it stays out, and widening the band
+ * back across the tick would size a one-sided top-up against a token the caller
+ * has not funded — which comes out as "nothing can be deposited" on exactly the
+ * out-of-range position this is most often used for. If price does cross in
+ * before the transaction lands, the unfunded side's max is zero and the deposit
+ * reverts, rather than reaching for a token nobody offered.
+ */
+export function liquidityForAmountsWithSlippage(
+  sqrtP: bigint,
+  sqrtA: bigint,
+  sqrtB: bigint,
+  amount0: bigint,
+  amount1: bigint,
+  slipBps: number,
+): bigint {
+  if (sqrtA > sqrtB) [sqrtA, sqrtB] = [sqrtB, sqrtA]
+  const SCALE = 1_000_000_000n
+  const up = BigInt(Math.round(Math.sqrt(1 + slipBps / 10_000) * 1e9))
+  const dn = BigInt(Math.round(Math.sqrt(Math.max(0, 1 - slipBps / 10_000)) * 1e9))
+  let lo = (sqrtP * dn) / SCALE
+  let hi = (sqrtP * up) / SCALE
+  if (sqrtP <= sqrtA) lo = hi = sqrtA
+  else if (sqrtP >= sqrtB) lo = hi = sqrtB
+  else {
+    if (lo < sqrtA) lo = sqrtA
+    if (hi > sqrtB) hi = sqrtB
+  }
+  // UNBOUNDED stands in for "this side does not bind here" — each edge is asked
+  // about one token, and getLiquidityForAmounts returns the min of the two.
+  const UNBOUNDED = 1n << 224n
+  const l0 = getLiquidityForAmounts(lo, sqrtA, sqrtB, amount0, UNBOUNDED)
+  const l1 = getLiquidityForAmounts(hi, sqrtA, sqrtB, UNBOUNDED, amount1)
+  return l0 < l1 ? l0 : l1
+}
+
+/**
  * Slippage mins for CL liquidity ops. An in-range position's token SPLIT moves
  * much faster than its value (a 1–2% price move can shift one side by 30%+),
  * so flat "amount × (1−slip)" mins revert with 'PS' whenever price drifts.

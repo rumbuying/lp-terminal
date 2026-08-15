@@ -4,6 +4,7 @@
 //            24h; when the subgraph's tracked USD is 0, fall back to the USDG
 //            side (≈$) or the WETH side × WETH price derived from DexScreener.
 import { ADDR } from '../config/addresses'
+import { CHAIN } from '../config/chains'
 import { ENV } from '../config/env'
 import { pickDsTokenUsd, type DsPair } from './tokenPrice'
 import type { Pool, V2Pool } from '../types'
@@ -17,13 +18,15 @@ export type PoolStat = {
 // in same-origin proxy mode (server deploys) these route through nginx so
 // users behind restrictive networks keep TVL/volume/USD features
 const DS_ROOT = ENV.proxied ? '/dexscreener' : 'https://api.dexscreener.com'
-const DS_BASE = DS_ROOT + '/latest/dex/pairs/robinhood/'
-const V2_SUBGRAPH =
-  (ENV.proxied ? '/goldsky' : 'https://api.goldsky.com') +
-  '/api/public/project_cmhef02640198x7p2cz2w70u8/subgraphs/up-robinhood-v2-mainnet/0.1.0/gn'
+const DS_BASE = `${DS_ROOT}/latest/dex/pairs/${CHAIN.slugs.dexscreener}/`
+// null on a chain we have no v2 subgraph for — v2 volume then comes from
+// DexScreener alone (FEATURES.v2Subgraph)
+const V2_SUBGRAPH = CHAIN.goldskySubgraph
+  ? (ENV.proxied ? '/goldsky' : 'https://api.goldsky.com') + CHAIN.goldskySubgraph
+  : null
 
-const WETH = ADDR.WETH.toLowerCase()
-const USDG = ADDR.USDG.toLowerCase()
+const WETH = ADDR.WNATIVE.toLowerCase()
+const USDG = ADDR.STABLE.toLowerCase()
 
 export async function fetchDexscreener(
   addrs: string[],
@@ -56,7 +59,7 @@ export async function fetchDexscreener(
   return { stats, wethUsd }
 }
 
-/** venue USD price of a token — its most-liquid robinhood pair on dexscreener
+/** venue USD price of a token — its most-liquid pair on dexscreener
  *  (see tokenPrice.ts for why aggregator unit-quotes are not used) */
 export async function fetchDsTokenUsd(token: string, signal?: AbortSignal): Promise<number> {
   const r = await fetch(`${DS_ROOT}/latest/dex/tokens/${token}`, { signal })
@@ -71,6 +74,9 @@ async function fetchV2Subgraph(
   v2Pools: V2Pool[],
   wethUsd: number | null,
 ): Promise<Record<string, PoolStat>> {
+  // A chain without a v2 subgraph contributes nothing here; its v2 pools keep
+  // whatever DexScreener already gave them.
+  if (!V2_SUBGRAPH) return {}
   const now = Math.floor(Date.now() / 1000)
   const q = `{
     pairHourDatas(first: 1000, where: { hourStartUnix_gte: ${now - 86_400} }) {
@@ -136,6 +142,10 @@ export async function fetchPoolStats(pools: Pool[]): Promise<PoolStatsResult> {
   const clAddrs = pools.filter((p) => p.kind === 'cl').map((p) => p.address.toLowerCase())
   const v2Pools = pools.filter((p): p is V2Pool => p.kind === 'v2')
   const ds = await fetchDexscreener(clAddrs).catch(() => ({ stats: {}, wethUsd: null }))
-  const sg = await fetchV2Subgraph(v2Pools, ds.wethUsd).catch(() => ({}) as Record<string, PoolStat>)
-  return { byPool: { ...sg, ...ds.stats }, wethUsd: ds.wethUsd }
+  // Chains whose home pool list is empty (BSC today) give the pair-batch pass
+  // nothing from which to derive WNATIVE/USD. Price the wrapped native token
+  // directly so native-keyed v4 pools and positions still have a USD anchor.
+  const wethUsd = ds.wethUsd ?? (await fetchDsTokenUsd(ADDR.WNATIVE).catch(() => null))
+  const sg = await fetchV2Subgraph(v2Pools, wethUsd).catch(() => ({}) as Record<string, PoolStat>)
+  return { byPool: { ...sg, ...ds.stats }, wethUsd }
 }

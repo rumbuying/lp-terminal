@@ -3,7 +3,8 @@ import { dsPairUrl } from '../lib/dexscreener'
 
 // DexScreener's own mark, from their favicon (their CDN refuses plain fetches
 // and ships no public SVG), re-encoded lossless to 686 B and inlined so the
-// page stays self-contained under CSP — same treatment as ProtoBadge's UP icon.
+// page stays self-contained under CSP. It stays a bitmap where the marks in
+// ProtoBadge are vector, because this one is someone else's artwork.
 // The art is a white glyph on a black rounded square: on this terminal's near-
 // black panels the square disappears and only the glyph reads.
 const DS_ICON =

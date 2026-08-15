@@ -1,21 +1,29 @@
 // Visual lab (#lab) — components with SYNTHETIC data. Not linked in header.
 import { useEffect, useState } from 'react'
-import { ADDR, UNI } from '../../config/addresses'
+import { ADDR, DEFAULT_BUY, GOV, UNI } from '../../config/addresses'
 import { getAmountsForLiquidity, getSqrtRatioAtTick } from '../../lib/clmath'
-import type { ClPool, ClPosition, PoolsData, V2Pool, V2Position } from '../../types'
+import type { SolverLeg } from '../../lib/solver'
+import type { ClPool, ClPosition, PoolsData, TokenInfo, V2Pool, V2Position } from '../../types'
 import { ProtoBadge } from '../ProtoBadge'
 import { RangeBar } from '../RangeBar'
+import { RouteMap } from '../RouteMap'
 import { Badge, Btn } from '../ui'
 import { AddCl, AddV2 } from './PoolsTab'
 import { clPosMetrics } from '../../lib/posmetrics'
 import { ClCard, ClPoolGroup, IncreasePanel, V2Card } from './PositionsTab'
 
+// Design-lab fixtures — synthetic pools and routes for UI work, never read
+// from the chain. The counter token is the governance token where the chain
+// has one, else the default buy side; only its address matters here.
+const LAB_TOKEN = GOV?.UP ?? DEFAULT_BUY
+const LAB_SYMBOL = GOV ? 'UP' : 'TOKEN'
+
 const LAB_POOL: ClPool = {
   kind: 'cl',
-  protocol: 'up33',
+  protocol: 'home',
   address: '0x23D641FeCcD207E8794c593e8240444A0674C4Ba',
-  token0: ADDR.WETH,
-  token1: ADDR.UP,
+  token0: ADDR.WNATIVE,
+  token1: LAB_TOKEN,
   gauge: null,
   gaugeAlive: true,
   weight: 0n,
@@ -32,8 +40,8 @@ const LAB_POOL: ClPool = {
 const LAB_DATA: PoolsData = {
   pools: [LAB_POOL],
   tokens: {
-    [ADDR.WETH.toLowerCase()]: { address: ADDR.WETH, symbol: 'WETH', decimals: 18 },
-    [ADDR.UP.toLowerCase()]: { address: ADDR.UP, symbol: 'UP', decimals: 18 },
+    [ADDR.WNATIVE.toLowerCase()]: { address: ADDR.WNATIVE, symbol: 'WETH', decimals: 18 },
+    [LAB_TOKEN.toLowerCase()]: { address: LAB_TOKEN, symbol: LAB_SYMBOL, decimals: 18 },
   },
   protocol: {
     weekly: 0n,
@@ -118,11 +126,166 @@ function LiveRangeDemo() {
   )
 }
 
+// Route-map cases. The first three carry the shares, venues and path shapes of
+// real solver.lp-terminal.xyz answers (pool addresses are placeholders where the
+// probe did not print them); the last two are the shapes that break a naive
+// layout — a direct leg racing a two-hop one, and more legs than the map draws —
+// and have to be posed by hand because the router rarely produces them.
+// Four DISTINCT tokens. `LAB_TOKEN` falls back to DEFAULT_BUY on a chain with
+// no emissions protocol (BSC has no GOV), which made up and cash the same
+// address — and a route that visits one token twice is not a simple path, so
+// the three-hop case silently declined to draw on the default chain. A synthetic
+// address keeps the fixture four-wide wherever it runs; nothing here is fetched.
+const RM = {
+  weth: ADDR.WNATIVE.toLowerCase(),
+  up: LAB_TOKEN.toLowerCase(),
+  usdg: ADDR.STABLE.toLowerCase(),
+  cash: (DEFAULT_BUY.toLowerCase() === LAB_TOKEN.toLowerCase()
+    ? '0x00000000000000000000000000000000000ca54a'
+    : DEFAULT_BUY.toLowerCase()) as `0x${string}`,
+}
+const rmHop = (protocol: string, pool: string, tokenIn: string, tokenOut: string, feePpm: number) => ({
+  protocol,
+  pool,
+  tokenIn,
+  tokenOut,
+  ...(protocol.endsWith('v2') ? { feeBps: feePpm / 100 } : { feePpm }),
+})
+const rmLeg = (shareBps: number, ...hops: ReturnType<typeof rmHop>[]): SolverLeg => ({
+  shareBps,
+  amountIn: 0n,
+  amountOut: 0n,
+  hops,
+})
+const LAB_ROUTE_TOKENS: TokenInfo[] = [
+  { address: ADDR.WNATIVE, symbol: 'WETH', decimals: 18 },
+  { address: LAB_TOKEN, symbol: LAB_SYMBOL, decimals: 18 },
+  { address: ADDR.STABLE, symbol: 'USDG', decimals: 6 },
+  { address: RM.cash, symbol: 'CASHCAT', decimals: 18 },
+]
+const LAB_ROUTES: { title: string; route: SolverLeg[] }[] = [
+  {
+    title: '3 WETH → UP · three venues straight across (live 2026-07-23)',
+    route: [
+      rmLeg(7080, rmHop('up33cl', '0x23d641feccd207e8794c593e8240444a0674c4ba', RM.weth, RM.up, 10_000)),
+      rmLeg(1734, rmHop('univ3', '0x4ef94cd1ab45ebbb50f9e73cd6e45c5027caa3f7', RM.weth, RM.up, 10_000)),
+      rmLeg(1185, rmHop('up33v2', '0x8697bb63743678640710b1270e98772a29642b3c', RM.weth, RM.up, 3000)),
+    ],
+  },
+  {
+    title: '2000 USDG → UP · one entry pool, then a three-way split (live 2026-07-23)',
+    route: [
+      rmLeg(
+        6273,
+        rmHop('univ3', '0x00000000000000000000000000000000000000a1', RM.usdg, RM.weth, 500),
+        rmHop('up33cl', '0x23d641feccd207e8794c593e8240444a0674c4ba', RM.weth, RM.up, 10_000),
+      ),
+      rmLeg(
+        2102,
+        rmHop('univ3', '0x00000000000000000000000000000000000000a1', RM.usdg, RM.weth, 500),
+        rmHop('up33v2', '0x8697bb63743678640710b1270e98772a29642b3c', RM.weth, RM.up, 3000),
+      ),
+      rmLeg(
+        1624,
+        rmHop('univ3', '0x00000000000000000000000000000000000000a1', RM.usdg, RM.weth, 500),
+        rmHop('univ3', '0x4ef94cd1ab45ebbb50f9e73cd6e45c5027caa3f7', RM.weth, RM.up, 10_000),
+      ),
+    ],
+  },
+  {
+    title: '900k UP → USDG · a single two-hop path (live 2026-07-23)',
+    route: [
+      rmLeg(
+        10_000,
+        rmHop('up33cl', '0x23d641feccd207e8794c593e8240444a0674c4ba', RM.up, RM.weth, 10_000),
+        rmHop('univ3', '0x00000000000000000000000000000000000000a1', RM.weth, RM.usdg, 500),
+      ),
+    ],
+  },
+  {
+    title: 'posed · a direct leg beside a two-hop one (spans the WETH column)',
+    route: [
+      rmLeg(
+        5800,
+        rmHop('univ3', '0x00000000000000000000000000000000000000a1', RM.usdg, RM.weth, 500),
+        rmHop('up33cl', '0x23d641feccd207e8794c593e8240444a0674c4ba', RM.weth, RM.up, 10_000),
+      ),
+      rmLeg(4200, rmHop('up33v2', '0x8697bb63743678640710b1270e98772a29642b3c', RM.usdg, RM.up, 3000)),
+    ],
+  },
+  {
+    // the shape the solver is growing into: three hops means TWO waypoint
+    // columns, each with a tag standing between two ribbon labels
+    title: 'posed · 3 hops — two waypoints, plus a 2-hop and a direct leg beside them',
+    route: [
+      rmLeg(
+        5200,
+        rmHop('univ3', '0x00000000000000000000000000000000000000a1', RM.usdg, RM.weth, 500),
+        rmHop('up33cl', '0x23d641feccd207e8794c593e8240444a0674c4ba', RM.weth, RM.up, 10_000),
+        rmHop('univ4', '0x00000000000000000000000000000000000000c4', RM.up, RM.cash, 2690),
+      ),
+      rmLeg(
+        2800,
+        rmHop('univ3', '0x00000000000000000000000000000000000000a1', RM.usdg, RM.weth, 500),
+        rmHop('univ4', '0x00000000000000000000000000000000000000c5', RM.weth, RM.cash, 2690),
+      ),
+      rmLeg(2000, rmHop('sushiv3', '0x00000000000000000000000000000000000000c6', RM.usdg, RM.cash, 3000)),
+    ],
+  },
+  {
+    title: 'posed · 7 legs — six drawn, the thinnest counted',
+    route: [9200, 200, 180, 170, 130, 70, 50].map((share, i) =>
+      rmLeg(share, rmHop(i % 2 ? 'univ3' : 'sushiv3', `0x${String(i).repeat(40)}`, RM.weth, RM.up, 3000)),
+    ),
+  },
+  {
+    // BNB→USDT on BSC, read off the live quote 2026-08-14: one dominant direct
+    // leg, two thin ones beside it, and two different waypoints carrying a few
+    // percent each. This is the shape the production router actually ships, and
+    // the one the picture has to stay readable at — three columns of labels in a
+    // phone's width is the tightest case the map ever meets.
+    title: 'live 2026-08-14 · 1 BNB → USDT — dominant direct leg, two waypoints',
+    route: [
+      rmLeg(7800, rmHop('pancakev3', '0x00000000000000000000000000000000000pa1', RM.weth, RM.up, 100)),
+      rmLeg(1500, rmHop('univ3', '0x00000000000000000000000000000000000un1', RM.weth, RM.up, 100)),
+      rmLeg(60, rmHop('univ4', '0x00000000000000000000000000000000000un4', RM.weth, RM.up, 100)),
+      rmLeg(
+        500,
+        rmHop('pancakev3', '0x00000000000000000000000000000000000pa2', RM.weth, RM.usdg, 100),
+        rmHop('univ4', '0x00000000000000000000000000000000000un5', RM.usdg, RM.up, 100),
+      ),
+      rmLeg(
+        40,
+        rmHop('pancakev3', '0x00000000000000000000000000000000000pa3', RM.weth, RM.usdg, 500),
+        rmHop('univ4', '0x00000000000000000000000000000000000un6', RM.usdg, RM.up, 100),
+      ),
+      rmLeg(
+        100,
+        rmHop('pancakev3', '0x00000000000000000000000000000000000pa4', RM.weth, RM.cash, 500),
+        rmHop('univ3', '0x00000000000000000000000000000000000un7', RM.cash, RM.up, 500),
+      ),
+    ],
+  },
+]
+
 export function LabTab() {
   const mk = (tick: number) => getSqrtRatioAtTick(tick)
   return (
     <div style={{ maxWidth: 900 }}>
       <div className="section-title">COMPONENT LAB — SYNTHETIC DATA (not your positions)</div>
+
+      <div className="section-title">SHEEP CHOICE ROUTE MAP (shares/venues from real solver answers)</div>
+      {LAB_ROUTES.map(({ title, route }) => (
+        <Case key={title} title={title}>
+          <div className="quote-card sel">
+            <div className="l1">
+              <span className="src">◉ SHEEP CHOICE</span>
+            </div>
+            <RouteMap route={route} tokens={LAB_ROUTE_TOKENS} />
+          </div>
+        </Case>
+      ))}
+
       <Case title="LIVE DEMO · random walk — glide, trail, edge/out transitions">
         <LiveRangeDemo />
       </Case>
@@ -157,7 +320,7 @@ export function LabTab() {
       <div className="card">
         <div className="card-head">
           <span className="card-title">WETH/UP</span>
-          <ProtoBadge proto="up33" />
+          <ProtoBadge proto="home" />
           <Badge tone="cyan">CL 1.00%</Badge>
           <Badge>ts200</Badge>
           <Badge tone="green">STAKED</Badge>
@@ -205,7 +368,7 @@ export function LabTab() {
         const v2Pos: V2Position = {
           pool: {
             ...LAB_V2_PAIR,
-            protocol: 'up33',
+            protocol: 'home',
             gauge: '0x00000000000000000000000000000000000000bb',
             gaugeAlive: true,
             gaugeTotalSupply: 1_200_000_000_000_000_000_000n,
@@ -287,7 +450,7 @@ export function LabTab() {
             <div className="card">
               <div className="card-head">
                 <span className="card-title">WETH/UP · increase, in range</span>
-                <ProtoBadge proto="up33" />
+                <ProtoBadge proto="home" />
               </div>
               <IncreasePanel
                 pos={inRange}
@@ -329,7 +492,7 @@ export function LabTab() {
             <div className="card">
               <div className="card-head">
                 <span className="card-title">WETH/UP · increase a range order (price below band — token0 only)</span>
-                <ProtoBadge proto="up33" />
+                <ProtoBadge proto="home" />
               </div>
               <IncreasePanel
                 pos={orderPos}
@@ -393,8 +556,8 @@ const LAB_V2_PAIR: V2Pool = {
   kind: 'v2',
   protocol: 'univ2',
   address: '0x000000000000000000000000000000000000d0d0',
-  token0: ADDR.WETH,
-  token1: ADDR.UP,
+  token0: ADDR.WNATIVE,
+  token1: LAB_TOKEN,
   stable: false,
   reserve0: 12_000_000_000_000_000_000n, // 12 WETH
   reserve1: 338_400_000_000_000_000_000_000n, // 338.4k UP

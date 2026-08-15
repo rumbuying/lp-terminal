@@ -8,6 +8,11 @@ import { aliasL1Address, childEthDepositTxHash, DEPOSIT_ETH_CALLDATA, parseEthDe
 import { mapRelayQuote, quoteRelay, relayAppFee, type RelayQuoteJson } from './relay'
 import { mergeTokenSupports, providersFor, sameSymbolLoose, type AcrossRouteJson, type RelayChainsJson, type RelayCurrencyV2 } from './tokens'
 import { BridgeQuoteError, type BridgeFee } from './types'
+import { FEATURES } from '../../config/features'
+
+// The canonical-inbox route model and the token discovery around it are
+// written for Robinhood; a build with no bridge has nothing to assert.
+const homeChainTest = FEATURES.bridge ? test : test.skip
 
 const ETH_REMOTE = REMOTE_CHAINS[0] // ETHEREUM
 const BASE_REMOTE = REMOTE_CHAINS.find((r) => r.label === 'BASE')!
@@ -209,7 +214,7 @@ test('zero-fee quotes omit provider fee params entirely', async () => {
   assert.ok(seen.acrossUrl && !seen.acrossUrl.includes('appFee'))
 })
 
-test('intent resolution: robinhood is always one leg, same token both sides', () => {
+homeChainTest('intent resolution: robinhood is always one leg, same token both sides', () => {
   const out = resolveIntent({ dir: 'out', token: ETH_OPTION, remote: ETH_REMOTE, amount: 1n })
   assert.equal(out.originChainId, 4663)
   assert.equal(out.destChainId, ETH_REMOTE.chain.id)
@@ -248,7 +253,7 @@ test('portal: child EthDeposit tx hash derivation matches a real fill', () => {
   assert.equal(h, FIXTURE.childTxHash)
 })
 
-test('portal: deposit receipt parses to the derived child hash', () => {
+homeChainTest('portal: deposit receipt parses to the derived child hash', () => {
   const packed = `0x${FIXTURE.dest.slice(2)}${pad(toHex(FIXTURE.value), { size: 32 }).slice(2)}` as Hex
   const receipt = {
     from: FIXTURE.dest, // EOA self-deposit: tx sender == destination
@@ -327,7 +332,7 @@ const ACROSS_ROUTES_FIX: AcrossRouteJson[] = [
   { originChainId: 8453, originToken: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as Address, destinationChainId: 4663, destinationToken: RH_USDG, originTokenSymbol: 'USDC', destinationTokenSymbol: 'USDG' },
 ]
 
-test('discovery: ethereum pair = ETH(portal+relay+across) + USDG(relay+across) + WETH(across only)', () => {
+homeChainTest('discovery: ethereum pair = ETH(portal+relay+across) + USDG(relay+across) + WETH(across only)', () => {
   const list = mergeTokenSupports({
     remoteChainId: 1,
     relayChains: RELAY_CHAINS_FIX,
@@ -349,7 +354,7 @@ test('discovery: ethereum pair = ETH(portal+relay+across) + USDG(relay+across) +
   assert.deepEqual(providersFor(eth, 'out'), ['relay', 'across'])
 })
 
-test('discovery: cross-token USDC→USDG legs are gone; base pair has no USDG', () => {
+homeChainTest('discovery: cross-token USDC→USDG legs are gone; base pair has no USDG', () => {
   const list = mergeTokenSupports({
     remoteChainId: 8453,
     relayChains: RELAY_CHAINS_FIX,
@@ -365,7 +370,7 @@ test('discovery: cross-token USDC→USDG legs are gone; base pair has no USDG', 
   assert.equal(list[0].portal, false) // canonical bridge pairs with Ethereum only
 })
 
-test('discovery: a failed live Inbox verification demotes the canonical route', () => {
+homeChainTest('discovery: a failed live Inbox verification demotes the canonical route', () => {
   const list = mergeTokenSupports({
     remoteChainId: 1,
     relayChains: RELAY_CHAINS_FIX,

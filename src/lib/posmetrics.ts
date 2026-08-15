@@ -7,9 +7,10 @@
 //   staked   -> UP emissions, pro-rata ACTIVE staked liquidity, in-range only
 //   unstaked -> swap fees, pro-rata active liquidity, in-range only
 //   univ3    -> always the fees branch (no gauges)
-import { ADDR } from '../config/addresses'
+import { ADDR, GOV } from '../config/addresses'
 import { clTokenUsd } from './apr'
 import { nowSec } from './format'
+import { effectiveClFeePpm } from './poolIdentity'
 import type { PoolStat } from './poolstats'
 import type { ClPosition, V2Position, V2Pool } from '../types'
 
@@ -35,8 +36,8 @@ export function compareClPositionDisplay(
   valueA: number | null,
   valueB: number | null,
 ): number {
-  const protocolA = a.pool.protocol === 'up33' ? 0 : 1
-  const protocolB = b.pool.protocol === 'up33' ? 0 : 1
+  const protocolA = a.pool.protocol === 'home' ? 0 : 1
+  const protocolB = b.pool.protocol === 'home' ? 0 : 1
   const protocol = protocolA - protocolB
   if (protocol) return protocol
   const value = (valueB ?? -1) - (valueA ?? -1)
@@ -93,7 +94,7 @@ export function clPosMetrics(args: {
     const denom = Number(pool.liquidity)
     const share = denom > 0 ? Number(pos.liquidity) / denom : 0
     const keep = 1 - pool.unstakedFeePpm / 1e6
-    const usdPerDay = args.stat.vol24hUsd * (pool.feePpm / 1e6) * keep * share
+    const usdPerDay = args.stat.vol24hUsd * (effectiveClFeePpm(pool) / 1e6) * keep * share
     earning = { kind: 'fees', aprPct: ((usdPerDay * YEAR_DAYS) / valueUsd) * 100, usdPerDay, sharePct: share * 100 }
   }
 
@@ -113,9 +114,9 @@ export function v2TokenUsd(
   const r1h = Number(pool.reserve1) / 10 ** dec1
   if (!(r0h > 0) || !(r1h > 0)) return null
   const anchors: Record<string, number | undefined> = {
-    [ADDR.USDG.toLowerCase()]: 1,
-    [ADDR.WETH.toLowerCase()]: wethUsd ?? undefined,
-    [ADDR.UP.toLowerCase()]: upUsd,
+    [ADDR.STABLE.toLowerCase()]: 1,
+    [ADDR.WNATIVE.toLowerCase()]: wethUsd ?? undefined,
+    ...(GOV ? { [GOV.UP.toLowerCase()]: upUsd } : {}),
   }
   const a0 = anchors[pool.token0.toLowerCase()]
   const a1 = anchors[pool.token1.toLowerCase()]
@@ -152,8 +153,16 @@ export function v2PosMetrics(args: {
   const stakedValue = valueUsd !== null && lp > 0n ? (valueUsd * Number(pos.stakedLp)) / Number(lp) : null
   const walletValue = valueUsd !== null && lp > 0n ? (valueUsd * Number(pos.walletLp)) / Number(lp) : null
 
+  // LP staked into a pid-keyed FARM keeps its claim on the pair's reserves, so
+  // it earns trading fees exactly as unstaked LP does — custody moves the token,
+  // not the claim. Its farm reward is a separate token the card names itself.
+  // So the fee branch below covers it, and the emissions branch (which would
+  // report "idle: ended" against a gauge that was never there) is skipped.
+  const farmStaked = pos.farm !== undefined && pool.gauge === null
+  const feeBearing = farmStaked ? pos.walletLp + pos.stakedLp : pos.walletLp
+
   let staked: Earning | null = null
-  if (pos.stakedLp > 0n) {
+  if (pos.stakedLp > 0n && !farmStaked) {
     if (!emitting(pool)) staked = { kind: 'emissions-idle', reason: 'ended' }
     else {
       const denom = Number(pool.gaugeTotalSupply)
@@ -168,14 +177,16 @@ export function v2PosMetrics(args: {
     }
   }
 
+  const feeValue = farmStaked ? valueUsd : walletValue
+
   let wallet: Earning | null = null
-  if (pos.walletLp > 0n) {
+  if (feeBearing > 0n) {
     if (args.stat?.vol24hUsd == null || args.stat.liqUsd == null || args.stat.liqUsd <= 0) {
       wallet = { kind: 'fees-unknown' }
     } else {
       const aprPct = ((args.stat.vol24hUsd * (pool.feeBps / 10_000) * YEAR_DAYS) / args.stat.liqUsd) * 100
-      const usdPerDay = walletValue !== null ? (walletValue * aprPct) / 100 / YEAR_DAYS : 0
-      wallet = { kind: 'fees', aprPct, usdPerDay, sharePct: lp > 0n ? (Number(pos.walletLp) / Number(pool.totalSupply)) * 100 : 0 }
+      const usdPerDay = feeValue !== null ? (feeValue * aprPct) / 100 / YEAR_DAYS : 0
+      wallet = { kind: 'fees', aprPct, usdPerDay, sharePct: lp > 0n ? (Number(feeBearing) / Number(pool.totalSupply)) * 100 : 0 }
     }
   }
 

@@ -6,13 +6,12 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAccount, usePublicClient } from 'wagmi'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { formatUnits, parseUnits, type Address } from 'viem'
+import { formatUnits, parseUnits, zeroAddress, type Address } from 'viem'
 import { ADDR, CHAIN_ID, NATIVE } from '../config/addresses'
-import { ENV } from '../config/env'
-import { simulateClAdd, simulateV2Add, fmtApr } from '../lib/apr'
-import { applySlippage } from '../lib/clmath'
-import { fmtAmount, fmtUsd } from '../lib/format'
-import { autoSlippage, retrySlippage, slippagePctToBps, slippageTone, SLIPPAGE_CHOICES, type AutoSlippage } from '../lib/swapGate'
+import { CHAIN } from '../config/chains'
+import { simulateClAdd, simulateV2Add } from '../lib/apr'
+import { fmtAmount } from '../lib/format'
+import { autoSlippage, needsSlippageConfirm, retrySlippage, slippagePctToBps, slippageTone, SLIPPAGE_CHOICES, type AutoSlippage } from '../lib/swapGate'
 import { SOLVER_AUTO_REFRESHES, solverQuoteAutoRefreshExhausted, solverQuoteCanAutoRefresh } from '../lib/solverRefresh'
 import { autostake } from '../lib/autostake'
 import {
@@ -20,28 +19,45 @@ import {
   executeZap,
   planZap,
   stakeableTarget,
-  zapRouteLabel,
   zapStages,
   zapVenueFeeBps,
   type ZapFailReason,
   type ZapPlan,
   type ZapTarget,
 } from '../lib/zap'
+import { V4_DEPOSIT_BAND_BPS } from '../lib/uniV4'
+import { useArmedConfirm } from '../hooks/useArmedConfirm'
 import { useBalances } from '../hooks/useBalances'
 import { usePools } from '../hooks/usePools'
 import { useTokenList } from '../hooks/useTokenList'
 import type { PoolStat } from '../lib/poolstats'
 import type { TokenInfo } from '../types'
+import { AddStats } from './AddStats'
 import { StakeAfterToggle } from './StakeAfterToggle'
 import { TokenSelect } from './TokenSelect'
+import { ZapFlow } from './ZapFlow'
 import { Btn, NumInput } from './ui'
 
-const ETH_GAS_BUFFER = parseUnits('0.001', 18)
+// native units withheld from a MAX so the next transaction can still pay gas
+const GAS_BUFFER = CHAIN.gasBuffer
 const ZAP_PLAN_REFRESH_MS = 30_000
 
-const ETH_TOKEN: TokenInfo = { address: NATIVE as Address, symbol: 'ETH', decimals: 18, native: true }
-const WETH_TOKEN: TokenInfo = { address: ADDR.WETH, symbol: 'WETH', decimals: 18 }
-const USDG_TOKEN: TokenInfo = { address: ADDR.USDG, symbol: 'USDG', decimals: 6 }
+const NATIVE_TOKEN: TokenInfo = {
+  address: NATIVE as Address,
+  symbol: CHAIN.nativeCurrency.symbol,
+  decimals: CHAIN.nativeCurrency.decimals,
+  native: true,
+}
+const WRAPPED_TOKEN: TokenInfo = {
+  address: ADDR.WNATIVE,
+  symbol: CHAIN.wrappedSymbol,
+  decimals: CHAIN.nativeCurrency.decimals,
+}
+const STABLE_TOKEN: TokenInfo = {
+  address: ADDR.STABLE,
+  symbol: CHAIN.stable.symbol,
+  decimals: CHAIN.stable.decimals,
+}
 
 export function ZapPanel(props: {
   target: ZapTarget
@@ -61,19 +77,22 @@ export function ZapPanel(props: {
   const autoStake = useSyncExternalStore(autostake.subscribe, autostake.get)
   const stakeable = stakeableTarget(target)
 
-  // funding candidates: the pair itself, ETH, and the two majors (deduped —
-  // a WETH/USDG pool doesn't repeat them); anything else via the picker
+  // v4 represents the chain coin as address(0), while every wallet-facing path
+  // uses NATIVE. Canonicalize here so BNB appears once and reads getBalance()
+  // rather than attempting balanceOf(address(0)).
+  const inputT0 = pool.protocol === 'univ4' && t0.address === zeroAddress ? NATIVE_TOKEN : t0
+  const inputT1 = pool.protocol === 'univ4' && t1.address === zeroAddress ? NATIVE_TOKEN : t1
   const candidates = useMemo(() => {
     const seen = new Set<string>()
-    return [t0, t1, ETH_TOKEN, WETH_TOKEN, USDG_TOKEN].filter((tok) => {
+    return [inputT0, inputT1, NATIVE_TOKEN, WRAPPED_TOKEN, STABLE_TOKEN].filter((tok) => {
       const k = tok.address.toLowerCase()
       if (seen.has(k)) return false
       seen.add(k)
       return true
     })
-  }, [t0, t1])
+  }, [inputT0, inputT1])
   const [selTok, setSelTok] = useState<TokenInfo | null>(null)
-  const tIn = selTok ?? t0
+  const tIn = selTok ?? inputT0
   const tokenInAddr: Address = tIn.address
   const customSel = !candidates.some((c) => c.address.toLowerCase() === tokenInAddr.toLowerCase())
 
@@ -105,10 +124,11 @@ export function ZapPanel(props: {
     return () => clearTimeout(h)
   }, [amtStr, tIn.decimals])
 
+  const poolKey = pool.kind === 'cl' && pool.poolId ? pool.poolId : pool.address
   // a new pool/token/amount is a new trade — yesterday's failure floor doesn't apply
   useEffect(() => {
     setSlipFloor(null)
-  }, [pool.address, tokenInAddr, amount])
+  }, [poolKey, tokenInAddr, amount])
 
   const balAddrs = useMemo(() => {
     const s = new Map<string, Address>()
@@ -119,7 +139,7 @@ export function ZapPanel(props: {
   const bal = useBalances(user, balAddrs)
   const balIn = bal.data?.[tokenInAddr.toLowerCase()]
   let spendable = balIn
-  if (balIn !== undefined && tIn.native) spendable = balIn > ETH_GAS_BUFFER ? balIn - ETH_GAS_BUFFER : 0n
+  if (balIn !== undefined && tIn.native) spendable = balIn > GAS_BUFFER ? balIn - GAS_BUFFER : 0n
   const insufficient = spendable !== undefined && amount > spendable
 
   // ticks key parts (cl targets re-plan when the parent's range changes)
@@ -128,7 +148,7 @@ export function ZapPanel(props: {
   const up33State = pools.error ? 'up33-failed' : pools.data ? 'up33-ready' : 'up33-pending'
 
   const queryClient = useQueryClient()
-  const zapPlanKey = ['zapPlan', pool.address, lo, hi, tokenInAddr, amount.toString(), up33State] as const
+  const zapPlanKey = ['zapPlan', poolKey, lo, hi, tokenInAddr, amount.toString(), up33State] as const
   const plan = useQuery({
     queryKey: zapPlanKey,
     // same cap as the swap's solver quote: auto-refresh a few times, then pause
@@ -161,8 +181,13 @@ export function ZapPanel(props: {
   const automaticSlippage: AutoSlippage | null =
     flooredBps === null ? autoBase : { bps: flooredBps, tone: slippageTone(flooredBps) }
   const effectiveSlip = manualSlip ?? automaticSlippage?.bps
+  const depositBandBps = pool.protocol === 'univ4' ? V4_DEPOSIT_BAND_BPS : DEPOSIT_MINS_BPS
   const customInvalid = customSlip !== '' && slippagePctToBps(customSlip) === null
   const slippageRequired = !!p && p.legs.length > 0 && effectiveSlip === undefined
+  // a zap with no swap leg never spends the tolerance — `run` passes 0 — so
+  // there is nothing to confirm however wide the editor's number happens to be
+  const wideSlippage = needsSlippageConfirm(plan.data?.legs.length === 0 ? 0 : effectiveSlip)
+  const runConfirm = useArmedConfirm(`${zapPlanKey.join('|')}|${effectiveSlip ?? ''}`)
   const stages = useMemo(
     () => (p ? zapStages(p, target, tIn, t0, t1, autoStake) : []),
     [p, target, tIn, t0, t1, autoStake],
@@ -261,11 +286,29 @@ export function ZapPanel(props: {
     }
   }
 
+  // first press arms, second runs — and once the tolerance is back inside the
+  // band a press goes straight through, with nothing left armed behind it
+  const runClick = () => {
+    if (wideSlippage && !runConfirm.armed) {
+      runConfirm.arm()
+      return
+    }
+    runConfirm.disarm()
+    void run()
+  }
+
   const failed = runAt?.failed ?? false
   let runLabel = t('zap.run')
+  let runTone: 'danger' | undefined
+  let runTitle = t('zap.runHint')
   if (!user) runLabel = t('common.connectWallet')
   else if (slippageRequired) runLabel = t('zap.chooseSlippage')
-  else if (stages.length > 0) runLabel = t('zap.runSteps', { n: stages.length })
+  else if (runConfirm.armed && effectiveSlip !== undefined) {
+    // the armed press names the tolerance it is about to spend on the swap leg
+    runLabel = t('zap.confirmSlip', { pct: effectiveSlip / 100 })
+    runTone = 'danger'
+    runTitle = t('zap.confirmSlipTip', { pct: effectiveSlip / 100 })
+  } else if (stages.length > 0) runLabel = t('zap.runSteps', { n: stages.length })
 
   // slippage: one summary line; the full editor unfolds on demand (or when a
   // choice is REQUIRED — no impact probe / invalid custom value)
@@ -282,61 +325,43 @@ export function ZapPanel(props: {
       ? `${manualSlip === null && customSlip === '' ? 'AUTO · ' : ''}${effectiveSlip / 100}%`
       : t('zap.chooseSlippage')
 
-  const totalSwapIn = p ? p.legs.reduce((s, l) => s + l.swapIn, 0n) : 0n
-  const legRows = p
-    ? p.legs.map((leg, i) => {
-        const tOut = leg.buyIs0 ? t0 : t1
-        return (
-          <div className="spec-row" key={i}>
-            <span className="sk">{p.legs.length > 1 ? t('zap.swapN', { n: i + 1 }) : t('zap.swapRow')}</span>
-            <span className="sv">
-              {fmtAmount(leg.swapIn, tIn.decimals)} {tIn.symbol} → ≈ {fmtAmount(leg.estOut, tOut.decimals)}{' '}
-              {tOut.symbol}
-            </span>
-            <span className="sd">
-              {effectiveSlip === undefined
-                ? t('zap.chooseSlippage')
-                : t('zap.swapMin', {
-                    amt: fmtAmount(applySlippage(leg.estOut, effectiveSlip), tOut.decimals),
-                    slip: effectiveSlip / 100,
-                  })}
-              {leg.impactBps === null ? (
-                <span className="dim"> · {t('zap.impactOff')}</span>
-              ) : (
-                <span className={slippageTone(leg.impactBps)}>
-                  {' '}
-                  · {t('zap.impact', { pct: (leg.impactBps / 100).toFixed(2) })}
-                </span>
-              )}
-              {/* zap still charges while market swaps are free — keep it bright */}
-              <span className="fg"> · {t('zap.terminalFee', { pct: (ENV.zapFeeBps / 100).toFixed(2) })}</span>
-              {' · '}
-              {t('zap.via', { route: zapRouteLabel(leg.via) })}
-            </span>
-          </div>
-        )
-      })
-    : null
-
   return (
     <div className="zap">
-      <div className="form-row">
+      {/* The same shape as the range row above it: a closed set of choices as
+          one segment group, and beside it the way out of the set. A token
+          picked through that door joins the group rather than appearing as a
+          seventh loose outline next to it — it is the current choice, and the
+          group is where the current choice is shown. */}
+      <div className="form-row zap-in">
         <span className="lbl">{t('zap.zapIn')}</span>
-        {candidates.map((c) => (
-          <button
-            key={c.address}
-            className={`chip ${tokenInAddr.toLowerCase() === c.address.toLowerCase() ? 'on' : ''}`}
-            onClick={() => setSelTok(c)}
-            disabled={running}
-            title={c.native ? t('zap.ethTip') : undefined}
-          >
-            {c.symbol}
-          </button>
-        ))}
-        {customSel && <button className="chip on">{tIn.symbol}</button>}
+        <div className="seg">
+          {candidates.map((c) => (
+            <button
+              key={c.address}
+              className={tokenInAddr.toLowerCase() === c.address.toLowerCase() ? 'on' : ''}
+              onClick={() => setSelTok(c)}
+              disabled={running}
+              title={
+                c.native
+                  ? t('zap.ethTip', {
+                      native: CHAIN.nativeCurrency.symbol,
+                      wrapped: CHAIN.wrappedSymbol,
+                    })
+                  : undefined
+              }
+            >
+              {c.symbol}
+            </button>
+          ))}
+          {customSel && <button className="on">{tIn.symbol}</button>}
+        </div>
         <TokenSelect list={tokenList.tokens} value={tIn} onChange={setSelTok} label={t('zap.pickOther')} />
       </div>
       <div className="form-row">
+        {/* labelled like every other row: an unlabelled input was the one
+            control starting at the panel edge, and one broken line down the
+            left is what a form reads as "messy" before anything is read */}
+        <span className="lbl">{t('zap.amount')}</span>
         <NumInput value={amtStr} onChange={setAmtStr} disabled={running} width={220} />
         {spendable !== undefined && (
           <>
@@ -357,7 +382,7 @@ export function ZapPanel(props: {
             className={`chip ${slipSummaryTone}`}
             onClick={() => setSlipOpen(true)}
             disabled={running}
-            title={t('zap.slipHint')}
+            title={t('zap.slipHint', { band: depositBandBps / 100 })}
           >
             {slipSummary} ▾
           </button>
@@ -413,7 +438,7 @@ export function ZapPanel(props: {
 
       {amount > 0n && plan.isLoading && (
         <div className="dim mono-sm">
-          {t('zap.solving')}
+          {t('zap.solving', { home: CHAIN.labels.home })}
           <span className="spin">▮</span>
         </div>
       )}
@@ -422,91 +447,18 @@ export function ZapPanel(props: {
       )}
 
       {p && (
-        <div className="spec">
-          <div className="spec-hd">{t('zap.planTitle')}</div>
-          <div className="spec-row">
-            <span className="sk">{t('zap.split')}</span>
-            <span className="sv">
-              {p.inIs0 !== null
-                ? p.legs.length === 0
-                  ? t('zap.keepAll', { amt: fmtAmount(p.keep, tIn.decimals), sym: tIn.symbol })
-                  : t('zap.keepSwap', {
-                      keep: fmtAmount(p.keep, tIn.decimals),
-                      swap: fmtAmount(totalSwapIn, tIn.decimals),
-                      sym: tIn.symbol,
-                    })
-                : p.legs.length === 2
-                  ? t('zap.outsideSplit', {
-                      a0: fmtAmount(p.legs.find((l) => l.buyIs0)?.swapIn ?? 0n, tIn.decimals),
-                      a1: fmtAmount(p.legs.find((l) => !l.buyIs0)?.swapIn ?? 0n, tIn.decimals),
-                      sym: tIn.symbol,
-                      sym0: t0.symbol,
-                      sym1: t1.symbol,
-                    })
-                  : t('zap.outsideOne', {
-                      amt: fmtAmount(totalSwapIn, tIn.decimals),
-                      sym: tIn.symbol,
-                      outSym: p.legs[0]?.buyIs0 ? t0.symbol : t1.symbol,
-                    })}
-            </span>
-            <span className="sd">
-              {p.inIs0 !== null
-                ? p.legs.length === 0
-                  ? t('zap.splitSdSingle')
-                  : t('zap.splitSd')
-                : t('zap.outsideSd')}
-            </span>
-          </div>
-          {legRows}
-          <div className="spec-row">
-            <span className="sk">{t('zap.depositRow')}</span>
-            <span className="sv">
-              ≈ {fmtAmount(p.dep0, t0.decimals)} {t0.symbol} + {fmtAmount(p.dep1, t1.decimals)} {t1.symbol}
-            </span>
-            <span className="sd">
-              {dusts.length > 0 ? t('zap.dustSd', { dust: dusts.join(' + ') }) : t('zap.actualSd')}
-            </span>
-          </div>
-          {sim && (
-            <div className="spec-row">
-              <span className="sk">{t('add.projected')}</span>
-              {sim.inRange ? (
-                <>
-                  <span className="sv">
-                    {t('add.projDep', { usd: fmtUsd(sim.depositUsd) })}
-                    {Number.isFinite(sim.feeApr) && (
-                      <>
-                        {' '}
-                        · {t('add.projFeeApr')}
-                        {pool.protocol === 'up33' ? <span className="dim"> {t('add.projIfUnstaked')}</span> : ''} ≈{' '}
-                        {fmtApr(sim.feeApr)}
-                      </>
-                    )}
-                    {Number.isFinite(sim.emitApr) && (
-                      <>
-                        {' '}
-                        · {t('add.projEmitApr')}
-                        <span className="dim"> {t('add.projIfStaked')}</span> ≈{' '}
-                        <span className="green">{fmtApr(sim.emitApr)}</span>
-                      </>
-                    )}
-                  </span>
-                  <span className="sd">
-                    {t('add.projShare', { pct: sim.sharePct < 0.01 ? '<0.01' : sim.sharePct.toFixed(2) })}
-                  </span>
-                </>
-              ) : (
-                <span className="sv red">{t('add.projOut')}</span>
-              )}
+        <>
+          <ZapFlow plan={p} tIn={tIn} t0={t0} t1={t1} slipBps={effectiveSlip} />
+          {/* what stays behind is a number, not a caveat — it only prints when
+              there IS dust, so the row's absence is the usual "none" */}
+          {dusts.length > 0 && (
+            <div className="dim mono-sm" title={t('zap.actualSd')}>
+              {t('zap.dust', { dust: dusts.join(' + ') })}
             </div>
           )}
-          {bandWarn && (
-            <div className="spec-row">
-              <span className="sk">!!</span>
-              <span className="sv amber">{bandWarn}</span>
-            </div>
-          )}
-        </div>
+          <AddStats sim={sim} emitless={pool.protocol !== 'home'} />
+          {bandWarn && <div className="amber mono-sm">!! {bandWarn}</div>}
+        </>
       )}
 
       {planPaused && (
@@ -552,7 +504,7 @@ export function ZapPanel(props: {
                 next: (automaticSlippage?.bps ?? retrySlippage(runAt.slip ?? 0)) / 100,
               })
             : runAt?.reason === 'deposit-moved'
-              ? t('zap.haltedDeposit', { n: (runAt.i ?? 0) + 1, band: DEPOSIT_MINS_BPS / 100 })
+              ? t('zap.haltedDeposit', { n: (runAt.i ?? 0) + 1, band: depositBandBps / 100 })
               : t('zap.halted', { n: (runAt?.i ?? 0) + 1 })}
         </div>
       )}
@@ -561,13 +513,14 @@ export function ZapPanel(props: {
       <div className="form-row">
         <Btn
           busy={running}
-          onClick={run}
+          tone={runTone}
+          onClick={runClick}
           disabled={!user || amount === 0n || !plan.data || insufficient || slippageRequired || running}
+          title={runTitle}
         >
           {runLabel}
         </Btn>
         {stakeable && <StakeAfterToggle disabled={running} />}
-        <span className="dim mono-sm">{t('zap.runHint')}</span>
       </div>
     </div>
   )

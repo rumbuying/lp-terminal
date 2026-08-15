@@ -1,11 +1,11 @@
 // Protocol identity badges: colored label + brand mark, terminal-sized.
-// Uniswap mark: official brand-assets icon (paths verbatim), fill follows the
-// badge color via currentColor. UP33 mark: UP token icon (1.5 kB webp) inlined
-// so the page stays fully self-contained under CSP.
+//
+// Every mark is the venue's OWN, taken from its own brand assets and inlined so
+// the page stays self-contained under CSP. Uniswap's follows the badge color
+// via currentColor because that is how Uniswap ships it; PancakeSwap's keeps
+// its four brand colors, because a bunny flattened to one fill is a smudge.
 import type { LpProtocol } from '../types'
-
-const UP_ICON =
-  'data:image/webp;base64,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'
+import { CHAIN } from '../config/chains'
 
 function UniMark() {
   return (
@@ -23,29 +23,122 @@ function UniMark() {
   )
 }
 
+/**
+ * PancakeSwap's bunny, paths verbatim from their uikit's Logo icon.
+ *
+ * Its fills are literal, not currentColor: at 10px the ears and the two eyes
+ * are the whole of the recognition, and they only separate from the head
+ * because #633001 sits on #D1884F.
+ */
+function PancakeMark() {
+  return (
+    <svg viewBox="0 0 198 199" aria-hidden="true">
+      <path d="M98.552 198.607c-29.49-.022-53.246-7.027-69.844-19.609C11.91 166.265 3 148.195 3 127.748c0-19.701 8.891-33.907 18.952-43.51 7.884-7.525 16.584-12.344 22.642-15.117-1.37-4.162-3.079-9.61-4.608-15.238-2.046-7.53-4.053-16.366-4.053-22.84 0-7.663 1.687-15.36 6.238-21.34C46.98 3.385 54.218 0 62.926 0c6.806 0 12.584 2.499 17.108 6.81 4.324 4.12 7.202 9.593 9.189 15.298 3.491 10.024 4.85 22.618 5.232 35.187h8.341c.382-12.569 1.741-25.163 5.233-35.187 1.987-5.705 4.865-11.177 9.189-15.298C121.741 2.5 127.519 0 134.325 0c8.708 0 15.947 3.385 20.755 9.703 4.551 5.98 6.239 13.677 6.239 21.34 0 6.474-2.007 15.31-4.054 22.84-1.529 5.628-3.238 11.076-4.608 15.238 6.058 2.773 14.759 7.592 22.643 15.118 10.06 9.602 18.952 23.808 18.952 43.509 0 20.447-8.911 38.517-25.708 51.25-16.598 12.582-40.354 19.587-69.844 19.609h-.148z" fill="#633001" />
+      <path d="M62.926 7.288c-12.754 0-18.626 9.516-18.626 22.675 0 10.46 6.822 31.408 9.621 39.563.63 1.835-.36 3.844-2.164 4.555-10.222 4.031-40.39 18.789-40.39 52.588 0 35.603 30.658 62.448 87.191 62.49h.135c56.534-.042 87.19-26.887 87.19-62.49 0-33.799-30.167-48.557-40.389-52.588-1.804-.71-2.794-2.72-2.164-4.555 2.799-8.154 9.621-29.103 9.621-39.563 0-13.16-5.871-22.675-18.626-22.675-18.36 0-22.936 26.007-23.263 53.92-.022 1.863-1.528 3.375-3.392 3.375H89.58c-1.863 0-3.37-1.512-3.391-3.375-.326-27.913-4.903-53.92-23.263-53.92z" fill="#D1884F" />
+      <path d="M98.693 177.755c-41.538 0-87.253-22.235-87.325-51.018v.134c0 35.632 30.705 62.491 87.325 62.491 56.62 0 87.325-26.859 87.325-62.491v-.134c-.072 28.783-45.787 51.018-87.325 51.018z" fill="#FEDC90" />
+      <path d="M75.614 117.896c0 9.718-4.593 14.779-10.258 14.779-5.665 0-10.258-5.061-10.258-14.779s4.593-14.779 10.258-14.779c5.665 0 10.258 5.061 10.258 14.779zM142.288 117.896c0 9.718-4.592 14.779-10.257 14.779-5.666 0-10.258-5.061-10.258-14.779s4.592-14.779 10.258-14.779c5.665 0 10.257 5.061 10.257 14.779z" fill="#633001" />
+    </svg>
+  )
+}
+
+/** UP33's token icon (1.5 kB webp — the protocol ships no vector mark) */
+const UP_ICON =
+  'data:image/webp;base64,UklGRhgGAABXRUJQVlA4IAwGAAAQMQCdASoAAQABPi0WikOhoSERytxQGALEs7d5T6F42YNsbpv4o/FPwr2kjk/4b/gZ1lPI3zX8zfrXmAXBv8c/I/+gf///6fhj9AOkA/R3+NfkB/Hf/////BP5gP0l/tf8A97T+d/4D+Z+QB8gH/I/gHq+dQB/AP6r///V8/cz4PP2X/0X9P9n77////3gHUj8QJmTw4yrKGbmM7VXSAPWm0CKg36ddSL9Vf////xLPGiRQUEkUFBJFBQSRQUEkUFBJFBQSRQUEeWcP8X7WYUFBJE92+p4zKsKumfRFWJ/2jqx8Jr7HljTn49LE1EdvVv+0dWPjggxkZbkuDhnqKxP7PfxqltHl5+9OXpcBnpAwnOBOa5BEaanjUFHkzN4VLzgxMOuFhOHgVrj4huDpDUJzLiGrcId2i/HNo/DicP+tO/J2IxbbPfyHdgHju8/LaA116wUSzik6aVBMP4+0dWQDTp/ArG9ETfuwpj7R1Y9YXgptuLB1Cx9m1cfZtXH2bVx9m1cfZtXH2bVx9m1cfZpAAD+/7j304hB2iHy9BAACho5AJk3uxACbkAEhLI5py68pYMA9reTMQB5iWT40LoBA86CqxEWaMN4KW8nVDBnub9VqD0VNbgLnMLSxlp4ziYWCR8EUug2kpuY+4bjOquQAVvCKnAW7r91WvrzHu8NYW9DjsRP4AG8ADAVmgua3uUJ6HWW2heCBj4lhQxSUWHvqLx+jCae7urB4RPKq5aLXddtdgwHwFY0wnXkC/u5zFI0qAPzpOWRbBXB+oNtHDu1vg7XiLlSIep9acBudJSNEWgsja4+YUXTD/HsFIPI1gfZQ03f6xvxRPtsUGgBxT6gw/k5NZvV39AXj+IbL/RtkFXyF/hRhlo/vg+s+hqPs298H1l/NR9k/aAC6XoRIDo4NqUJ+0pZsVmuSW+rpF/yGfkwG5jCCZEiugSkdpwlH3uuTpN7n91NlOFKa90fS7TbqnH83+n+slvjmEPEATJ3zM+1MyMTPEHN4PTQXTcn8lubTXLc9yK41Tr2keJoiMsmbP8OcwAH2/JCXz3X3X/Xv/wefiYDSZJt+6jtJW1BLt48vlZgPGZzXkPkOcq6HEL/DVnTvC5lfNmUov5g3uYlAIzxkxXFJfMEIdk9MyLILXMWk8zIeO5dGG3HGLAK++D6y+ro+zb3wfWX1dH2T9oAL82HGs6a+FtHCmeh8aYJkMMHD2wcxvP/lfYP0r65VXFoxnT2vJAImSO2i1kTSfQNhyIaba9M8q5nAUIk/oX2Fx0KgKLQ6Oo+oJhRg2SDPEnNAeaybjcuhbmLzz7dYBLaFQQhgEGMLQXZLcSKEcVsIfvkAZEfR88IpgC1cFrmLOjHPI+MJ4PHyDcMxuWqi0OAE9A7qFgrSLAGGnCQo+Q/s5Sc4SFHsf9nKNn0g4/IQaVwXqQJl1WHTaT9mrNT+/iCFfYK54tVAid/qhkohOATBCPjTZQq62P2+qouNgiQciD6qwvrTgZHwi6e6liY0kPZB8ZBNbNU69mxi6/2EkvmkjCdQ6w8JdWsEgfY7Fkw6Vo8orRhxFirMUDzbEcZQF5vZS/mXQ+xSJIZI/dxyJOyk8Z48JbmqroHpcI++AZm76Acp7tn6HXcs7fVoyTVKnYf2mZqC3ouRad7/8TOv/lX/naNTR9eUOEhR8h/a+6JrxWjvxZtw7cw497uD8SeDocAvv8h8BWB+T/zj+8jZbz85weoE3oikAip2GgL0qApxzFf0FN/15rQS9x1kaU0Y0gS+PZ1XEwI38xwemFlyIf0HilWsJi1hvUTLDWEvfhnRq9CA/5ednBlw29Nn/CUeumeG90sanuxf5GqLsz6gS4ku+A/5Kz8P9aEo/PZO9bk5m2zzlj4LZ3swPIC18pfOAmtKmkxrgtWZD+P6Xm/4NxUcDPyTeTs5xjTsvUu+3h+64GK3STDepYLoE4FiU+dsj7OvHLaRV65OsdvvTPMkcYPlD/xT/4NWx/4u+3RmGlgk0L8ve+f5/62/+Hn8Ybhtdznmr1M6x1llRR0LzEenVSTc3qyRYwu3AiYAAAAAAA='
+
+function Up33Mark() {
+  return <img src={UP_ICON} alt="" aria-hidden="true" />
+}
+
+/**
+ * The house mark — LP and a block cursor, the same wordmark as the wallet icon.
+ *
+ * Drawn as a rect grid rather than set in a typeface: the whole glyph is 10px
+ * tall in a badge, where a font's P closes up into a blob. On this grid the
+ * counter is a deliberate 5×4 of the 27×16 box and survives the downsample.
+ *
+ * currentColor is the reason it is not the wallet icon's bitmap: it rides
+ * `var(--acc)`, so it turns amber on the amber theme and violet on the violet
+ * one. This is the terminal's own mark and stands in for a home DEX that has
+ * no art here yet — never for one that does.
+ */
+function LpMark() {
+  return (
+    <svg viewBox="0 0 27 16" fill="currentColor" aria-hidden="true">
+      <rect x="0" y="0" width="3" height="16" />
+      <rect x="0" y="13" width="7" height="3" />
+      <rect x="9" y="0" width="3" height="16" />
+      <rect x="9" y="0" width="11" height="3" />
+      <rect x="17" y="0" width="3" height="10" />
+      <rect x="9" y="7" width="11" height="3" />
+      <rect x="22" y="4" width="5" height="12" />
+    </svg>
+  )
+}
+
+/**
+ * The venue behind a `home` position, as it presents itself: its own mark and
+ * its own color.
+ *
+ * `home` is a role, not a brand: it is PancakeSwap v3 on BSC and UP33 CL on
+ * Robinhood, two different companies whose logos have nothing to do with each
+ * other. Keyed by chain because that is what picks the home DEX in the first
+ * place — the whole config module is chosen by `CHAIN=`.
+ *
+ * The color exists so a badge is ONE object. The uniswap badge has always been
+ * pink text around a pink unicorn; the house badge wearing the theme accent
+ * made sense while `home` meant UP33 — this terminal's own protocol, and its
+ * green IS the accent — and stopped meaning anything the moment `home` became
+ * whichever DEX a chain happens to call home. So it is stated where it differs
+ * from the accent, and left out where it does not.
+ *
+ * A chain missing from here still renders: the house mark in the accent, which
+ * claims nothing about the venue and leaves the label to name it.
+ */
+const HOME: Record<string, { mark: () => JSX.Element; color?: string; line?: string }> = {
+  bsc: { mark: PancakeMark, color: '#1fc7d4', line: 'rgba(31, 199, 212, 0.55)' },
+  robinhood: { mark: Up33Mark },
+}
+const home = HOME[CHAIN.key] ?? { mark: LpMark }
+const HomeMark = home.mark
+const homeStyle = home.color ? { color: home.color, borderColor: home.line } : undefined
+
+/**
+ * Which Uniswap version each protocol is, or undefined for the home DEX.
+ *
+ * A lookup rather than a chain of ternaries: the old form defaulted anything
+ * unrecognised to the HOME brand, so widening LpProtocol silently stamped a new
+ * Uniswap venue with the wrong logo and the wrong name.
+ */
+const UNI_VERSION: Partial<Record<LpProtocol, string>> = {
+  univ2: 'v2',
+  univ3: 'v3',
+  univ4: 'v4',
+}
+
 /** mini: logo-only glyph for dense table rows (full badge = label + box) */
 export function ProtoBadge({ proto, mini }: { proto: LpProtocol; mini?: boolean }) {
-  const uni = proto === 'univ3' || proto === 'univ2'
+  const version = UNI_VERSION[proto]
+  const uni = version !== undefined
   const title = uni
-    ? `Uniswap ${proto === 'univ3' ? 'v3' : 'v2'} (official Robinhood Chain deployment)`
-    : 'UP33 ve(3,3) position'
+    ? `Uniswap ${version} (official ${CHAIN.name} deployment)`
+    : `${CHAIN.labels.home} position`
+  // One kind, one mark, one color, one label, derived together. They used to be
+  // spelled out per branch, and the full badge drifted: it asked for
+  // `.proto.up33`, which no stylesheet defines, so the house badge never took
+  // the accent the mini mark beside it did.
+  const kind = uni ? 'uni' : 'home'
+  const mark = uni ? <UniMark /> : <HomeMark />
+  const style = uni ? undefined : homeStyle
   if (mini)
     return (
-      <span className={`proto-mini ${uni ? 'uni' : 'up33'}`} title={title}>
-        {uni ? <UniMark /> : <img src={UP_ICON} alt="" aria-hidden="true" />}
-      </span>
-    )
-  if (uni)
-    return (
-      <span className="badge proto uni" title={title}>
-        <UniMark />
-        UNISWAP
+      <span className={`proto-mini ${kind}`} title={title} style={style}>
+        {mark}
       </span>
     )
   return (
-    <span className="badge proto up33" title={title}>
-      <img src={UP_ICON} alt="" aria-hidden="true" />
-      UP33
+    <span className={`badge proto ${kind}`} title={title} style={style}>
+      {mark}
+      {uni ? 'UNISWAP' : CHAIN.labels.home}
     </span>
   )
 }

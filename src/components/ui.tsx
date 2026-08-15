@@ -1,7 +1,50 @@
-import type { ReactNode } from 'react'
+import type { KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { formatUnits } from 'viem'
 import { fmtAmount, sanitizeAmountInput } from '../lib/format'
+
+/**
+ * Enter and Space on a row that behaves like a control but cannot be a button.
+ *
+ * Most controls here ARE buttons. These are the ones that cannot be: a table
+ * row is a `<tr>`, and a position group's header carries its own links inside
+ * it. Both keep the semantics they have — forcing `role="button"` onto a `<tr>`
+ * costs the table its rows, and onto a header it swallows the controls nested
+ * within — and gain the keyboard half of what a button gives away free.
+ *
+ * A keypress that started inside a nested control belongs to that control, the
+ * same rule the click handlers state as `closest('button, a')`.
+ */
+export function activateOnKey(run: () => void) {
+  return (e: KeyboardEvent) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return
+    if (e.target !== e.currentTarget) return
+    e.preventDefault() // Space would scroll the table out from under the row
+    run()
+  }
+}
+
+/**
+ * Everything that makes a table row behave like the control it already is:
+ * focus, its expanded state, and both ways of taking it.
+ *
+ * The two click guards are about respecting what the row contains. A click
+ * that landed on a nested control belongs to that control — the pair label
+ * opens the address card, ↗ goes to the explorer — and a click that ends a
+ * drag-select is the user copying a number rather than asking to trade.
+ */
+export function rowToggleProps(open: boolean, toggle: () => void) {
+  return {
+    tabIndex: 0,
+    'aria-expanded': open,
+    onKeyDown: activateOnKey(toggle),
+    onClick: (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest('button, a')) return
+      if (window.getSelection()?.toString()) return
+      toggle()
+    },
+  }
+}
 
 export function Btn(props: {
   onClick?: () => void
@@ -46,6 +89,17 @@ export function AmountRow(props: {
   onMax: (v: string) => void
   disabled?: boolean
   note?: string
+  /** what MAX means here, when it means more than "all of this balance" */
+  maxTip?: string
+  /**
+   * Makes the note the way OUT of the state it reports.
+   *
+   * The note that says a side is over balance used to be the end of the road:
+   * it named the problem and left the reader to work out, by hand, which of two
+   * coupled amounts to lower and by how much. Where the app can compute that
+   * answer, the sentence saying so is the button that applies it.
+   */
+  onNote?: () => void
 }) {
   const { t } = useTranslation()
   return (
@@ -61,12 +115,20 @@ export function AmountRow(props: {
             className="chip"
             onClick={() => props.onMax(formatUnits(props.bal!, props.dec))}
             disabled={props.disabled}
+            title={props.maxTip}
           >
             {t('common.max')}
           </button>
         </>
       )}
-      {props.note && <span className="amber mono-sm">{props.note}</span>}
+      {props.note &&
+        (props.onNote ? (
+          <button className="amber mono-sm note-fix" onClick={props.onNote}>
+            {props.note}
+          </button>
+        ) : (
+          <span className="amber mono-sm">{props.note}</span>
+        ))}
     </div>
   )
 }

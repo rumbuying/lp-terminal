@@ -10,7 +10,9 @@ export function useBridgeBalance(user: Address | undefined, chainId: number, tok
   return useQuery({
     queryKey: ['bridgeBal', chainId, token.toLowerCase(), user],
     enabled: !!user,
-    refetchInterval: 15_000,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
     retry: false,
     queryFn: async (): Promise<bigint> => {
       const cid = asConfiguredChain(chainId)

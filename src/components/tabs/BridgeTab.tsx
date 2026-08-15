@@ -4,6 +4,7 @@ import { useConnectModal } from '@rainbow-me/rainbowkit'
 import { useAccount } from 'wagmi'
 import { formatUnits, parseUnits } from 'viem'
 import { CHAIN_ID, NATIVE } from '../../config/addresses'
+import { CHAIN } from '../../config/chains'
 import {
   NATIVE_SENTINEL,
   REMOTE_CHAINS,
@@ -46,6 +47,10 @@ const PROVIDER_LABEL: Record<BridgeProviderId, string> = {
 type RunState = { stage: BridgeStage | 'done'; hasApprove: boolean } | null
 
 export function BridgeTab() {
+  // same rule as SwapTab: focusing on mount is a desktop courtesy — on touch
+  // it opens the keyboard unasked and the fixed tab bar lands on the form
+  const autoFocusAmt =
+    typeof window !== 'undefined' && !window.matchMedia('(pointer: coarse)').matches
   const { t } = useTranslation()
   const { address: user } = useAccount()
   const { openConnectModal } = useConnectModal()
@@ -130,8 +135,8 @@ export function BridgeTab() {
     return () => clearInterval(id)
   }, [ticking])
 
-  const originName = dir === 'in' ? remote.label : 'ROBINHOOD'
-  const destName = dir === 'in' ? 'ROBINHOOD' : remote.label
+  const originName = dir === 'in' ? remote.label : CHAIN.shortName
+  const destName = dir === 'in' ? CHAIN.shortName : remote.label
   const balIn = balance.data
   const insufficient = balIn !== undefined && amount > balIn
   const isNativeIn = !!leg && leg.inputToken.toLowerCase() === NATIVE_SENTINEL.toLowerCase()
@@ -215,9 +220,9 @@ export function BridgeTab() {
   }
 
   // canonical bridge model: direction is WHERE the chains sit, not a mode. Each
-  // card carries its own chain selector; Robinhood always occupies one side, so
+  // card carries its own chain selector; the home chain always occupies one side, so
   // placing a chain on this card snaps the opposite card to the other end.
-  const chainTip = t('bridge.chainTip', { id: CHAIN_ID })
+  const chainTip = t('bridge.chainTip', { chain: CHAIN.name, id: CHAIN_ID })
   const pickChain = (side: 'from' | 'to') => (id: number) => {
     if (busy) return
     if (id === CHAIN_ID) {
@@ -274,7 +279,7 @@ export function BridgeTab() {
           inputMode="decimal"
           autoComplete="off"
           spellCheck={false}
-          autoFocus
+          autoFocus={autoFocusAmt}
           placeholder="0.0"
           value={amtStr}
           disabled={busy}
@@ -435,7 +440,13 @@ export function BridgeTab() {
                   ? (Number(formatUnits(quote.outputAmount, leg.outputDecimals)) / inNum - 1) * 100
                   : null
               return (
-                <div key={id} className={`quote-card ${isSel ? 'sel' : ''}`} onClick={guard(() => setOverride(id))}>
+                <button
+                  type="button"
+                  key={id}
+                  aria-pressed={isSel}
+                  className={`quote-card ${isSel ? 'sel' : ''}`}
+                  onClick={guard(() => setOverride(id))}
+                >
                   <div className="l1">
                     <span className="src">
                       {isSel ? '◉' : '○'} {PROVIDER_LABEL[id]}
@@ -489,7 +500,7 @@ export function BridgeTab() {
                       </span>
                     </div>
                   )}
-                </div>
+                </button>
               )
             })}
 
@@ -577,7 +588,7 @@ export function BridgeTab() {
 }
 
 function chainName(id: number): string {
-  return id === CHAIN_ID ? 'ROBINHOOD' : remoteById(id)?.label ?? `#${id}`
+  return id === CHAIN_ID ? CHAIN.shortName : remoteById(id)?.label ?? `#${id}`
 }
 
 /** one persisted transfer: countdown while inside the ETA, conservative
@@ -667,7 +678,8 @@ function TokenSel(props: {
           <div className="tsel-backdrop" onClick={() => setOpen(false)} />
           <div className="tsel-pop">
             {props.options.map((o) => (
-              <div
+              <button
+                type="button"
                 key={o.symbol}
                 className="tsel-item"
                 onClick={() => {
@@ -681,7 +693,7 @@ function TokenSel(props: {
                 <span className="dim mono-sm">
                   {o.providers.length === 1 ? t('bridge.nRoute1') : t('bridge.nRoutes', { n: o.providers.length })}
                 </span>
-              </div>
+              </button>
             ))}
             {props.options.length === 0 && (
               <div className="tsel-item dim">{props.loading ? t('bridge.discovering') : t('bridge.noTokens')}</div>

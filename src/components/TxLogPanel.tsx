@@ -26,7 +26,18 @@ export function TxLogPanel() {
   }, [lines])
 
   return (
-    <div className="logpanel" ref={ref}>
+    // The panel is the product's promise that every action narrates — wallet
+    // prompt, pending, confirmed. Without a live region that narration is
+    // silent to a screen reader, which is the one case where a flow really is
+    // an unexplained wait. `additions` so a re-render of settled lines does
+    // not re-read the whole log.
+    <div
+      className="logpanel"
+      ref={ref}
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions"
+    >
       {lines.length === 0 && <div className="logline dim">{t('log.ready')}</div>}
       {lines.length > 2 && (
         <div className="logline dim">

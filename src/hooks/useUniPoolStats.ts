@@ -3,6 +3,7 @@
 // from useUniPools (catalog browse) so POSITIONS doesn't drag a 120-row page.
 import { useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
+import { CHAIN_ID } from '../config/addresses'
 import { fetchUniIndex } from '../lib/uniIndex'
 import { fetchDexscreener, type PoolStat } from '../lib/poolstats'
 import { poolStatWithFallback } from '../lib/poolStatFallback'
@@ -13,10 +14,11 @@ export function useUniPoolStats(addrs: Address[]) {
     .sort()
     .join(',')
   return useQuery({
-    queryKey: ['uniPoolStats', key],
+    queryKey: ['uniPoolStats', CHAIN_ID, key],
     enabled: addrs.length > 0,
-    refetchInterval: 60_000,
-    staleTime: 50_000,
+    refetchInterval: 5 * 60_000,
+    staleTime: 4 * 60_000,
+    retry: false,
     queryFn: async () => {
       const out: Record<string, PoolStat> = {}
       await Promise.all(

@@ -1,8 +1,9 @@
-import { ADDR } from '../config/addresses'
+import { GOV } from '../config/addresses'
 import type { TokenInfo } from '../types'
 import { useTokenUsd } from './useTokenUsd'
 
-const UP_TOKEN: TokenInfo = { address: ADDR.UP, symbol: 'UP', decimals: 18 }
+// null on a chain with no ve(3,3) protocol — useTokenUsd stays disabled
+const UP_TOKEN: TokenInfo | null = GOV ? { address: GOV.UP, symbol: 'UP', decimals: 18 } : null
 
 /** USD value of 1 UP (display only) via the shared venue pricer — dexscreener's
  *  most-liquid pair first, fee-free Kyber unit quote as fallback. Shares the

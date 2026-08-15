@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { pickDsTokenUsd, type DsPair } from './tokenPrice'
+import { CHAIN } from '../config/chains'
+
+const SLUG = CHAIN.slugs.dexscreener
 
 const UP = '0x57C0E45cB534413D1C20A4240955d6bB250BB4F1'
 const WETH = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73'
@@ -9,7 +12,7 @@ const WETH = '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73'
 // UP/WETH pools around $0.140 and an $8-liquidity v4 pool marked $0.1585
 const pairs: DsPair[] = [
   {
-    chainId: 'robinhood',
+    chainId: SLUG,
     priceUsd: '0.1405',
     priceNative: '0.00007610',
     liquidity: { usd: 277107 },
@@ -17,7 +20,7 @@ const pairs: DsPair[] = [
     quoteToken: { address: WETH },
   },
   {
-    chainId: 'robinhood',
+    chainId: SLUG,
     priceUsd: '0.1402',
     priceNative: '0.00007595',
     liquidity: { usd: 247016 },
@@ -25,7 +28,7 @@ const pairs: DsPair[] = [
     quoteToken: { address: WETH },
   },
   {
-    chainId: 'robinhood',
+    chainId: SLUG,
     priceUsd: '0.1585',
     liquidity: { usd: 8.25 },
     baseToken: { address: UP },
@@ -41,7 +44,7 @@ const pairs: DsPair[] = [
   },
 ]
 
-test('prices from the most-liquid robinhood pair, not the best-looking mid', () => {
+test('prices from the most-liquid pair on this chain, not the best-looking mid', () => {
   assert.equal(pickDsTokenUsd(pairs, UP), 0.1405)
   // case-insensitive address match
   assert.equal(pickDsTokenUsd(pairs, UP.toLowerCase()), 0.1405)
@@ -60,11 +63,11 @@ test('dust pools below the liquidity floor never price a token', () => {
 test('tolerates garbage rows without throwing', () => {
   const garbage: DsPair[] = [
     {},
-    { chainId: 'robinhood' },
-    { chainId: 'robinhood', liquidity: { usd: 'nope' }, baseToken: { address: UP }, priceUsd: '1' },
-    { chainId: 'robinhood', liquidity: { usd: 5000 }, baseToken: { address: UP }, priceUsd: '0' },
+    { chainId: SLUG },
+    { chainId: SLUG, liquidity: { usd: 'nope' }, baseToken: { address: UP }, priceUsd: '1' },
+    { chainId: SLUG, liquidity: { usd: 5000 }, baseToken: { address: UP }, priceUsd: '0' },
     // quote-side without priceNative cannot derive — must be skipped
-    { chainId: 'robinhood', liquidity: { usd: 5000 }, quoteToken: { address: WETH }, priceUsd: '0.14' },
+    { chainId: SLUG, liquidity: { usd: 5000 }, quoteToken: { address: WETH }, priceUsd: '0.14' },
   ]
   assert.equal(pickDsTokenUsd(garbage, UP), null)
   assert.equal(pickDsTokenUsd(garbage, WETH), null)

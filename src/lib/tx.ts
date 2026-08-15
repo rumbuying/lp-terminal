@@ -1,6 +1,7 @@
 import {
   BaseError,
   erc20Abi,
+  ExecutionRevertedError,
   parseAbi,
   parseEventLogs,
   UserRejectedRequestError,
@@ -9,14 +10,16 @@ import {
   type ReplacementReason,
   type TransactionReceipt,
 } from 'viem'
-import { readContract, waitForTransactionReceipt, writeContract } from 'wagmi/actions'
-import { ADDR, CHAIN_ID, NATIVE } from '../config/addresses'
+import { getAccount, readContract, waitForTransactionReceipt, writeContract } from 'wagmi/actions'
+import { CHAIN_ID, NATIVE, requireGov } from '../config/addresses'
 import { queryClient } from '../config/query'
 import { wagmiConfig, type ConfiguredChainId } from '../config/wagmi'
 import { t } from '../i18n'
 import { fmtAmount } from './format'
 import { setSwapIntent } from './swapIntent'
 import { txlog } from './txlog'
+import { permit2Abi } from './uniV4'
+import { invalidateFarmUsers } from './v2Farm'
 
 // Slipstream periphery's abbreviated revert reasons, translated for humans
 // (hints resolve lazily so they follow the active language at error time)
@@ -56,8 +59,63 @@ export async function fetchSqrtPriceX96(pool: Address): Promise<bigint> {
   return s0[0]
 }
 
-export function invalidateAll() {
-  void queryClient.invalidateQueries()
+export type TransactionInvalidation = 'none' | 'balances' | 'swap' | 'liquidity'
+
+const BALANCE_QUERY_ROOTS = new Set(['balances', 'bridgeBal'])
+const SWAP_QUERY_ROOTS = new Set([
+  ...BALANCE_QUERY_ROOTS,
+  'directQuote',
+  'solverQuote',
+  'zapPlan',
+  'liveSlot0',
+])
+const LIQUIDITY_QUERY_ROOTS = new Set([
+  ...SWAP_QUERY_ROOTS,
+  'positions',
+  'tickLiq',
+])
+
+/** Public catalogs are deliberately absent: one receipt cannot change them. */
+export function shouldInvalidateForTransaction(
+  queryKey: readonly unknown[],
+  scope: Exclude<TransactionInvalidation, 'none'>,
+): boolean {
+  const root = queryKey[0]
+  if (typeof root !== 'string') return false
+  const roots =
+    scope === 'balances'
+      ? BALANCE_QUERY_ROOTS
+      : scope === 'swap'
+        ? SWAP_QUERY_ROOTS
+        : LIQUIDITY_QUERY_ROOTS
+  return roots.has(root)
+}
+
+export function invalidateTransactionState(scope: TransactionInvalidation = 'liquidity') {
+  if (scope === 'none') return
+  // A liquidity move may have staked v2 LP into a farm pid the reconcile cache
+  // has never proved — drop the per-wallet farm discovery so the next positions
+  // read reconciles instead of waiting out the 30-minute window.
+  if (scope === 'liquidity') invalidateFarmUsers()
+  void queryClient.invalidateQueries({
+    predicate: (query) => shouldInvalidateForTransaction(query.queryKey, scope),
+  })
+}
+
+/** Resolve lazily so a language switch made after module load is respected. */
+export function accountChangedMessage(): string {
+  return t('tx.accountChanged')
+}
+
+/**
+ * Multi-transaction flows freeze their submitting account when the user starts.
+ * Wallets can emit an account change while an approval or RPC read is pending;
+ * every later write must stop instead of silently using the newly-selected
+ * account for an old plan.
+ */
+export function activeAccountMatches(expected: Address): boolean {
+  const active = getAccount(wagmiConfig).address
+  return !!active && active.toLowerCase() === expected.toLowerCase()
 }
 
 /** why a step returned null — lets multi-step flows tailor their advice
@@ -65,7 +123,15 @@ export function invalidateAll() {
 export type StepFailWhy = 'rejected' | 'reverted' | 'error'
 
 function stepFailWhy(e: unknown): StepFailWhy {
-  if (e instanceof BaseError && e.walk((x) => x instanceof UserRejectedRequestError)) return 'rejected'
+  if (e instanceof BaseError) {
+    if (e.walk((x) => x instanceof UserRejectedRequestError)) return 'rejected'
+    // An estimate that reverts is the chain running this exact calldata and
+    // refusing it — the same verdict a reverted receipt carries, reached before
+    // the fee is paid instead of after. Callers key their retry advice on
+    // 'reverted' (raise the tolerance, re-quote), and a swap stopped by the
+    // solver's pre-flight needs that advice as much as one that landed.
+    if (e.walk((x) => x instanceof ExecutionRevertedError)) return 'reverted'
+  }
   return /reject|denied|declin/i.test(String((e as Error)?.message ?? '')) ? 'rejected' : 'error'
 }
 
@@ -88,6 +154,8 @@ export async function step(
     onFail?: (why: StepFailWhy) => void
     chainId?: ConfiguredChainId
     explorer?: string
+    /** Query domain changed by a successful receipt. Failures never invalidate. */
+    invalidate?: TransactionInvalidation
   },
 ): Promise<TransactionReceipt | null> {
   const id = txlog.push('pending', t('tx.confirm', { label }))
@@ -131,13 +199,11 @@ export async function step(
         hash: activeHash,
         href: href(activeHash),
       })
-      invalidateAll()
       opts?.onFail?.(replacementReason === 'cancelled' ? 'rejected' : 'error')
       return null
     }
     if (rcpt.status !== 'success') {
       txlog.update(id, { kind: 'err', text: t('tx.reverted', { label }), hash: activeHash, href: href(activeHash) })
-      invalidateAll()
       opts?.onFail?.('reverted')
       return null
     }
@@ -147,7 +213,7 @@ export async function step(
       hash: activeHash,
       href: href(activeHash),
     })
-    invalidateAll()
+    invalidateTransactionState(opts?.invalidate ?? 'liquidity')
     try {
       opts?.onSuccess?.(rcpt)
     } catch (e) {
@@ -155,13 +221,23 @@ export async function step(
     }
     return rcpt
   } catch (e) {
+    // A hash means the transaction reached the network and the WAIT is what
+    // broke — a dropped RPC socket, a timeout, a tab asleep too long. That says
+    // nothing about the transaction, which is out there and may well confirm.
+    // Calling it failed contradicts the pending banner tracking the same hash
+    // beside it, and talks people into sending the trade a second time. Report
+    // what is known: sent, and no longer watched from here.
+    const broadcast = activeHash !== undefined
     txlog.update(id, {
-      kind: 'err',
-      text: `${label} — ${shortErr(e)}`,
+      kind: broadcast ? 'info' : 'err',
+      text: broadcast
+        ? t('tx.unwatched', { label, why: shortErr(e) })
+        : `${label} — ${shortErr(e)}`,
       hash: activeHash,
       href: activeHash ? href(activeHash) : undefined,
     })
-    invalidateAll()
+    // The flow above still stops: this step has no receipt to hand it, and a
+    // later step built on an unconfirmed one would be guessing.
     opts?.onFail?.(stepFailWhy(e))
     return null
   }
@@ -187,12 +263,13 @@ export function receivedOf(rcpt: TransactionReceipt, token: Address, to: Address
  */
 export function offerSwapClaimedUp(user: Address) {
   return (rcpt: TransactionReceipt) => {
-    const total = receivedOf(rcpt, ADDR.UP, user)
+    const gov = requireGov()
+    const total = receivedOf(rcpt, gov.UP, user)
     if (total === 0n) return
     txlog.push('info', t('tx.received', { amt: fmtAmount(total, 18) }), rcpt.transactionHash, {
       label: t('tx.swapToEth'),
       onClick: () => {
-        setSwapIntent({ tokenIn: ADDR.UP, tokenOut: NATIVE, amount: total })
+        setSwapIntent({ tokenIn: gov.UP, tokenOut: NATIVE, amount: total })
         location.hash = 'swap'
       },
     })
@@ -217,18 +294,73 @@ export async function ensureAllowance(
     chainId: CHAIN_ID,
   })
   if (current >= amount) return 'sufficient'
-  const h = await step(t('tx.approve', { sym: symbol }), () =>
-    writeContract(wagmiConfig, {
-      account: owner,
-      abi: erc20Abi,
-      address: token,
-      functionName: 'approve',
-      args: [spender, amount],
-      chainId: CHAIN_ID,
-    }),
+  const h = await step(
+    t('tx.approve', { sym: symbol }),
+    () =>
+      writeContract(wagmiConfig, {
+        account: owner,
+        abi: erc20Abi,
+        address: token,
+        functionName: 'approve',
+        args: [spender, amount],
+        chainId: CHAIN_ID,
+      }),
+    { invalidate: 'none' },
   )
   return h ? 'approved' : null
 }
+
+/**
+ * Permit2's own allowance leg.
+ *
+ * A token approved to Permit2 is not yet spendable by anything — Permit2 keeps
+ * a second, per-operator allowance that also carries an expiry. Uniswap's
+ * UniversalRouter pulls exclusively through it, so a v4 swap needs both legs and
+ * approving the token alone would revert at settlement.
+ *
+ * The allowance is written for exactly `amount`, and expires with the same
+ * horizon a swap deadline uses, so a stale approval cannot outlive the trade
+ * that asked for it.
+ */
+export async function ensurePermit2Allowance(
+  permit2: Address,
+  token: Address,
+  owner: Address,
+  operator: Address,
+  amount: bigint,
+  symbol: string,
+): Promise<AllowanceResult | null> {
+  const [current, expiration] = await readContract(wagmiConfig, {
+    abi: permit2Abi,
+    address: permit2,
+    functionName: 'allowance',
+    args: [owner, token, operator],
+    chainId: CHAIN_ID,
+  })
+  const now = BigInt(Math.floor(Date.now() / 1000))
+  // an unexpired allowance for enough is the only one worth reusing
+  if (current >= amount && BigInt(expiration) > now) return 'sufficient'
+  if (amount > (1n << 160n) - 1n) throw new Error('Permit2 allowance exceeds uint160')
+  const expiry = Number(deadline(PERMIT2_ALLOWANCE_SECONDS))
+  const h = await step(
+    t('tx.approve', { sym: symbol }),
+    () =>
+      writeContract(wagmiConfig, {
+        account: owner,
+        abi: permit2Abi,
+        address: permit2,
+        functionName: 'approve',
+        args: [token, operator, amount, expiry],
+        chainId: CHAIN_ID,
+      }),
+    { invalidate: 'none' },
+  )
+  return h ? 'approved' : null
+}
+
+/** how long a Permit2 allowance stays valid — long enough to cover the approval
+ *  landing and the swap that follows, short enough not to linger */
+const PERMIT2_ALLOWANCE_SECONDS = 3600
 
 export function deadline(secondsFromNow = 1200): bigint {
   return BigInt(Math.floor(Date.now() / 1000) + secondsFromNow)

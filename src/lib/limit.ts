@@ -11,6 +11,7 @@
 //   ⇒ full-fill average price (token1 per token0) = A·B — geometric mean of bounds
 import { parseAbi, parseEventLogs, type Address, type TransactionReceipt } from 'viem'
 import { ADDR } from '../config/addresses'
+import { chainKey } from './chainStore'
 
 export type LimitSide = 'sell0' | 'sell1'
 
@@ -48,7 +49,9 @@ export type LimitTag = {
   ts: number
 }
 
-const KEY = 'up33.limitOrders.v1'
+// per chain: token ids are unique only per position manager, so the same id
+// names a different position on each chain (lib/chainStore.ts)
+const KEY = chainKey('up33.limitOrders.v1')
 
 function load(): Record<string, LimitTag> {
   try {

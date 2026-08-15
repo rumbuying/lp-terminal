@@ -27,6 +27,20 @@ export function slippageTone(bps: number): SlippageTone {
   return 'red'
 }
 
+// Past this width the tolerance is the whole risk. At 10% a fill can land a
+// tenth below the number on screen and still settle, and between the button and
+// the wallet nothing asks again — the tolerance is already inside the calldata
+// by then. So the button asks, in a press of its own that names the percentage.
+//
+// Strictly greater: 10% chosen deliberately is a number the user typed, and a
+// preset that lands exactly on the line was still a choice made at the editor.
+export const CONFIRM_SLIPPAGE_BPS = 1000 // 10%
+
+/** does this tolerance have to be confirmed a second time before it is signed? */
+export function needsSlippageConfirm(bps: number | undefined): boolean {
+  return bps !== undefined && bps > CONFIRM_SLIPPAGE_BPS
+}
+
 // past this measured impact AUTO refuses to guess: the trade is eating so much
 // of the pool that a derived tolerance is meaningless (it balloons toward the
 // 50% ceiling), so the user must set the number by hand — same forced-choice
@@ -60,10 +74,12 @@ export function autoSlippage(impactBps: number, poolFeeBps: number): AutoSlippag
 }
 
 /**
- * A quote's all-in cost in bps — price move, pool fees, modeled transfer taxes
- * and terminal fee at once. `netOut` is what the user actually receives;
- * `midOut` is the fee-free price for this size, so everything execution took is
- * the gap between them and nothing has to be summed (or double-counted).
+ * A quote's baseline-relative execution cost in bps. `netOut` is what the user
+ * actually receives; `midOut` is the same-block fee-free executable-probe
+ * secant scaled to this size. Their gap includes full-trade depth beyond the
+ * probe, pool fees, modeled transfer taxes and the terminal fee without asking
+ * clients to sum components (or double-count them). It is not a zero-size-mid
+ * decomposition because the probe retains its own depth move.
  *
  * Every row on screen divides by the SAME `midOut`, whichever quote source
  * produced it, so the ordering matches delivered output by construction and the

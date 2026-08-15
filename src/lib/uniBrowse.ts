@@ -6,18 +6,21 @@
 // unrealistic. There is also no official Uniswap subgraph for Robinhood Chain
 // (official Graph deployments are mainnet-only as of 2026-07).
 //
-// So discovery is token-centric via DexScreener (browser-direct by default;
-// same-origin proxied only in KYBERSWAP_AGGREGATOR_API_BASE_URL=/kyber
-// builds), and every candidate is VERIFIED on-chain before display:
+// So discovery is token-centric via DexScreener (same-origin proxied in
+// server builds — KYBERSWAP_AGGREGATOR_API_BASE_URL=/kyber — since
+// browser-direct calls die on restricted networks; direct otherwise), and
+// every candidate is VERIFIED on-chain before display:
 // the pool's own token0/token1/fee must round-trip through factory.getPool to
 // the same address — an API can suggest pools, it can never substitute one.
 import { getAddress, zeroAddress, type Address, type PublicClient } from 'viem'
+import { CHAIN } from '../config/chains'
 import { erc20Abi, uniV3FactoryAbi, uniV3PoolAbi } from '../abi'
 import { ADDR, UNI } from '../config/addresses'
 import { ENV } from '../config/env'
 import { loadTokenCache, saveTokenCache } from '../hooks/usePools'
 import type { PoolStat } from './poolstats'
 import type { ClPool, TokenInfo } from '../types'
+import { awaitCatalogTask, fetchCatalog } from './catalogFetch'
 
 const DS = ENV.proxied ? '/dexscreener' : 'https://api.dexscreener.com'
 const CAP = 30 // top pools by TVL per query — keeps the verify multicall small
@@ -39,29 +42,71 @@ export type UniBrowse = {
   dropped: number // candidates that failed factory.getPool verification
 }
 
-function v3PairsOf(json: unknown): DsPair[] {
-  const arr = Array.isArray(json) ? json : ((json as { pairs?: DsPair[] })?.pairs ?? [])
-  return arr.filter(
-    (p) => p?.chainId === 'robinhood' && p?.dexId === 'uniswap' && (p?.labels ?? []).includes('v3'),
-  )
+// Which venue a candidate belongs to. Both slots are Uniswap-v3-shaped
+// wherever `dexIds.home` is set (the chain config guarantees it), so one
+// hydration ABI covers them; only the vouching factory and the protocol tag
+// differ.
+const VENUES: { dexId: string; protocol: 'univ3' | 'home'; factory: Address }[] = [
+  { dexId: CHAIN.slugs.dexIds.uni, protocol: 'univ3', factory: UNI.V3_FACTORY },
+  ...(CHAIN.slugs.dexIds.home
+    ? [{ dexId: CHAIN.slugs.dexIds.home, protocol: 'home' as const, factory: ADDR.CL_FACTORY }]
+    : []),
+]
+
+export const venueOf = (p: DsPair | undefined) => VENUES.find((v) => v.dexId === p?.dexId)
+
+/**
+ * DexScreener's version labels are a HINT, and an inconsistent one: on BSC,
+ * Uniswap's v3 pools carry no label at all while its v2 pairs are labelled
+ * ['v2'], and on Robinhood those same v3 pools are labelled ['v3']. Requiring
+ * the 'v3' label therefore drops the single deepest pool on the chain.
+ *
+ * So reject only what CLAIMS to be a version this path cannot read, and let
+ * factory.getPool be the gate it already is — a v2 pair that slips through has
+ * no fee()/tickSpacing() to hydrate and never reaches the pool list.
+ */
+const NOT_V3 = ['v2', 'v4']
+export function looksLikeV3(p: DsPair | undefined): boolean {
+  const labels = (p?.labels ?? []).map((l) => String(l).toLowerCase())
+  return labels.includes('v3') || !labels.some((l) => NOT_V3.includes(l))
 }
 
-async function dsJson(path: string): Promise<unknown> {
-  const r = await fetch(DS + path)
+function v3PairsOf(json: unknown): DsPair[] {
+  const arr = Array.isArray(json) ? json : ((json as { pairs?: DsPair[] })?.pairs ?? [])
+  return arr.filter((p) => p?.chainId === CHAIN.slugs.dexscreener && !!venueOf(p) && looksLikeV3(p))
+}
+
+async function dsJson(path: string, signal?: AbortSignal): Promise<unknown> {
+  const r = await fetchCatalog(DS + path, {}, signal)
   if (!r.ok) throw new Error(`dexscreener ${r.status}`)
   return r.json()
 }
 
+async function optionalDsJson(path: string, signal?: AbortSignal): Promise<unknown | null> {
+  try {
+    return await dsJson(path, signal)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    return null
+  }
+}
+
 /** dexscreener candidates for a query: token address, pool address, or symbol text */
-async function candidatesFor(query: string): Promise<DsPair[]> {
+async function candidatesFor(query: string, signal?: AbortSignal): Promise<DsPair[]> {
   const q = query.trim()
   if (/^0x[0-9a-fA-F]{40}$/.test(q)) {
     // token address first (the common case), then pool-address lookup
-    const byToken = v3PairsOf(await dsJson(`/token-pairs/v1/robinhood/${q}`).catch(() => null))
+    const byToken = v3PairsOf(
+      await optionalDsJson(`/token-pairs/v1/${CHAIN.slugs.dexscreener}/${q}`, signal),
+    )
     if (byToken.length) return byToken
-    return v3PairsOf(await dsJson(`/latest/dex/pairs/robinhood/${q}`).catch(() => null))
+    return v3PairsOf(
+      await optionalDsJson(`/latest/dex/pairs/${CHAIN.slugs.dexscreener}/${q}`, signal),
+    )
   }
-  return v3PairsOf(await dsJson(`/latest/dex/search?q=${encodeURIComponent(q)}`).catch(() => null))
+  return v3PairsOf(
+    await optionalDsJson(`/latest/dex/search?q=${encodeURIComponent(q)}`, signal),
+  )
 }
 
 type McRes = { status: 'success' | 'failure'; result?: unknown }
@@ -69,11 +114,18 @@ const ok = <T,>(r: McRes | undefined): T | undefined =>
   r && r.status === 'success' ? (r.result as T) : undefined
 
 /**
- * Discover + on-chain-verify Uniswap v3 pools. `query` empty = WETH (hub token).
- * Returns ready-to-render ClPool objects (protocol 'univ3', no gauge fields).
+ * Discover + on-chain-verify concentrated-liquidity pools across the chain's
+ * v3-shaped venues. `query` empty = the wrapped native (hub token). Returns
+ * ready-to-render ClPool objects, each tagged with the venue whose factory
+ * vouched for it, and no gauge fields (discovery covers no ve(3,3) protocol).
  */
-export async function fetchUniBrowse(pc: PublicClient, query: string): Promise<UniBrowse> {
-  const raw = await candidatesFor(query || ADDR.WETH)
+export async function fetchUniBrowse(
+  pc: PublicClient,
+  query: string,
+  signal?: AbortSignal,
+): Promise<UniBrowse> {
+  const raw = await candidatesFor(query || ADDR.WNATIVE, signal)
+  signal?.throwIfAborted()
 
   // dedupe, rank by TVL, cap
   const seen = new Map<string, DsPair>()
@@ -99,18 +151,32 @@ export async function fetchUniBrowse(pc: PublicClient, query: string): Promise<U
 
   // hydrate pool state from the pool contracts themselves
   const addrs = picks.map((p) => getAddress(p.pairAddress!))
-  const det = (await pc.multicall({
-    contracts: addrs.flatMap((a) => [
-      { abi: uniV3PoolAbi, address: a, functionName: 'token0' },
-      { abi: uniV3PoolAbi, address: a, functionName: 'token1' },
-      { abi: uniV3PoolAbi, address: a, functionName: 'fee' },
-      { abi: uniV3PoolAbi, address: a, functionName: 'tickSpacing' },
-      { abi: uniV3PoolAbi, address: a, functionName: 'slot0' },
-      { abi: uniV3PoolAbi, address: a, functionName: 'liquidity' },
-    ]) as never,
-  })) as McRes[]
+  const det = (await awaitCatalogTask(
+    pc.multicall({
+      contracts: addrs.flatMap((a) => [
+        { abi: uniV3PoolAbi, address: a, functionName: 'token0' },
+        { abi: uniV3PoolAbi, address: a, functionName: 'token1' },
+        { abi: uniV3PoolAbi, address: a, functionName: 'fee' },
+        { abi: uniV3PoolAbi, address: a, functionName: 'tickSpacing' },
+        { abi: uniV3PoolAbi, address: a, functionName: 'slot0' },
+        { abi: uniV3PoolAbi, address: a, functionName: 'liquidity' },
+      ]) as never,
+    }),
+    signal,
+  )) as McRes[]
+  signal?.throwIfAborted()
 
-  type Hyd = { addr: Address; token0: Address; token1: Address; fee: number; ts: number; s0: readonly [bigint, number]; liq: bigint }
+  type Hyd = {
+    addr: Address
+    protocol: 'univ3' | 'home'
+    factory: Address
+    token0: Address
+    token1: Address
+    fee: number
+    ts: number
+    s0: readonly [bigint, number]
+    liq: bigint
+  }
   const hyd: Hyd[] = []
   addrs.forEach((a, i) => {
     const token0 = ok<Address>(det[i * 6])
@@ -119,20 +185,37 @@ export async function fetchUniBrowse(pc: PublicClient, query: string): Promise<U
     const ts = ok<number>(det[i * 6 + 3])
     const s0 = ok<readonly [bigint, number]>(det[i * 6 + 4])
     const liq = ok<bigint>(det[i * 6 + 5])
-    if (!token0 || !token1 || fee === undefined || ts === undefined || !s0) return
-    hyd.push({ addr: a, token0, token1, fee, ts, s0, liq: liq ?? 0n })
+    const venue = venueOf(picks[i])
+    if (!token0 || !token1 || fee === undefined || ts === undefined || !s0 || !venue) return
+    hyd.push({
+      addr: a,
+      protocol: venue.protocol,
+      factory: venue.factory,
+      token0,
+      token1,
+      fee,
+      ts,
+      s0,
+      liq: liq ?? 0n,
+    })
   })
 
-  // authenticity gate: the OFFICIAL factory must map (token0, token1, fee) back
-  // to this exact address, else it's a fork/spoof pool and gets dropped
-  const gp = (await pc.multicall({
-    contracts: hyd.map((h) => ({
-      abi: uniV3FactoryAbi,
-      address: UNI.V3_FACTORY,
-      functionName: 'getPool',
-      args: [h.token0, h.token1, h.fee],
-    })) as never,
-  })) as McRes[]
+  // authenticity gate: the OFFICIAL factory FOR THAT VENUE must map
+  // (token0, token1, fee) back to this exact address, else it's a fork/spoof
+  // pool and gets dropped. Checking against the wrong venue's factory would
+  // reject every honest pool of the other one, so the address travels with the
+  // candidate rather than being a constant.
+  const gp = (await awaitCatalogTask(
+    pc.multicall({
+      contracts: hyd.map((h) => ({
+        abi: uniV3FactoryAbi,
+        address: h.factory,
+        functionName: 'getPool',
+        args: [h.token0, h.token1, h.fee],
+      })) as never,
+    }),
+    signal,
+  )) as McRes[]
   const verified = hyd.filter((h, i) => {
     const mapped = ok<Address>(gp[i])
     return !!mapped && mapped !== zeroAddress && mapped.toLowerCase() === h.addr.toLowerCase()
@@ -151,12 +234,15 @@ export async function fetchUniBrowse(pc: PublicClient, query: string): Promise<U
     }
   }
   if (missing.length) {
-    const meta = (await pc.multicall({
-      contracts: missing.flatMap((t) => [
-        { abi: erc20Abi, address: t, functionName: 'symbol' },
-        { abi: erc20Abi, address: t, functionName: 'decimals' },
-      ]) as never,
-    })) as McRes[]
+    const meta = (await awaitCatalogTask(
+      pc.multicall({
+        contracts: missing.flatMap((t) => [
+          { abi: erc20Abi, address: t, functionName: 'symbol' },
+          { abi: erc20Abi, address: t, functionName: 'decimals' },
+        ]) as never,
+      }),
+      signal,
+    )) as McRes[]
     missing.forEach((t, j) => {
       const info: TokenInfo = {
         address: t,
@@ -171,7 +257,7 @@ export async function fetchUniBrowse(pc: PublicClient, query: string): Promise<U
 
   const pools: ClPool[] = verified.map((h) => ({
     kind: 'cl',
-    protocol: 'univ3',
+    protocol: h.protocol,
     address: h.addr,
     token0: h.token0,
     token1: h.token1,

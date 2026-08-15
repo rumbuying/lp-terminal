@@ -3,15 +3,14 @@
 // and continue at a lower cadence. Confirmed/failed rows linger briefly. This
 // keeps reloads and slow/replaced transactions from enabling a duplicate swap.
 import { useEffect, useSyncExternalStore } from 'react'
-import { getPublicClient } from 'wagmi/actions'
 import { CHAIN_ID } from '../config/addresses'
-import { wagmiConfig } from '../config/wagmi'
 import {
   pendingSwapTickAction,
   pendingSwaps,
   type PendingSwap,
 } from '../lib/pendingSwaps'
-import { invalidateAll } from '../lib/tx'
+import { invalidateTransactionState } from '../lib/tx'
+import { homeClient } from '../lib/homeClient'
 
 const inflight = new Set<string>()
 const lastStalePoll = new Map<string, number>()
@@ -20,13 +19,13 @@ async function settleOne(entry: PendingSwap) {
   if (inflight.has(entry.id)) return
   inflight.add(entry.id)
   try {
-    const client = getPublicClient(wagmiConfig, { chainId: CHAIN_ID })
+    const client = homeClient()
     // not-yet-mined throws — treated as "keep polling"
-    const rcpt = client ? await client.getTransactionReceipt({ hash: entry.id }).catch(() => null) : null
+    const rcpt = await client.getTransactionReceipt({ hash: entry.id }).catch(() => null)
     if (!rcpt) return
     pendingSwaps.settle(entry.id, rcpt.status === 'success' ? 'confirmed' : 'failed')
     lastStalePoll.delete(entry.id)
-    invalidateAll() // a fill changes balances
+    if (rcpt.status === 'success') invalidateTransactionState('swap')
   } finally {
     inflight.delete(entry.id)
   }

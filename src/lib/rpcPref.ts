@@ -1,8 +1,12 @@
 // user-selectable RPC endpoint, persisted per-browser (localStorage).
 // Read once at startup by config/wagmi.ts (highest-priority transport);
 // changes apply via page reload.
+//
+// Scoped per chain: an endpoint is a node for exactly one of them, and this is
+// the transport that outranks every other — see lib/chainStore.ts.
+import { chainKey } from './chainStore'
 
-const KEY = 'up33.rpcUrl.v1'
+const KEY = chainKey('up33.rpcUrl.v1')
 
 export function customRpc(): string {
   try {

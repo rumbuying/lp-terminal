@@ -4,9 +4,11 @@
 //   fees  -> UNSTAKED LPs only (CL pays a 10% default levy); staked LPs' fees go to voters
 //   UP    -> STAKED LPs only, pro-rata ACTIVE (in-range) staked liquidity, post-cap rewardRate
 // A position earns one or the other, never both.
-import { ADDR } from '../config/addresses'
+import { zeroAddress } from 'viem'
+import { ADDR, GOV } from '../config/addresses'
 import { sqrtPriceToPrice } from './clmath'
 import { nowSec } from './format'
+import { effectiveClFeePpm } from './poolIdentity'
 import type { PoolStat } from './poolstats'
 import type { ClPool, Pool, V2Pool } from '../types'
 
@@ -14,14 +16,14 @@ const YEAR = 31_536_000
 
 export function fees24Of(p: Pool, stat?: PoolStat): number | null {
   if (stat?.vol24hUsd == null) return null
-  const feePct = p.kind === 'v2' ? p.feeBps / 100 : p.feePpm / 10_000
+  const feePct = p.kind === 'v2' ? p.feeBps / 100 : effectiveClFeePpm(p) / 10_000
   return (stat.vol24hUsd * feePct) / 100
 }
 
 /** pool-average fee APR for an UNSTAKED LP (net of the CL unstaked levy) */
 export function feeAprOf(p: Pool, stat?: PoolStat): number | null {
   if (stat?.vol24hUsd == null || stat.liqUsd == null || stat.liqUsd <= 0) return null
-  const feeFrac = p.kind === 'v2' ? p.feeBps / 10_000 : p.feePpm / 1e6
+  const feeFrac = p.kind === 'v2' ? p.feeBps / 10_000 : effectiveClFeePpm(p) / 1e6
   const keep = p.kind === 'cl' ? 1 - p.unstakedFeePpm / 1e6 : 1
   return ((stat.vol24hUsd * feeFrac * keep * 365) / stat.liqUsd) * 100
 }
@@ -59,26 +61,53 @@ export function fmtApr(x: number): string {
   return x.toFixed(2) + '%'
 }
 
-/** USD prices of a CL pool's two tokens via USDG($1) / WETH / UP anchors */
+export type ClTokenUsd = {
+  p0: number
+  p1: number
+  /** the side that carried a price in from outside; the other came from the pool */
+  anchor: 0 | 1
+  /** the anchor is the $1 stable, so the pool's own price IS the dollar price */
+  exact: boolean
+}
+
+/**
+ * USD prices of a CL pool's two tokens via USDG($1) / WETH / UP anchors.
+ *
+ * One side has to arrive from outside; the pool supplies the other, because the
+ * pool's price is the exchange rate between them. Which side that is decides how
+ * much the answer can drift: against the $1 stable the pool price is the dollar
+ * price outright, while against WETH it rides on a WETH/USD read from
+ * dexscreener and moves whenever ETH does.
+ *
+ * So when both tokens can anchor — every WETH/stable pool — the stable wins. It
+ * costs nothing and it takes the drift out of the pair people quote most.
+ */
 export function clTokenUsd(
   pool: ClPool,
   dec0: number,
   dec1: number,
   upUsd?: number,
   wethUsd?: number | null,
-): { p0: number; p1: number } | null {
+): ClTokenUsd | null {
   const anchors: Record<string, number | undefined> = {
-    [ADDR.USDG.toLowerCase()]: 1,
-    [ADDR.WETH.toLowerCase()]: wethUsd ?? undefined,
-    [ADDR.UP.toLowerCase()]: upUsd,
+    [ADDR.STABLE.toLowerCase()]: 1,
+    [ADDR.WNATIVE.toLowerCase()]: wethUsd ?? undefined,
+    ...(pool.protocol === 'univ4' ? { [zeroAddress]: wethUsd ?? undefined } : {}),
+    ...(GOV ? { [GOV.UP.toLowerCase()]: upUsd } : {}),
   }
   const P = sqrtPriceToPrice(pool.sqrtPriceX96, dec0, dec1) // token1 per 1 token0
   if (!Number.isFinite(P) || P <= 0) return null
-  const a0 = anchors[pool.token0.toLowerCase()]
-  const a1 = anchors[pool.token1.toLowerCase()]
-  if (a0 !== undefined && a0 > 0) return { p0: a0, p1: a0 / P }
-  if (a1 !== undefined && a1 > 0) return { p0: P * a1, p1: a1 }
-  return null
+  const stable = ADDR.STABLE.toLowerCase()
+  const t0 = pool.token0.toLowerCase()
+  const t1 = pool.token1.toLowerCase()
+  const a0 = anchors[t0]
+  const a1 = anchors[t1]
+  const from0: ClTokenUsd | null =
+    a0 !== undefined && a0 > 0 ? { p0: a0, p1: a0 / P, anchor: 0, exact: t0 === stable } : null
+  const from1: ClTokenUsd | null =
+    a1 !== undefined && a1 > 0 ? { p0: P * a1, p1: a1, anchor: 1, exact: t1 === stable } : null
+  if (from1?.exact) return from1
+  return from0 ?? from1
 }
 
 export type AddSim = {
@@ -126,7 +155,7 @@ export function simulateClAdd(args: {
   const feeApr =
     args.stat?.vol24hUsd == null
       ? NaN
-      : ((args.stat.vol24hUsd * 365 * (pool.feePpm / 1e6) * keep * feeShare) / depositUsd) * 100
+      : ((args.stat.vol24hUsd * 365 * (effectiveClFeePpm(pool) / 1e6) * keep * feeShare) / depositUsd) * 100
   const emitApr =
     !args.upUsd || !isEmitting(pool)
       ? NaN

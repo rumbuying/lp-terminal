@@ -9,7 +9,7 @@ import { CHAIN_ID } from '../../config/addresses'
 import { explorerOf, type ResolvedIntent } from '../../config/bridge'
 import { asConfiguredChain, wagmiConfig } from '../../config/wagmi'
 import { t } from '../../i18n'
-import { invalidateAll, shortErr, step } from '../tx'
+import { shortErr, step } from '../tx'
 import { txlog } from '../txlog'
 import { fmtEtaShort, pendingBridges, type PendingTracker } from './pending'
 import { parseEthDepositReceipt } from './portal'
@@ -66,7 +66,11 @@ export async function executeBridge(
           value: s.value,
           chainId: asConfiguredChain(s.chainId),
         }),
-      { chainId: asConfiguredChain(s.chainId), explorer: explorerOf(s.chainId) },
+      {
+        chainId: asConfiguredChain(s.chainId),
+        explorer: explorerOf(s.chainId),
+        invalidate: s.kind === 'approve' ? 'none' : 'balances',
+      },
     )
     if (!rcpt) return null
     if (s.kind === 'deposit') depositRcpt = rcpt
@@ -98,6 +102,5 @@ export async function executeBridge(
       /* user declined — the header banner will offer the switch */
     }
   }
-  invalidateAll()
   return 'sent'
 }

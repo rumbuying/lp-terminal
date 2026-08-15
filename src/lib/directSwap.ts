@@ -1,4 +1,5 @@
 import {
+  encodePacked,
   encodeFunctionData,
   getAddress,
   zeroAddress,
@@ -8,6 +9,7 @@ import {
 } from 'viem'
 import {
   clSwapRouterAbi,
+  clSwapRouterFeeAbi,
   quoterAbi,
   uniSwapRouterAbi,
   uniV2FactoryAbi,
@@ -15,23 +17,87 @@ import {
   uniV3FactoryAbi,
   uniV3QuoterAbi,
 } from '../abi'
-import { ADDR, NATIVE, UNI } from '../config/addresses'
+import { ADDR, CONNECTORS, NATIVE, UNI } from '../config/addresses'
+import { CHAIN } from '../config/chains'
+import { HOME_CL_FEES, HOME_CL_FEE_KEYED } from './homeCl'
+import {
+  UNI_V4,
+  UNI_V4_RUNGS,
+  encodeV4Swap,
+  universalRouterAbi,
+  v4Currency,
+  v4PoolId,
+  v4PoolKey,
+  v4QuoterAbi,
+  v4StateViewAbi,
+  v4ZeroForOne,
+} from './uniV4'
 import type { Pool } from '../types'
 
-export type DirectProtocol = 'uniswap' | 'up33'
-type UniV2Route = { protocol: 'uniswap'; kind: 'v2'; feePpm: 3000 }
+/**
+ * Which venue slot a route belongs to. This is the DEX brand, not the pool
+ * family: each slot holds every `kind` that venue offers, and the best of them
+ * is what the swap tab shows on that venue's row. Adding a pool family to a
+ * venue therefore widens `kind`, never this.
+ */
+export type DirectProtocol = 'uniswap' | 'home'
+/**
+ * A vanilla Uniswap-v2 pair, on either venue slot.
+ *
+ * The fee is not a constant across venues — Pancake's pairs charge 25 bps where
+ * Uniswap's charge 30 — so it travels with the route and assertRoute checks it
+ * against the venue that route claims to be on.
+ */
+type V2Route = {
+  protocol: DirectProtocol
+  kind: 'v2'
+  feePpm: number
+  connector?: Address
+}
 type UniV3Route = {
   protocol: 'uniswap'
   kind: 'v3'
-  feePpm: 100 | 500 | 3000 | 10000
+  // the ladder is per-chain (CHAIN.uniV3Fees), so this cannot be a literal
+  // union — assertRoute checks membership against the active chain's rungs.
+  feePpm: number
+  connector?: Address
+  secondFeePpm?: number
 }
-type Up33ClRoute = {
-  protocol: 'up33'
+/**
+ * The home DEX's CL leg. The two shapes are NOT interchangeable — encoding a
+ * tick-spacing route against a fee-keyed router would put a tick spacing where
+ * a fee tier belongs and hit the wrong pool, or none — so each route carries
+ * the shape it was discovered under, and assertRoute refuses a mismatch.
+ */
+type HomeClRouteTickSpacing = {
+  protocol: 'home'
   kind: 'cl'
+  keyedBy: 'tickSpacing'
   tickSpacing: number
   feePpm: number
 }
-export type DirectRoute = UniV2Route | UniV3Route | Up33ClRoute
+type HomeClRouteFee = {
+  protocol: 'home'
+  kind: 'cl'
+  keyedBy: 'fee'
+  feePpm: number
+}
+export type HomeClRoute = HomeClRouteTickSpacing | HomeClRouteFee
+/**
+ * A Uniswap v4 pool.
+ *
+ * Unlike every other kind, the pool is not addressed — it is named by the hash
+ * of its key, so the key travels whole. `tickSpacing` is an independent field
+ * here rather than a consequence of the fee, and both are needed to reproduce
+ * the id, so neither can be dropped.
+ */
+type UniV4Route = {
+  protocol: 'uniswap'
+  kind: 'v4'
+  feePpm: number
+  tickSpacing: number
+}
+export type DirectRoute = V2Route | UniV3Route | HomeClRoute | UniV4Route
 
 export type DirectCandidate = {
   route: DirectRoute
@@ -43,7 +109,8 @@ export type DirectQuotes = {
   best: DirectCandidate | null
   byProtocol: Record<DirectProtocol, DirectCandidate | null>
   status: Record<DirectProtocol, 'quoted' | 'absent' | 'failed'>
-  /** probe-derived fee-free V2 price when resolution permits — the fallback cost denominator */
+  /** Fee-free fallback denominator. Direct Quoters do not expose enough pool
+   * state for an exact counterfactual, so this is currently always null. */
   midOut: bigint | null
 }
 
@@ -51,23 +118,49 @@ type DirectTransaction = {
   to: Address
   data: Hex
   value: bigint
+  /** who to approve `inputToken` to — for a v4 route this is Permit2, not the router */
   spender: Address | null
   inputToken: Address | null
   outputToken: Address | null
+  /**
+   * The operator that must additionally hold a PERMIT2 allowance before the
+   * swap can pull the input, or null when approving `spender` is the whole
+   * story. UniversalRouter never reads a plain ERC-20 allowance — it pulls
+   * through Permit2 — so a v4 route needs both legs: the token approved to
+   * Permit2, and Permit2 approved to the router.
+   */
+  permit2Operator: Address | null
 }
 
-const UNI_V3_FEES = [100, 500, 3000, 10000] as const
-const UNI_ROUTES: readonly DirectRoute[] = [
-  { protocol: 'uniswap', kind: 'v2', feePpm: 3000 },
-  ...UNI_V3_FEES.map((feePpm) => ({ protocol: 'uniswap' as const, kind: 'v3' as const, feePpm })),
-]
+const UNI_V3_FEES = CHAIN.uniV3Fees
+const UNI_CONNECTORS = CONNECTORS
+/**
+ * Uniswap v2's LP fee is 0.30% at every deployment — it is compiled into the
+ * pair, not configured — so it is a constant here rather than a chain field
+ * that could only ever hold one value. chain-check re-measures it from the
+ * router on each chain so the claim keeps being tested rather than trusted.
+ */
+const UNI_V2_FEE_PPM = 3000
+/** the home DEX's v2 leg, or null on a chain whose v2 we cannot encode */
+const HOME_V2 = CHAIN.homeV2
+
+/** the LP fee a venue's v2 pairs charge, or null where it has no v2 leg */
+function v2FeePpm(protocol: DirectProtocol): number | null {
+  return protocol === 'uniswap' ? UNI_V2_FEE_PPM : HOME_V2?.feePpm ?? null
+}
+
+/** where a v2 leg is quoted (getAmountsOut) and where it is executed */
+function v2Routers(protocol: DirectProtocol): { quoter: Address; swap: Address } | null {
+  if (protocol === 'uniswap') return { quoter: UNI.V2_ROUTER, swap: UNI.V3_SWAP_ROUTER }
+  return HOME_V2 ? { quoter: ADDR.V2_ROUTER, swap: HOME_V2.SWAP_ROUTER } : null
+}
 
 export function isNative(address?: Address): boolean {
   return !!address && address.toLowerCase() === NATIVE.toLowerCase()
 }
 
 export function erc20Of(address: Address): Address {
-  return isNative(address) ? ADDR.WETH : getAddress(address)
+  return isNative(address) ? ADDR.WNATIVE : getAddress(address)
 }
 
 function assertFeeBps(feeBps: number): void {
@@ -89,29 +182,104 @@ export function grossMinimumForNet(netAmount: bigint, feeBps: number): bigint {
   return ((netAmount - 1n) * 10_000n) / BigInt(10_000 - feeBps) + 1n
 }
 
+function isUniConnector(address: Address): boolean {
+  return UNI_CONNECTORS.some((connector) => connector.toLowerCase() === address.toLowerCase())
+}
+
 function assertRoute(route: DirectRoute): void {
-  if (route.protocol === 'uniswap' && route.kind === 'v2' && route.feePpm === 3000) return
+  // A v2 route must carry the fee of the venue it claims to be on. A Pancake
+  // route bearing Uniswap's 3000 would net out the wrong minimum, and on a
+  // chain whose home v2 we cannot encode, v2FeePpm is null and no home-v2 route
+  // can validate at all.
   if (
-    route.protocol === 'uniswap' &&
-    route.kind === 'v3' &&
-    UNI_V3_FEES.includes(route.feePpm)
+    route.kind === 'v2' &&
+    route.feePpm === v2FeePpm(route.protocol) &&
+    (!route.connector || isUniConnector(route.connector))
+  ) {
+    return
+  }
+  // A v4 route must name a rung this chain probes. The pair (fee, tickSpacing)
+  // is part of the pool's identity, so a route carrying a spacing the ladder
+  // does not pair with that fee would hash to a pool nobody created.
+  if (
+    route.kind === 'v4' &&
+    UNI_V4 !== null &&
+    UNI_V4_RUNGS.some(
+      ({ fee, tickSpacing }) => fee === route.feePpm && tickSpacing === route.tickSpacing,
+    )
   ) {
     return
   }
   if (
-    route.protocol === 'up33' &&
+    route.protocol === 'uniswap' &&
+    route.kind === 'v3' &&
+    UNI_V3_FEES.includes(route.feePpm) &&
+    (
+      (!route.connector && route.secondFeePpm === undefined) ||
+      (
+        !!route.connector &&
+        isUniConnector(route.connector) &&
+        route.secondFeePpm !== undefined &&
+        UNI_V3_FEES.includes(route.secondFeePpm)
+      )
+    )
+  ) {
+    return
+  }
+  if (
+    route.protocol === 'home' &&
     route.kind === 'cl' &&
-    Number.isInteger(route.tickSpacing) &&
-    route.tickSpacing !== 0 &&
+    // a route discovered under the other shape cannot be encoded here
+    route.keyedBy === CHAIN.homeCl.keyedBy &&
     Number.isInteger(route.feePpm) &&
     route.feePpm > 0 &&
     // A route cannot execute at a 100% LP fee. Discovery filters these out;
     // this also covers routes handed in directly.
-    route.feePpm < 1_000_000
+    route.feePpm < 1_000_000 &&
+    (route.keyedBy === 'fee'
+      ? HOME_CL_FEES.includes(route.feePpm)
+      : Number.isInteger(route.tickSpacing) && route.tickSpacing !== 0)
   ) {
     return
   }
   throw new Error('Unsupported direct route')
+}
+
+export function directRouteFeePpm(route: DirectRoute): number {
+  assertRoute(route)
+  // a two-hop v2 route pays its venue's fee once per pair, whatever that fee is
+  if (route.kind === 'v2') return route.connector ? route.feePpm * 2 : route.feePpm
+  if (route.kind === 'cl' || route.kind === 'v4') return route.feePpm
+  return route.feePpm + (route.secondFeePpm ?? 0)
+}
+
+function swapPath(
+  route: V2Route | UniV3Route,
+  tokenIn: Address,
+  tokenOut: Address,
+): readonly [Address, Address] | readonly [Address, Address, Address] {
+  const input = erc20Of(tokenIn)
+  const output = erc20Of(tokenOut)
+  if (!route.connector) return [input, output]
+  const connector = getAddress(route.connector)
+  if (
+    connector.toLowerCase() === input.toLowerCase() ||
+    connector.toLowerCase() === output.toLowerCase()
+  ) {
+    throw new Error('Route connector must differ from both swap endpoints')
+  }
+  return [input, connector, output]
+}
+
+function v3Path(route: UniV3Route, tokenIn: Address, tokenOut: Address): Hex {
+  const path = swapPath(route, tokenIn, tokenOut)
+  if (path.length !== 3 || route.secondFeePpm === undefined) {
+    throw new Error('Uniswap V3 multihop route is incomplete')
+  }
+  return encodePacked(
+    ['address', 'uint24', 'address', 'uint24', 'address'],
+    [path[0], route.feePpm, path[1], route.secondFeePpm, path[2]],
+  )
 }
 
 function matchesPair(pool: Pool, tokenIn: Address, tokenOut: Address): boolean {
@@ -122,14 +290,20 @@ function matchesPair(pool: Pool, tokenIn: Address, tokenOut: Address): boolean {
   return (token0 === input && token1 === output) || (token0 === output && token1 === input)
 }
 
-function up33Routes(pools: readonly Pool[], tokenIn: Address, tokenOut: Address): DirectRoute[] {
+/**
+ * Tick-spacing-keyed home CL (Slipstream): the spacings in use are not a fixed
+ * ladder, so routes come from the enumerated pool list rather than from probing
+ * a factory. A fee-keyed home CL is discovered on-chain instead — see
+ * directRoutes.
+ */
+function homeClRoutes(pools: readonly Pool[], tokenIn: Address, tokenOut: Address): DirectRoute[] {
   const seen = new Set<string>()
-  const routes: Up33ClRoute[] = []
+  const routes: HomeClRouteTickSpacing[] = []
 
   for (const pool of pools) {
     if (
       pool.kind !== 'cl' ||
-      pool.protocol !== 'up33' ||
+      pool.protocol !== 'home' ||
       !matchesPair(pool, tokenIn, tokenOut) ||
       !Number.isInteger(pool.tickSpacing) ||
       pool.tickSpacing === 0 ||
@@ -143,8 +317,9 @@ function up33Routes(pools: readonly Pool[], tokenIn: Address, tokenOut: Address)
     if (seen.has(key)) continue
     seen.add(key)
     routes.push({
-      protocol: 'up33',
+      protocol: 'home',
       kind: 'cl',
+      keyedBy: 'tickSpacing',
       tickSpacing: pool.tickSpacing,
       feePpm: pool.feePpm,
     })
@@ -157,6 +332,11 @@ type RouteDiscovery = {
   failedProtocols: Set<DirectProtocol>
 }
 
+type RouteCandidate = {
+  route: DirectRoute
+  poolIndexes: readonly number[]
+}
+
 async function directRoutes(
   client: PublicClient,
   pools: readonly Pool[] | null,
@@ -165,36 +345,194 @@ async function directRoutes(
 ): Promise<RouteDiscovery> {
   const input = erc20Of(tokenIn)
   const output = erc20Of(tokenOut)
-  const contracts = [
-    {
+  const contracts: unknown[] = []
+  const poolIndexes = new Map<string, number>()
+  const canonicalEdge = (a: Address, b: Address): string => {
+    const left = a.toLowerCase()
+    const right = b.toLowerCase()
+    return left < right ? `${left}:${right}` : `${right}:${left}`
+  }
+  // Home probes ride the same multicall but are tracked separately: one
+  // venue's RPC failure must not mark the other's routes unavailable.
+  const homeIndexes = new Set<number>()
+  const v2PoolIndex = (protocol: DirectProtocol, a: Address, b: Address): number => {
+    const key = `v2:${protocol}:${canonicalEdge(a, b)}`
+    const existing = poolIndexes.get(key)
+    if (existing !== undefined) return existing
+    const index = contracts.length
+    contracts.push({
       abi: uniV2FactoryAbi,
-      address: UNI.V2_FACTORY,
+      address: protocol === 'uniswap' ? UNI.V2_FACTORY : ADDR.V2_FACTORY,
       functionName: 'getPair',
-      args: [input, output],
-    },
-    ...UNI_V3_FEES.map((fee) => ({
+      args: [a, b],
+    })
+    poolIndexes.set(key, index)
+    if (protocol === 'home') homeIndexes.add(index)
+    return index
+  }
+  const homeClPoolIndex = (a: Address, b: Address, fee: number): number => {
+    const key = `home:${canonicalEdge(a, b)}:${fee}`
+    const existing = poolIndexes.get(key)
+    if (existing !== undefined) return existing
+    const index = contracts.length
+    contracts.push({
+      abi: uniV3FactoryAbi,
+      address: ADDR.CL_FACTORY,
+      functionName: 'getPool',
+      args: [a, b, fee],
+    })
+    poolIndexes.set(key, index)
+    homeIndexes.add(index)
+    return index
+  }
+  // v4 has no factory to ask, so the pool's name is computed here and the
+  // singleton is asked whether that name is initialised. Note the currencies
+  // are the v4 ones — the native coin stays address(0) rather than being
+  // folded onto its wrapper, because those are different pools.
+  const v4CurrencyIn = v4Currency(tokenIn)
+  const v4CurrencyOut = v4Currency(tokenOut)
+  const v4PoolIndex = (fee: number, tickSpacing: number): number => {
+    const key = `v4:${canonicalEdge(v4CurrencyIn, v4CurrencyOut)}:${fee}:${tickSpacing}`
+    const existing = poolIndexes.get(key)
+    if (existing !== undefined) return existing
+    const index = contracts.length
+    contracts.push({
+      abi: v4StateViewAbi,
+      address: UNI_V4!.STATE_VIEW,
+      functionName: 'getSlot0',
+      args: [v4PoolId(v4PoolKey(v4CurrencyIn, v4CurrencyOut, fee, tickSpacing))],
+    })
+    poolIndexes.set(key, index)
+    v4Indexes.add(index)
+    return index
+  }
+  const v4Indexes = new Set<number>()
+  const v3PoolIndex = (a: Address, b: Address, fee: (typeof UNI_V3_FEES)[number]): number => {
+    const key = `v3:${canonicalEdge(a, b)}:${fee}`
+    const existing = poolIndexes.get(key)
+    if (existing !== undefined) return existing
+    const index = contracts.length
+    contracts.push({
       abi: uniV3FactoryAbi,
       address: UNI.V3_FACTORY,
-      functionName: 'getPool' as const,
-      args: [input, output, fee],
+      functionName: 'getPool',
+      args: [a, b, fee],
+    })
+    poolIndexes.set(key, index)
+    return index
+  }
+
+  const candidates: RouteCandidate[] = [
+    {
+      route: { protocol: 'uniswap', kind: 'v2', feePpm: UNI_V2_FEE_PPM },
+      poolIndexes: [v2PoolIndex('uniswap', input, output)],
+    },
+    ...UNI_V3_FEES.map((feePpm): RouteCandidate => ({
+      route: { protocol: 'uniswap', kind: 'v3', feePpm },
+      poolIndexes: [v3PoolIndex(input, output, feePpm)],
     })),
+    // v4 sits on the Uniswap slot beside v3, direct pairs only: a multi-hop v4
+    // route is a PathKey list rather than a second pool probe, so connectors
+    // are left to the v2/v3 legs until that encoding exists.
+    ...(UNI_V4
+      ? UNI_V4_RUNGS.map(({ fee, tickSpacing }): RouteCandidate => ({
+          route: { protocol: 'uniswap', kind: 'v4', feePpm: fee, tickSpacing },
+          poolIndexes: [v4PoolIndex(fee, tickSpacing)],
+        }))
+      : []),
   ]
+  const connectors = UNI_CONNECTORS.filter(
+    (connector) =>
+      connector.toLowerCase() !== input.toLowerCase() &&
+      connector.toLowerCase() !== output.toLowerCase(),
+  )
+  for (const connector of connectors) {
+    candidates.push({
+      route: { protocol: 'uniswap', kind: 'v2', feePpm: UNI_V2_FEE_PPM, connector },
+      poolIndexes: [v2PoolIndex('uniswap', input, connector), v2PoolIndex('uniswap', connector, output)],
+    })
+    for (const feePpm of UNI_V3_FEES) {
+      const firstPool = v3PoolIndex(input, connector, feePpm)
+      for (const secondFeePpm of UNI_V3_FEES) {
+        candidates.push({
+          route: {
+            protocol: 'uniswap',
+            kind: 'v3',
+            feePpm,
+            connector,
+            secondFeePpm,
+          },
+          poolIndexes: [
+            firstPool,
+            v3PoolIndex(connector, output, secondFeePpm),
+          ],
+        })
+      }
+    }
+  }
+
+  // A fee-keyed home CL has a fixed fee ladder, so its pools are found the same
+  // way Uniswap's are — by asking the factory — and need no pool list. Direct
+  // pairs only, matching what the tick-spacing path builds.
+  const homeCandidates: RouteCandidate[] = HOME_CL_FEE_KEYED
+    ? HOME_CL_FEES.map((feePpm): RouteCandidate => ({
+        route: { protocol: 'home', kind: 'cl', keyedBy: 'fee', feePpm },
+        poolIndexes: [homeClPoolIndex(input, output, feePpm)],
+      }))
+    : []
+  // The home v2 leg, where the chain has one we can encode. It is probed like
+  // Uniswap's — same factory call, its own factory — and carries connectors for
+  // the same reason: on BSC the deepest bStock markets are paired against the
+  // stable, not against whatever the user happens to be selling.
+  if (HOME_V2) {
+    homeCandidates.push({
+      route: { protocol: 'home', kind: 'v2', feePpm: HOME_V2.feePpm },
+      poolIndexes: [v2PoolIndex('home', input, output)],
+    })
+    for (const connector of connectors) {
+      homeCandidates.push({
+        route: { protocol: 'home', kind: 'v2', feePpm: HOME_V2.feePpm, connector },
+        poolIndexes: [v2PoolIndex('home', input, connector), v2PoolIndex('home', connector, output)],
+      })
+    }
+  }
+
   const discovery = (await client.multicall({
     contracts: contracts as never,
   })) as MulticallResult[]
   const failedProtocols = new Set<DirectProtocol>()
-  const uniswapDiscoveryFailed = discovery.some(({ status }) => status === 'failure')
+  const uniswapDiscoveryFailed = discovery.some(
+    ({ status }, i) => status === 'failure' && !homeIndexes.has(i),
+  )
   if (uniswapDiscoveryFailed) failedProtocols.add('uniswap')
-  if (pools === null) failedProtocols.add('up33')
+  // A failed home probe is a home failure whatever it was probing for; a
+  // missing pool list only fails the shape that needs one (tick-spacing CL).
+  if ([...homeIndexes].some((i) => discovery[i]?.status === 'failure')) failedProtocols.add('home')
+  if (!HOME_CL_FEE_KEYED && pools === null) failedProtocols.add('home')
 
-  const uniswap = uniswapDiscoveryFailed
-    ? []
-    : UNI_ROUTES.filter((_, index) => {
-        const address = discovery[index].result as Address
-        return address.toLowerCase() !== zeroAddress
-      })
-  const up33 = pools === null ? [] : up33Routes(pools, tokenIn, tokenOut)
-  return { routes: [...uniswap, ...up33], failedProtocols }
+  const hasPool = (index: number): boolean => {
+    const result = discovery[index]
+    if (result.status !== 'success') return false
+    // v4 answers with slot0, not an address — an uninitialised pool reports a
+    // zero sqrt price, and there is no pool contract to point at. The shape is
+    // checked rather than assumed: destructuring a non-tuple result would read
+    // its first CHARACTER, and any non-zero character reads as "pool exists".
+    if (v4Indexes.has(index)) {
+      const slot0 = result.result
+      if (!Array.isArray(slot0)) return false
+      return (slot0[0] as bigint) !== 0n
+    }
+    return (result.result as Address).toLowerCase() !== zeroAddress
+  }
+  const survived = ({ poolIndexes: indexes }: RouteCandidate) => indexes.every(hasPool)
+  const uniswap = candidates.filter(survived).map(({ route }) => route)
+  // Probed home routes (fee-keyed CL, and v2 wherever we can encode it) plus,
+  // on a tick-spacing chain, the CL routes that can only come from a pool list.
+  const home: DirectRoute[] = [
+    ...homeCandidates.filter(survived).map(({ route }) => route),
+    ...(HOME_CL_FEE_KEYED || pools === null ? [] : homeClRoutes(pools, tokenIn, tokenOut)),
+  ]
+  return { routes: [...uniswap, ...home], failedProtocols }
 }
 
 function quoteContract(
@@ -205,20 +543,62 @@ function quoteContract(
 ) {
   const input = erc20Of(tokenIn)
   const output = erc20Of(tokenOut)
-  if (route.protocol === 'uniswap' && route.kind === 'v2') {
+  if (route.kind === 'v2') {
+    // getAmountsOut lives on the plain v2 router, on both venues — the
+    // SwapRouter02-shaped router that EXECUTES the leg does not carry it.
+    const routers = v2Routers(route.protocol)
+    if (!routers) throw new Error('Unsupported direct route')
     return {
       abi: uniV2RouterAbi,
-      address: UNI.V2_ROUTER,
+      address: routers.quoter,
       functionName: 'getAmountsOut',
-      args: [amountIn, [input, output]],
+      args: [amountIn, swapPath(route, tokenIn, tokenOut)],
+    } as const
+  }
+  if (route.kind === 'v4') {
+    // the quoter takes the whole pool key, because that IS the pool's identity
+    const currencyIn = v4Currency(tokenIn)
+    const key = v4PoolKey(currencyIn, v4Currency(tokenOut), route.feePpm, route.tickSpacing)
+    return {
+      abi: v4QuoterAbi,
+      address: UNI_V4!.QUOTER,
+      functionName: 'quoteExactInputSingle',
+      args: [
+        {
+          poolKey: key,
+          zeroForOne: v4ZeroForOne(key, currencyIn),
+          exactAmount: amountIn,
+          hookData: '0x',
+        },
+      ],
     } as const
   }
   if (route.protocol === 'uniswap') {
+    if (route.connector) {
+      return {
+        abi: uniV3QuoterAbi,
+        address: UNI.V3_QUOTER,
+        functionName: 'quoteExactInput',
+        args: [v3Path(route, tokenIn, tokenOut), amountIn],
+      } as const
+    }
     return {
       abi: uniV3QuoterAbi,
       address: UNI.V3_QUOTER,
       functionName: 'quoteExactInputSingle',
       args: [{ tokenIn: input, tokenOut: output, amountIn, fee: route.feePpm, sqrtPriceLimitX96: 0n }],
+    } as const
+  }
+  // The home CL's quoter takes the pool key in whichever unit this chain's
+  // protocol uses; the two structs are otherwise identical.
+  if (route.keyedBy === 'fee') {
+    return {
+      abi: uniV3QuoterAbi,
+      address: ADDR.CL_QUOTER,
+      functionName: 'quoteExactInputSingle',
+      args: [
+        { tokenIn: input, tokenOut: output, amountIn, fee: route.feePpm, sqrtPriceLimitX96: 0n },
+      ],
     } as const
   }
   return {
@@ -257,11 +637,12 @@ function quoteStatus(
 
 function quotedAmount(route: DirectRoute, result: MulticallResult): bigint | null {
   if (result.status !== 'success') return null
-  if (route.protocol === 'uniswap' && route.kind === 'v2') {
+  if (route.kind === 'v2') {
     const amounts = result.result as readonly bigint[]
     return amounts.at(-1) ?? null
   }
-  const [amountOut] = result.result as readonly [bigint, bigint, number, bigint]
+  // every remaining quoter reports the output amount first, whatever trails it
+  const [amountOut] = result.result as readonly [bigint, ...unknown[]]
   return amountOut
 }
 
@@ -270,19 +651,6 @@ export function impactBps(amountIn: bigint, amountOut: bigint, probeIn: bigint, 
   const fullRate = amountOut * probeIn
   if (fullRate >= probeRate) return 0
   return Number(((probeRate - fullRate) * 10_000n + probeRate - 1n) / probeRate)
-}
-
-/** `amountIn` at a V2 probe's fee-free price. Reject probe rounding that cannot
- * place the baseline at or above every full-size gross output.
- * V3/CL Quoters do not expose enough fee information to reconstruct one. */
-function midAmountOut(
-  probe: { out: bigint; feePpm: number },
-  probeIn: bigint,
-  amountIn: bigint,
-  maxGrossAmountOut: bigint,
-): bigint | null {
-  const midOut = (probe.out * 1_000_000n * amountIn) / (BigInt(1_000_000 - probe.feePpm) * probeIn)
-  return midOut >= maxGrossAmountOut ? midOut : null
 }
 
 async function quoteRoutes(
@@ -311,8 +679,6 @@ async function quoteRoutes(
   const candidates: DirectCandidate[] = []
   const failedProtocols = new Set<DirectProtocol>()
   const stride = hasProbe ? 2 : 1
-  const probes: { out: bigint; route: DirectRoute }[] = []
-  let maxGrossAmountOut = 0n
 
   routes.forEach((route, index) => {
     const grossAmountOut = quotedAmount(route, results[index * stride])
@@ -320,9 +686,7 @@ async function quoteRoutes(
       failedProtocols.add(route.protocol)
       return
     }
-    if (grossAmountOut > maxGrossAmountOut) maxGrossAmountOut = grossAmountOut
     const probeAmountOut = hasProbe ? quotedAmount(route, results[index * stride + 1]) : null
-    if (probeAmountOut) probes.push({ out: probeAmountOut, route })
     candidates.push({
       route,
       amountOut: netAfterFee(grossAmountOut, feeBps),
@@ -336,15 +700,14 @@ async function quoteRoutes(
     if (b.impactBps === null) return -1
     return a.impactBps - b.impactBps
   })
-  // Every route probed the same probeIn, so the outputs rank directly. Only V2
-  // exposes enough information to undo its fee exactly on the direct path.
-  const winner = probes.length ? probes.reduce((a, b) => (b.out > a.out ? b : a)) : null
+  // A fee-bearing Quoter result is not enough to reconstruct the fee-free
+  // input to a nonlinear AMM. Keep the raw probe for per-route size impact,
+  // but do not manufacture the shared fee-free denominator by dividing by
+  // (1-fee). The solver path can provide one because it owns snapshot state
+  // and replays the exact executable route counterfactually.
   return {
     candidates,
-    midOut:
-      winner?.route.kind === 'v2'
-        ? midAmountOut({ out: winner.out, feePpm: winner.route.feePpm }, probeIn, amountIn, maxGrossAmountOut)
-        : null,
+    midOut: null,
     failedProtocols,
   }
 }
@@ -372,14 +735,14 @@ export async function quoteDirectCandidates(
   ])
   const status = {
     uniswap: quoteStatus('uniswap', quoted.candidates, failedProtocols),
-    up33: quoteStatus('up33', quoted.candidates, failedProtocols),
+    home: quoteStatus('home', quoted.candidates, failedProtocols),
   }
   const candidates = quoted.candidates.filter(({ route }) => status[route.protocol] === 'quoted')
   return {
     best: candidates[0] ?? null,
     byProtocol: {
       uniswap: candidates.find(({ route }) => route.protocol === 'uniswap') ?? null,
-      up33: candidates.find(({ route }) => route.protocol === 'up33') ?? null,
+      home: candidates.find(({ route }) => route.protocol === 'home') ?? null,
     },
     status,
     midOut: quoted.midOut,
@@ -400,7 +763,7 @@ export async function quoteDirectRoute(
 }
 
 function feeSettlement(
-  abi: typeof uniSwapRouterAbi | typeof clSwapRouterAbi,
+  abi: typeof uniSwapRouterAbi | typeof clSwapRouterAbi | typeof clSwapRouterFeeAbi,
   tokenOut: Address,
   grossMinimum: bigint,
   recipient: Address,
@@ -458,29 +821,101 @@ export function buildDirectTransaction(args: {
   const grossMinimum = grossMinimumForNet(args.minimumAmountOut, args.fee.bps)
   const nativeInput = isNative(args.tokenIn)
 
+  // v4: no router-custody hop and no sweep. The pool key IS the pool, the
+  // terminal fee comes off the output delta with TAKE_PORTION, and ERC-20
+  // input is pulled through Permit2 rather than a plain allowance.
+  if (args.route.kind === 'v4') {
+    const currencyIn = v4Currency(args.tokenIn)
+    const currencyOut = v4Currency(args.tokenOut)
+    const key = v4PoolKey(currencyIn, currencyOut, args.route.feePpm, args.route.tickSpacing)
+    const { commands, inputs } = encodeV4Swap({
+      key,
+      zeroForOne: v4ZeroForOne(key, currencyIn),
+      amountIn: args.amountIn,
+      grossMinimumOut: grossMinimum,
+      recipient: args.recipient,
+      fee: args.fee,
+    })
+    return {
+      to: UNI_V4!.UNIVERSAL_ROUTER,
+      data: encodeFunctionData({
+        abi: universalRouterAbi,
+        functionName: 'execute',
+        args: [commands, inputs as Hex[], args.deadline],
+      }),
+      value: nativeInput ? args.amountIn : 0n,
+      spender: nativeInput ? null : UNI_V4!.PERMIT2,
+      inputToken: nativeInput ? null : tokenIn,
+      outputToken: isNative(args.tokenOut) ? null : tokenOut,
+      permit2Operator: nativeInput ? null : UNI_V4!.UNIVERSAL_ROUTER,
+    }
+  }
+
+  // A v2 leg executes on whichever SwapRouter02-shaped router the venue owns —
+  // Uniswap's own on one slot, Pancake's SmartRouter on the other. Both carry
+  // the identical surface, so one ABI encodes the swap and its settlement for
+  // either. The plain v2 router is deliberately not used: it has no sweep
+  // fragment, so the terminal fee could not settle in the same transaction.
+  if (args.route.kind === 'v2') {
+    const routers = v2Routers(args.route.protocol)
+    if (!routers) throw new Error('Unsupported direct route')
+    const router = routers.swap
+    const swap = encodeFunctionData({
+      abi: uniSwapRouterAbi,
+      functionName: 'swapExactTokensForTokens',
+      args: [
+        args.amountIn,
+        grossMinimum,
+        swapPath(args.route, args.tokenIn, args.tokenOut),
+        router,
+      ],
+    })
+    const settle = feeSettlement(uniSwapRouterAbi, args.tokenOut, grossMinimum, args.recipient, args.fee)
+    return {
+      to: router,
+      data: encodeFunctionData({
+        abi: uniSwapRouterAbi,
+        functionName: 'multicall',
+        args: [args.deadline, [swap, settle]],
+      }),
+      value: nativeInput ? args.amountIn : 0n,
+      spender: nativeInput ? null : router,
+      inputToken: nativeInput ? null : tokenIn,
+      outputToken: isNative(args.tokenOut) ? null : tokenOut,
+      // SwapRouter02 pulls with a plain transferFrom
+      permit2Operator: null,
+    }
+  }
+
   if (args.route.protocol === 'uniswap') {
-    const swap =
-      args.route.kind === 'v2'
-        ? encodeFunctionData({
-            abi: uniSwapRouterAbi,
-            functionName: 'swapExactTokensForTokens',
-            args: [args.amountIn, grossMinimum, [tokenIn, tokenOut], UNI.V3_SWAP_ROUTER],
-          })
-        : encodeFunctionData({
-            abi: uniSwapRouterAbi,
-            functionName: 'exactInputSingle',
-            args: [
-              {
-                tokenIn,
-                tokenOut,
-                fee: args.route.feePpm,
-                recipient: UNI.V3_SWAP_ROUTER,
-                amountIn: args.amountIn,
-                amountOutMinimum: grossMinimum,
-                sqrtPriceLimitX96: 0n,
-              },
-            ],
-          })
+    const swap = args.route.connector
+      ? encodeFunctionData({
+          abi: uniSwapRouterAbi,
+          functionName: 'exactInput',
+          args: [
+            {
+              path: v3Path(args.route, args.tokenIn, args.tokenOut),
+              recipient: UNI.V3_SWAP_ROUTER,
+              amountIn: args.amountIn,
+              amountOutMinimum: grossMinimum,
+            },
+          ],
+        })
+      : encodeFunctionData({
+          abi: uniSwapRouterAbi,
+          functionName: 'exactInputSingle',
+          args: [
+            {
+              tokenIn,
+              tokenOut,
+              fee: args.route.feePpm,
+              recipient: UNI.V3_SWAP_ROUTER,
+              amountIn: args.amountIn,
+              amountOutMinimum: grossMinimum,
+              sqrtPriceLimitX96: 0n,
+            },
+          ],
+        })
     const settle = feeSettlement(
       uniSwapRouterAbi,
       args.tokenOut,
@@ -499,45 +934,59 @@ export function buildDirectTransaction(args: {
       spender: nativeInput ? null : UNI.V3_SWAP_ROUTER,
       inputToken: nativeInput ? null : tokenIn,
       outputToken: isNative(args.tokenOut) ? null : tokenOut,
+      permit2Operator: null,
     }
   }
 
-  const swap = encodeFunctionData({
-    abi: clSwapRouterAbi,
-    functionName: 'exactInputSingle',
-    args: [
-      {
-        tokenIn,
-        tokenOut,
-        tickSpacing: args.route.tickSpacing,
-        recipient: zeroAddress,
-        deadline: args.deadline,
-        amountIn: args.amountIn,
-        amountOutMinimum: grossMinimum,
-        sqrtPriceLimitX96: 0n,
-      },
-    ],
-  })
-  const settle = feeSettlement(
-    clSwapRouterAbi,
-    args.tokenOut,
-    grossMinimum,
-    args.recipient,
-    args.fee,
-  )
+  // Both home-CL routers are the SwapRouter-v1 shape — deadline inside the
+  // struct, multicall(bytes[]) — and differ only in the pool-key field, so the
+  // ABI is picked once here and used for the swap AND its settlement.
+  const routerAbi = args.route.keyedBy === 'fee' ? clSwapRouterFeeAbi : clSwapRouterAbi
+  const common = {
+    tokenIn,
+    tokenOut,
+    recipient: zeroAddress,
+    deadline: args.deadline,
+    amountIn: args.amountIn,
+    amountOutMinimum: grossMinimum,
+    sqrtPriceLimitX96: 0n,
+  }
+  const swap =
+    args.route.keyedBy === 'fee'
+      ? encodeFunctionData({
+          abi: clSwapRouterFeeAbi,
+          functionName: 'exactInputSingle',
+          args: [{ ...common, fee: args.route.feePpm }],
+        })
+      : encodeFunctionData({
+          abi: clSwapRouterAbi,
+          functionName: 'exactInputSingle',
+          args: [{ ...common, tickSpacing: args.route.tickSpacing }],
+        })
+  const settle = feeSettlement(routerAbi, args.tokenOut, grossMinimum, args.recipient, args.fee)
   return {
     to: ADDR.CL_SWAP_ROUTER,
-    data: encodeFunctionData({ abi: clSwapRouterAbi, functionName: 'multicall', args: [[swap, settle]] }),
+    data: encodeFunctionData({ abi: routerAbi, functionName: 'multicall', args: [[swap, settle]] }),
     value: nativeInput ? args.amountIn : 0n,
     spender: nativeInput ? null : ADDR.CL_SWAP_ROUTER,
     inputToken: nativeInput ? null : tokenIn,
     outputToken: isNative(args.tokenOut) ? null : tokenOut,
+    permit2Operator: null,
   }
 }
 
 export function directRouteLabel(route: DirectRoute): string {
   assertRoute(route)
-  const fee = `${route.feePpm / 10_000}%`
-  if (route.protocol === 'up33') return `UP33 CL ${fee}`
-  return route.kind === 'v2' ? 'Uniswap V2' : `Uniswap V3 ${fee}`
+  const fee = `${directRouteFeePpm(route) / 10_000}%`
+  if (route.kind === 'cl') return `${CHAIN.labels.homeCl} ${fee}`
+  // v4 carries the spacing because the fee alone does not name the pool
+  if (route.kind === 'v4') return `Uniswap V4 ${fee} · ts${route.tickSpacing}`
+  const hops = route.connector ? ' · 2 hops' : ''
+  // a venue's v2 leg is named after that venue, and carries its own fee — the
+  // two v2 venues on a chain do not charge the same rate
+  if (route.kind === 'v2') {
+    const venue = route.protocol === 'uniswap' ? 'Uniswap V2' : CHAIN.labels.homeV2
+    return `${venue} ${fee}${hops}`
+  }
+  return `Uniswap V3 ${fee}${hops}`
 }

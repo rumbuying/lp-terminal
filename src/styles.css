@@ -11,11 +11,14 @@
   --panel: #0b0b0b;
   --panel2: #141414;
   --inset: #060606;
-  --line: #232323;
-  --line-hi: #3d3d3d;
+  /* hairlines are fg-tinted transparency, not hex: one formula adapts to all
+     five themes (phosphor's lines go green-ish automatically), and over the
+     true-black ground 14%/24% land exactly where the old #232323/#3d3d3d did */
+  --line: color-mix(in srgb, var(--fg) 14%, transparent);
+  --line-hi: color-mix(in srgb, var(--fg) 24%, transparent);
   --fg: #ffffff;
   --dim: #8f8f8f;
-  --placeholder: #4a4a4a;
+  --placeholder: #7e7e7e;
   --acc: #ffffff;
   --acc-dim: #6e6e6e;
   --acc-fg: #000000;
@@ -25,10 +28,16 @@
   --amber: #ffc266;
   --red: #ff5555;
   --cyan: #c9c9c9;
-  --banner-bg: #170b0b;
   --range: var(--green); /* LP ranges stay green in every theme */
   --range-rgb: 74, 222, 128;
   --crt: 0; /* scanline+vignette opacity (0 disables the CRT layer) */
+  /* radius scale — the modern lever. Panels/cards get 6, controls 4, tiny
+     inline marks 3. Nothing here is fully round: a pill would read consumer. */
+  --r-lg: 6px;
+  --r-md: 4px;
+  --r-sm: 3px;
+  /* motion scale — fast enough that a dense screen never feels animated */
+  --t1: 120ms ease;
   font-size: 13.5px;
   color-scheme: dark;
 }
@@ -39,11 +48,9 @@
   --panel: #0f1511;
   --panel2: #141c16;
   --inset: #060a07;
-  --line: #263628;
-  --line-hi: #3d5a44;
   --fg: #eaf4ea;
   --dim: #96ab98;
-  --placeholder: #3d4a3d;
+  --placeholder: #798579;
   --acc: #52ff2e;
   --acc-dim: #34ad4b;
   --acc-fg: #061006;
@@ -53,7 +60,6 @@
   --amber: #ffbb60;
   --red: #ff5c5c;
   --cyan: #66dee6;
-  --banner-bg: #1a0d0d;
   --range-rgb: 82, 255, 46;
   --crt: 1;
 }
@@ -64,11 +70,9 @@
   --panel: #14100a;
   --panel2: #1a150d;
   --inset: #080604;
-  --line: #33291a;
-  --line-hi: #57452a;
   --fg: #f4e9d4;
   --dim: #a99878;
-  --placeholder: #4a3f2c;
+  --placeholder: #897e6a;
   --acc: #ffb000;
   --acc-dim: #b07d17;
   --acc-fg: #140d02;
@@ -78,7 +82,6 @@
   --amber: #ffd075;
   --red: #ff6857;
   --cyan: #e0c088;
-  --banner-bg: #1d0d08;
   --range-rgb: 88, 214, 141;
   --crt: 1;
 }
@@ -89,11 +92,9 @@
   --panel: #0b111a;
   --panel2: #101825;
   --inset: #04070b;
-  --line: #1d2a3a;
-  --line-hi: #31485f;
   --fg: #e6eef7;
   --dim: #8298ad;
-  --placeholder: #34455a;
+  --placeholder: #748293;
   --acc: #4dc9ff;
   --acc-dim: #2b83a8;
   --acc-fg: #041019;
@@ -103,7 +104,6 @@
   --amber: #ffc266;
   --red: #ff5f6e;
   --cyan: #9db8d4;
-  --banner-bg: #1a0d10;
   --range-rgb: 67, 224, 138;
   --crt: 0;
 }
@@ -114,11 +114,9 @@
   --panel: #121016;
   --panel2: #18151e;
   --inset: #08070b;
-  --line: #262230;
-  --line-hi: #3e3652;
   --fg: #eeeaf4;
   --dim: #9d94ad;
-  --placeholder: #453d56;
+  --placeholder: #837c90;
   --acc: #b18cff;
   --acc-dim: #7a5cc0;
   --acc-fg: #120a20;
@@ -128,7 +126,6 @@
   --amber: #fbbf6b;
   --red: #ff5c74;
   --cyan: #8fd0e8;
-  --banner-bg: #190d14;
   --range-rgb: 74, 222, 128;
   --crt: 0;
 }
@@ -179,14 +176,15 @@ button, input, select {
   padding: 10px 14px 0;
 }
 
-/* ---------- header ---------- */
+/* ---------- header ----------
+   Borderless chrome: the header is a row of controls on the ground, not a box
+   of controls. One bordered surface per screen (.main) is enough — a boxed
+   header over a boxed main over a boxed footer was three frames for one page. */
 .hdr {
   display: flex;
   align-items: center;
-  gap: 14px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  padding: 8px 12px;
+  gap: 12px;
+  padding: 4px 2px;
   flex-wrap: wrap;
 }
 .brand { color: var(--acc); font-weight: 700; letter-spacing: 1px; white-space: nowrap; }
@@ -195,7 +193,7 @@ button, input, select {
 
 /* direction-aware update flash (Flash component) — semantic, theme-invariant.
    deep, saturated green/red held briefly at full so up/down reads at a glance */
-.flash { border-radius: 2px; padding: 0 3px; }
+.flash { border-radius: var(--r-sm); padding: 0 3px; }
 .flash-up { animation: flashUp 1.3s ease-out; }
 .flash-down { animation: flashDown 1.3s ease-out; }
 .flash-arrow { font-size: 0.85em; margin-left: 3px; font-weight: 700; }
@@ -208,19 +206,37 @@ button, input, select {
   100% { background: transparent; }
 }
 
-.tabs { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+/* tabs as ONE segmented control, not a row of boxes: the container owns the
+   border and the inset fill, a tab owns only its state. On a phone the same
+   container becomes the floating bottom bar, so both chromes stay in sync. */
+.tabs {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+  /* hug the tabs and hand the free space to the header, instead of stretching
+     the track edge-to-edge — the control reads as one object that way */
+  margin-right: auto;
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 3px;
+  max-width: 100%;
+}
 .tab {
   background: none;
-  border: 1px solid transparent;
+  border: none;
+  border-radius: var(--r-md);
   color: var(--dim);
   padding: 4px 10px;
   cursor: pointer;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  transition: color var(--t1), background-color var(--t1);
 }
-.tab:hover { color: var(--fg); border-color: var(--line); }
-.tab.active { color: var(--acc); border-color: var(--acc-dim); background: var(--panel2); }
+.tab:hover { color: var(--fg); background: var(--panel); }
+.tab.active { color: var(--acc); background: var(--panel2); }
 .tab .key { color: var(--dim); font-size: 0.85em; margin-right: 5px; }
+.tab.active .key { color: var(--acc-dim); }
 
 .hdr-meta { color: var(--dim); font-size: 0.9em; white-space: nowrap; }
 .hdr-meta b { color: var(--fg); font-weight: 400; }
@@ -245,7 +261,11 @@ button, input, select {
    sitting mid-row it would run past the right edge on a phone. :has() keeps
    the containing block off every other .kv/.l2 in the app. */
 .kv:has(.hint),
-.l2:has(.hint) { position: relative; }
+.l2:has(.hint),
+.section-title:has(.hint) { position: relative; }
+/* a hint riding a section title inherits its uppercase + wide tracking; the
+   panel already resets both, the word itself has to ask */
+.section-title .hint { text-transform: none; letter-spacing: 0; }
 /* [data-tip] guard: a .hint without one would otherwise hover an empty box */
 .hint[data-tip]::after {
   content: attr(data-tip);
@@ -257,6 +277,7 @@ button, input, select {
   max-width: min(340px, 100%);
   background: var(--inset);
   border: 1px solid var(--acc-dim);
+  border-radius: var(--r-md);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
   padding: 8px 10px;
   color: var(--dim);
@@ -278,12 +299,14 @@ button, input, select {
 .btn {
   background: var(--panel2);
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-md);
   color: var(--acc);
   padding: 4px 10px;
   cursor: pointer;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   white-space: nowrap;
+  transition: background-color var(--t1), color var(--t1), border-color var(--t1);
 }
 .btn:hover:not(:disabled) { background: var(--acc); color: var(--acc-fg); border-color: var(--acc); }
 .btn:disabled { color: var(--dim); border-color: var(--line); cursor: not-allowed; }
@@ -298,6 +321,7 @@ button, input, select {
 .badge {
   display: inline-block;
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-sm);
   padding: 0 6px;
   font-size: 0.85em;
   text-transform: uppercase;
@@ -309,19 +333,116 @@ button, input, select {
 .badge.red { color: var(--red); border-color: var(--red); }
 .badge.cyan { color: var(--cyan); border-color: var(--cyan); }
 
-/* protocol identity badge: brand mark + colored label (uni pink is a brand
-   constant; the house protocol rides the theme accent) */
+/* protocol identity badge: brand mark + a label in the same venue's color, so
+   a badge reads as one object. Uniswap's pink is a brand constant; the house
+   venue states its own in ProtoBadge and falls back to the theme accent here.
+   Both element types are sized: a mark is svg where the venue ships vectors
+   and img where it does not. */
 .badge.proto { display: inline-flex; align-items: center; gap: 4px; }
 .badge.proto svg { height: 10px; width: auto; display: block; }
 .badge.proto img { height: 10px; width: 10px; display: block; }
 .badge.proto.uni { color: #f50db4; border-color: rgba(245, 13, 180, 0.55); }
-.badge.proto.up33 { color: var(--acc); border-color: var(--acc-dim); }
-/* logo-only protocol mark for table rows — identity without 100× "UNISWAP" */
-.proto-mini { display: inline-flex; align-items: center; margin-left: 6px; vertical-align: -1px; }
+.badge.proto.home { color: var(--acc); border-color: var(--acc-dim); }
+/* logo-only protocol mark for table rows — identity without 100× "UNISWAP".
+   Quieted with opacity rather than a faded color: a row mark identifies without
+   shouting, and only opacity reaches EVERY mark — a bitmap and a multi-color
+   brand svg both ignore `color`, so fading it dimmed the one mark drawn in
+   currentColor and left the others at full strength beside it. */
+.proto-mini {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  vertical-align: -1px;
+  opacity: 0.8;
+}
 .proto-mini svg { height: 11px; width: auto; display: block; }
 .proto-mini img { height: 11px; width: 11px; display: block; }
-.proto-mini.uni { color: rgba(245, 13, 180, 0.8); }
-.proto-mini.up33 { color: var(--acc-dim); }
+.proto-mini.uni { color: #f50db4; }
+.proto-mini.home { color: var(--acc); }
+
+/* Tokenized-equity marks. The color arrives inline from the issuer's brand
+   (config/chains/stockIssuers.ts), the way ProtoBadge states PancakeSwap's —
+   these are somebody else's identity, not a role in this palette, so they are
+   deliberately outside the theme tokens and do not move when the theme does.
+
+   The symbol keeps its own weight and is NOT dimmed: this mark's whole job is
+   to be the thing you can find in a list of eight tokens all called TSLA. */
+.tok-proven { font-weight: 700; white-space: nowrap; }
+/* The contradicted mark is SEMANTIC, so unlike the issuer colors above it rides
+   the palette token and moves with the theme: --red is this file's "something
+   is wrong here" in every one of the five, and a token wearing a name that
+   belongs to another contract is that. */
+.tok-squat { font-weight: 700; white-space: nowrap; color: var(--red); }
+/* the mark sits tight against the symbol so the two read as one token, and
+   slightly small — at row scale a full-size ▣ out-weighs the letters beside it */
+.tok-glyph { font-size: 0.8em; margin-right: 2px; vertical-align: 1px; }
+/* the named chip. `a` needs the reset because every link in this file is cyan
+   and underlines on hover, which would fight the issuer color it carries. */
+.badge.stock {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+a.badge.stock { text-decoration: none; }
+a.badge.stock:hover { background: var(--panel2); text-decoration: none; }
+.badge.squat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--red);
+  border-color: var(--red);
+}
+/* Launchpad provenance. Cyan is this file's "identified, and here is the
+   reference" — the same token the pool-kind line and every address link wear —
+   because unlike an issuer mark this one names no brand of its own: it says
+   which factory deployed the contract, and the factory is ours to describe. */
+.badge.launchpad {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--cyan);
+  border-color: var(--cyan);
+}
+a.badge.launchpad { text-decoration: none; }
+a.badge.launchpad:hover { background: var(--panel2); text-decoration: none; }
+.proto-mini.launchpad { color: var(--cyan); }
+/* Which generation of the launchpad's liquidity contract ran the sale. Same
+   cyan on both, because it is the same launchpad and neither generation is a
+   claim about the market: only the border and the suffix differ — solid and lit
+   for the one taking sales today, dashed and dim for the one it replaced. Keyed
+   on standing rather than on a version name, so a new release needs no rule. */
+.badge.launchpad[data-release='past'] { border-style: dashed; }
+.badge.launchpad .release { color: var(--dim); }
+.badge.launchpad[data-release='current'] .release { color: var(--cyan); }
+.proto-mini.launchpad[data-release='past'] { opacity: 0.6; }
+
+/* ---------- token pictures ----------
+   A logo is a stronger claim than a symbol — it is recognised before it is
+   questioned — so only a PROVEN source supplies one (lib/tokenImage.ts), and
+   everything else falls back to letters on a hue derived from the address.
+   Two tokens sharing a ticker therefore never share a tile. */
+.tok-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 1px solid var(--line-hi);
+  background: var(--panel2);
+  object-fit: cover;
+  overflow: hidden;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  color: var(--fg);
+}
+/* the side the row is a market IN: it leads, and it sits over the quote */
+.tok-avatar.is-target { border-color: var(--acc-dim); position: relative; z-index: 1; }
+.pair-avatars { display: inline-flex; align-items: center; flex: 0 0 auto; }
+.pair-avatars > .tok-avatar + .tok-avatar { margin-left: -6px; }
 /* jump-off to the pair's DexScreener chart, sat right of the protocol mark.
    Badge geometry at row scale: it has to read as a button without out-weighing
    the pair name beside it. Spacing comes from the flex parent's gap in all
@@ -341,7 +462,7 @@ button, input, select {
   white-space: nowrap;
 }
 /* the brand mark keeps its own colors (it is artwork, not an icon font), so it
-   does not brighten with the label on hover — same as .badge.proto's UP icon */
+   does not brighten with the label on hover — the one bitmap left in the UI */
 .ds-btn img { height: 11px; width: 11px; display: block; }
 .ds-btn,
 .ds-btn:hover { text-decoration: none; }
@@ -350,11 +471,13 @@ button, input, select {
 .input {
   background: var(--inset);
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-md);
   color: var(--fg);
   padding: 5px 8px;
   outline: none;
   caret-color: var(--acc);
   width: 100%;
+  transition: border-color var(--t1);
 }
 .input:focus { border-color: var(--acc-dim); }
 .input.invalid { border-color: var(--red); } /* wins over :focus by source order */
@@ -392,9 +515,10 @@ button, input, select {
   flex-direction: column;
   overflow-y: auto;
   border: 1px solid var(--line);
-  border-top: none;
+  border-radius: var(--r-lg);
   background: var(--panel);
   padding: 12px;
+  margin-top: 10px;
 }
 .main > * { flex: none; }
 /* a tab that wants the full height (POOLS: table scrolls to the bottom edge) */
@@ -402,16 +526,232 @@ button, input, select {
 .tab-fill > * { flex: none; }
 .tab-fill .tbl-wrap { flex: 1 1 auto; max-height: none; }
 
-.banner {
-  border: 1px solid var(--red);
-  color: var(--red);
-  background: var(--banner-bg);
-  padding: 6px 10px;
-  margin-bottom: 10px;
+/* ---------- POOLS: the market list beside the trade panel ----------
+   The two panes answer one question between them — what is worth trading, and
+   then do it — so they have to be legible at the same time. The old layout
+   expanded the deposit form INSIDE the row, which put it exactly where the
+   comparison used to be: choosing a range scrolled away the numbers that made
+   the range worth choosing.
+
+   Stacked is the base case and the split is the enhancement, so a narrow
+   window is never the broken one. */
+.market-split { gap: 12px; }
+.market-split > .market-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.market-col > * { flex: none; }
+.market-split > .trade-col { min-width: 0; }
+.trade-empty { border: 1px dashed var(--line); border-radius: var(--r-lg); padding: 22px 12px; text-align: center; }
+
+/* The list's own chrome: a search box, the filter chips, one line of counters.
+   The chips are grouped so that a phone can treat them as ONE object (see the
+   720px block); here the group is a flex row inside a flex row, which wraps
+   exactly the way the loose chips always did. */
+#pool-search { max-width: 360px; }
+.chip-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+/* the counters and the pager they belong to read as one block */
+.market-stat { margin-bottom: 0; }
+.market-more { margin-top: 4px; }
+.market-more:empty { display: none; }
+
+/* The split, and the only width that has one. Below it there is no second pane
+   to put the panel in, so PoolsTab portals it into a sheet over the list
+   instead — nothing in this subtree at all, which is why there is no narrow
+   counterpart to this block. It used to stack the panel ABOVE the table here,
+   and that cost a phone the whole page: one tap pushed every market below the
+   fold, and put the form it produced under the search box and the filter chips
+   as well, so the thing that just happened was off-screen in both directions. */
+@media (min-width: 1200px) {
+  .market-split { flex-direction: row; align-items: stretch; }
+  /* the panel is a column of forms: it needs a real measure, not a percentage
+     of whatever is left, and it must not grow to swallow the table */
+  .market-split > .trade-col {
+    flex: 0 0 clamp(360px, 30%, 470px);
+    border-left: 1px solid var(--line);
+    padding-left: 14px;
+    overflow-y: auto;
+  }
+}
+
+/* Between 1200 and 1480 the split leaves the list ~700px, which is not enough
+   for PRICE/RESERVES — the same column, for the same reason, that a narrowing
+   viewport drops first (see the .hide-t block near the end of this file). Its
+   content has no natural width bound, and the panel beside it is quoting a
+   live price anyway. Past 1480 there is room and it comes back. */
+@media (min-width: 1200px) and (max-width: 1479px) {
+  .market-split .tbl .hide-t { display: none; }
+}
+
+.trade-panel { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.trade-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.trade-head .fill { flex: 1 1 auto; }
+.trade-pair { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.trade-marks { display: flex; flex-wrap: wrap; gap: 6px; }
+.trade-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+.trade-x {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.trade-x:hover { color: var(--fg); border-color: var(--line-hi); }
+/* the deposit form was written to fill a pools row; in the panel the column IS
+   the measure, so it drops its own frame and never splits into two columns.
+   The sheet is the same panel in a narrower box, so it wants the same three. */
+.trade-col .expander,
+.modal.bare .expander { max-width: none; margin: 0; border: none; padding: 0; }
+.trade-col .add-grid,
+.modal.bare .add-grid { grid-template-columns: minmax(0, 1fr); }
+.trade-col .add-grid > .add-col + .add-col,
+.modal.bare .add-grid > .add-col + .add-col { border-left: none; padding-left: 0; }
+/* A 110px label gutter is a quarter of this column. It buys one flush left
+   edge down the form and charges every row on it — which is why a phone has
+   never paid it (see the 720px block), and this column is nearer a phone's
+   measure than the table's. 58px still aligns the labels; it just stops
+   aligning them against the longest one in the app. */
+.trade-col .form-row .lbl,
+.modal.bare .form-row .lbl { width: 58px; }
+
+/* The app's one dialog (components/Modal.tsx). Everything else that overlays
+   hangs off the control that opened it; this takes the screen, so it is bordered
+   in the theme accent rather than red — what it asks is a question, and the page
+   behind it is working. Under the CRT layers at 998/999, over every popover. */
+.modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.72);
+}
+.modal {
+  width: min(420px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  background: var(--inset);
+  border: 1px solid var(--acc-dim);
+  border-radius: var(--r-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.8);
+}
+.modal:focus { outline: none; } /* it is focused to catch Esc, not to be pointed at */
+.modal-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--acc);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.modal-body { padding: 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+}
+body.modal-open { overflow: hidden; }
+
+/* ---------- the sheet (Modal sheet) ----------
+   A dialog carrying a FORM rather than a question. Wider than the 420px card,
+   because the trade panel is a column of labelled rows and a swap card that was
+   written for a 360px pane; and bottom-anchored on a phone, for two reasons a
+   centred card cannot answer. A form summons a keyboard, and the keyboard takes
+   the bottom half of the screen — which is exactly where a centred card puts
+   its inputs. And the list that opened it stays visible along the top, so the
+   market being traded is still on screen while the trade is made. */
+.modal.sheet { width: min(560px, 100%); }
+.modal.bare > .trade-panel { padding: 10px 12px 12px; }
+/* The head is the pair — which market this form is about, and the ✕ that puts
+   it away. It stays put while the form under it scrolls, because a sheet tall
+   enough to scroll is exactly one you can lose your place in. Opaque: the rows
+   pass underneath it. */
+.modal.bare .trade-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -10px -12px 0;
+  padding: 10px 12px 8px;
+  background: var(--inset);
+  border-bottom: 1px solid var(--line);
+}
+.modal-grip { display: none; }
+
+@media (max-width: 720px) {
+  .modal-back.sheet {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal.sheet {
+    width: 100%;
+    /* Short of the top edge on purpose: the strip of market list left showing
+       is what says the page is still there and the backdrop is a way back. */
+    max-height: 86vh;
+    max-height: 86dvh; /* dvh where supported — vh counts the URL bar's slice */
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    border-bottom: none;
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.8);
+    /* clears the home indicator; the sheet owns the bottom edge outright, so
+       the floating tab bar underneath it is not a landing place for a thumb */
+    padding-bottom: env(safe-area-inset-bottom);
+    /* No fill-mode: the moment this finishes the computed transform is `none`
+       again. That matters more than the animation does — a lingering transform
+       makes this element the containing block for `position: fixed`, and the
+       token picker inside the form is fixed to the VIEWPORT. */
+    animation: sheetUp 190ms cubic-bezier(0.22, 0.9, 0.3, 1);
+  }
+  .modal-grip {
+    display: block;
+    width: 34px;
+    height: 4px;
+    margin: 7px auto 0;
+    border-radius: 999px;
+    background: var(--line-hi);
+  }
+  .modal.bare > .trade-panel { padding: 4px 10px 10px; }
+  .modal.bare .trade-head { margin: -4px -10px 0; padding: 8px 10px; }
+}
+
+@keyframes sheetUp {
+  from { transform: translateY(14%); opacity: 0.6; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal.sheet { animation: none; }
+}
+
+/* The standing reminder once the dialog has been put away: same question, out
+   of the way, still carrying the button that answers it. Amber rather than red
+   for the same reason the dialog is not red — the page behind it works. */
+.netbar {
   display: flex;
   align-items: center;
   gap: 12px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--amber);
+  border-radius: var(--r-lg);
+  color: var(--amber);
 }
+.netbar .btn { margin-left: auto; }
+
+/* where the wallet is, and where the page is. The destination row takes the
+   accent — of the two names it is the one being asked for. */
+.net-row { display: flex; align-items: baseline; gap: 10px; }
+.net-row b { color: var(--fg); font-weight: 700; }
+.net-row.to b { color: var(--acc); }
+.net-k { color: var(--dim); font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.5px; width: 4.5em; }
+.net-id { color: var(--dim); font-size: 0.85em; margin-left: auto; }
 
 .section-title {
   color: var(--dim);
@@ -423,9 +763,17 @@ button, input, select {
   align-items: baseline;
   gap: 6px;
 }
-.section-title .aux { margin-left: auto; letter-spacing: 0; min-width: 7ch; text-align: center; }
+.section-title .aux { letter-spacing: 0; min-width: 7ch; text-align: center; }
 .section-title::before { content: '┌─ '; color: var(--line-hi); }
-.section-title::after { content: ' ─'; color: var(--line-hi); }
+/* the frame rule runs to the edge — the '┌─' cap opens a box, and a line that
+   stops mid-air never closes it. Auxiliary chips sit inside the frame. */
+.section-title::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--line-hi);
+  align-self: center;
+  margin-left: 4px;
+}
 
 /* ---------- table ---------- */
 table.tbl { width: 100%; border-collapse: collapse; }
@@ -440,7 +788,12 @@ table.tbl { width: 100%; border-collapse: collapse; }
   padding: 4px 8px;
   white-space: nowrap;
 }
-.tbl td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.tbl td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+  transition: background-color var(--t1);
+}
 /* the whole row toggles the add-LP expander (PoolsTab) — the ADD LP button
    stays as the keyboard path, so the row itself takes no tab stop */
 .tbl tr.rowhover { cursor: pointer; }
@@ -464,6 +817,7 @@ table.tbl { width: 100%; border-collapse: collapse; }
 /* ---------- cards ---------- */
 .card {
   border: 1px solid var(--line);
+  border-radius: var(--r-lg);
   background: var(--panel2);
   padding: 10px 12px;
   margin-bottom: 10px;
@@ -535,6 +889,34 @@ table.tbl { width: 100%; border-collapse: collapse; }
   border: 1px solid var(--line-hi);
   overflow: hidden;
 }
+/* Taller only when there is a shape to hold — 14px of depth is not a shape, and
+   every position card would grow for nothing on a pool that cannot answer. */
+.rbar-track.deep { height: 40px; }
+.rbar-depth {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 1px;
+  align-items: end;
+}
+/* Columns with a lit cap, not a filled block. The add chart can fill because the
+   shape is the subject there; here it is the backdrop to a window, a marker and
+   a phosphor trail already using this space, and a solid fill reads as "the
+   track is full" — worst exactly where the depth is flat, which over a band's
+   own neighbourhood it often is. So the fill drops to a wash and the lit top
+   edge carries the height, while the 1px divider keeps each bucket a bucket:
+   flat depth then reads as a row of equal columns rather than as one block. */
+.rbar-bin {
+  background: rgba(var(--range-rgb), 0.07);
+  border-top: 1px solid rgba(var(--range-rgb), 0.28);
+  min-height: 1px;
+}
+.rbar-bin.on {
+  background: rgba(var(--range-rgb), 0.13);
+  border-top-color: rgba(var(--range-rgb), 0.5);
+}
 .rbar-window {
   position: absolute;
   top: 0;
@@ -553,6 +935,10 @@ table.tbl { width: 100%; border-collapse: collapse; }
     width 0.8s cubic-bezier(0.22, 1, 0.36, 1),
     opacity 0.5s ease;
 }
+/* The hatch exists to give an empty box a texture. Over columns it is texture
+   on texture, and the shape underneath stops being legible — so with depth the
+   window keeps only its two lit edges and a wash thin enough to see through. */
+.rbar-track.deep .rbar-window { background: rgba(var(--range-rgb), 0.06); }
 .rbar-window.out { opacity: 0.45; } /* out of range: the box recedes, the marker owns attention */
 .rbar-window.warn-lo { border-left: 2px solid var(--amber); } /* the threatened bound */
 .rbar-window.warn-hi { border-right: 2px solid var(--amber); }
@@ -638,12 +1024,209 @@ table.tbl { width: 100%; border-collapse: collapse; }
   padding: 0 3px;
 }
 .rbar-flip:hover { color: var(--acc); }
+/* The unit toggle needs a border that ⇄ does not: an arrow glyph reads as an
+   action wherever it lands, while a bare $ beside a price reads as part of the
+   price. Same chip idiom as every other two-state control here, at line size. */
+.lr-unit {
+  border: 1px solid var(--line-hi);
+  color: var(--dim);
+  padding: 0 4px;
+  margin-left: 5px;
+  line-height: 1.2;
+}
+.lr-unit.on { color: var(--acc); border-color: var(--acc-dim); background: var(--panel2); }
+
+/* ---------- liquidity range chart (LiquidityRange.tsx) ---------- */
+/* The band you are buying, drawn over the depth already in the pool. Taller than
+   the range bar on purpose: this one is read as a SHAPE, and 14px of track
+   cannot hold a shape. */
+.lrange { margin: 10px 0 6px; }
+.lr-plot {
+  position: relative;
+  height: 76px;
+  background: var(--inset);
+  border: 1px solid var(--line-hi);
+  /* 90 degrees everywhere. A rounded plot frame would be the only curve in the
+     panel, and the grid this sits in is square. */
+  touch-action: none; /* the drag owns the gesture; the page must not scroll under it */
+}
+/* Columns as grid tracks with a 1px gap showing the frame through: the dividers
+   are the background, so no column ever draws a border of its own and 56 of them
+   still cost one paint. */
+.lr-bins {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 1px;
+  align-items: end;
+}
+/* Two densities, no second hue — the same distinction the zap flow draws, and
+   for the same reason: green/red/amber are spoken for and MONO has no colour to
+   spend. Outside the band the depth is context; inside it is what you are
+   buying into. */
+/* Alpha is set against AREA, not against the other bar in the panel. The zap
+   flow can carry 0.62 because it is six pixels tall; seventy-six pixels of
+   filled column at that weight is a slab of colour with a panel of hairlines
+   around it — the same thing that made the first split bar unreadable. */
+.lr-bin {
+  background: rgba(var(--range-rgb), 0.13);
+  min-height: 1px;
+  transition: background 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.lr-bin.on { background: rgba(var(--range-rgb), 0.34); }
+/* Edges only. A tint across the interior competes with the columns it is drawn
+   over — at any opacity that shows up against the lit columns, it has already
+   flattened the shape they exist to convey. Two posts say where the band is. */
+.lr-win {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--green-dim);
+  border-right: 1px solid var(--green-dim);
+  pointer-events: none;
+}
+/* out of range the band's edges turn — the crosshair standing outside those
+   posts is the thing to look at */
+.lr-win.out { border-color: var(--red); }
+/* With no handles drawn over them, the posts ARE the band, so they carry it at
+   full weight instead of at the dimmed value that only had to show through a
+   grip sitting on top. */
+.lrange.fixed .lr-win { border-left-width: 2px; border-right-width: 2px; border-color: var(--green); }
+.lrange.fixed .lr-win.out { border-color: var(--red); }
+/* Current price: a crosshair rather than a bar, because it is the one mark here
+   that cannot be dragged and should not look like it can.
+   Drawn in --fg, not in green: green over lit green columns is invisible, and
+   the price is a MEASUREMENT — whether it falls inside the band is said by the
+   posts it lands between and by the number below. Out of range it turns red,
+   which is the one case the crosshair itself carries. */
+.lr-cur {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 0;
+  color: var(--fg);
+  border-left: 1px dashed currentColor;
+  pointer-events: none;
+}
+.lr-cur.out { color: var(--red); }
+.lr-cur::before,
+.lr-cur::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  width: 7px;
+  height: 1px;
+  background: currentColor;
+}
+.lr-cur::before { top: 0; }
+.lr-cur::after { bottom: 0; }
+/* Handles. 3px of visible rule, 15px of hit area — a bound has to be grabbable
+   with a thumb without drawing a slab across the chart to advertise it. */
+.lr-grip {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 15px;
+  margin-left: -7px;
+  cursor: ew-resize;
+  background: transparent;
+  touch-action: none;
+}
+.lr-grip::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 6px;
+  width: 3px;
+  background: var(--green);
+  transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* The grip sits exactly on the band edge and is three times its width, so it
+   overdraws the post underneath — which means the post's colour has to be the
+   grip's colour, or an out-of-range band reads green through its own handles. */
+.lrange.out .lr-grip::after { background: var(--red); }
+.lr-grip:hover::after,
+.lr-grip:focus-visible::after { transform: scaleX(1.6); }
+.lr-grip:focus-visible { outline: 1px solid var(--acc); outline-offset: 1px; }
+/* while a bound is held, the pointer is the cursor everywhere on the plot */
+.lrange.dragging .lr-plot { cursor: ew-resize; }
+.lrange.dragging .lr-bin { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .lr-bin, .lr-grip::after { transition: none; }
+}
+.lr-axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+}
+/* the band's two numbers held together as one group, so they read as a range
+   rather than as labels for the two ends of the plot they sit under */
+.lr-band { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.lr-b { color: var(--fg); white-space: nowrap; }
+/* An editable bound is a button that has to keep reading as a number — the
+   band is a READOUT first, and a pair of framed fields under the chart would
+   claim the eye ahead of the chart. So: the type it already had, plus a dotted
+   rule under it, which is the one mark in this app that has always meant
+   "there is more here if you touch it" (see .pair-name). The frame arrives on
+   hover, and the field arrives on click. */
+button.lr-b {
+  background: none;
+  border: none;
+  border-bottom: 1px dashed var(--line-hi);
+  padding: 0 1px;
+  font: inherit;
+  color: var(--fg);
+  cursor: text;
+}
+button.lr-b:hover,
+button.lr-b:focus-visible { color: var(--acc); border-bottom-color: var(--acc-dim); }
+/* A note that is also the fix for what it reports. Same dotted rule as an
+   editable bound, in the amber the sentence was already wearing — the mark
+   stays "there is more here if you touch it", the colour stays "this is what
+   is wrong". */
+button.note-fix {
+  background: none;
+  border: none;
+  border-bottom: 1px dashed currentColor;
+  padding: 0 1px;
+  font-family: inherit;
+  cursor: pointer;
+}
+button.note-fix:hover,
+button.note-fix:focus-visible { color: var(--acc); }
+
+.lr-edit { display: inline-flex; align-items: baseline; gap: 1px; }
+.lr-edit .input { width: 8.5em; padding: 0 3px; font-size: inherit; }
+/* the cost of reaching each bound, one step quieter than the prices it follows */
+.lr-mv { font-size: 0.92em; }
+.lr-mid { white-space: nowrap; }
+/* what the band does, under where it sits. Same label column as the form rows
+   above it, sized to the words so a narrow panel keeps the values on one line */
+.lr-facts {
+  margin-top: 6px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 10px;
+}
+.lr-facts .k { color: var(--dim); text-transform: uppercase; }
+.lr-facts .v { color: var(--fg); }
+/* the far ends of the window were dropped from the read — say so where the
+   understatement is, rather than in a sentence under the chart */
+.lr-trunc { color: var(--amber); }
 
 /* ---------- swap ---------- */
 /* single-task views sit centered in the wide main panel */
 .swap-box { max-width: 720px; width: 100%; margin: 0 auto; }
 /* market view: header row shares the card column's width so edges line up */
 .swap-box.narrow { max-width: 560px; }
+/* beside a market list the pane already IS the measure — centring inside it
+   would leave the form floating in a column it was given to fill */
+.swap-box.embedded { max-width: none; margin: 0; }
 /* static network indicator (single-chain terminal — no selector) */
 .chain-tag {
   margin-left: auto;
@@ -669,19 +1252,31 @@ table.tbl { width: 100%; border-collapse: collapse; }
 /* the trade column itself is narrower than the panel — focused, Robinhood-style */
 .swap-col { max-width: 560px; margin: 0 auto; }
 
-/* selectable route cards: line 1 = venue + output + BEST/shortfall, line 2 = pool detail + usd */
+/* selectable route cards: line 1 = venue + output + BEST/shortfall, line 2 = the pool the route used */
+/* Which quote executes is a money decision, so the card is a <button>: the
+   .sel rule below still wins the background because it is the more specific
+   selector. */
 .quote-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  font: inherit;
+  color: inherit;
   border: 1px solid var(--line);
+  border-radius: var(--r-lg);
   padding: 7px 12px;
   margin-bottom: 6px;
   cursor: pointer;
+  transition: border-color var(--t1), background-color var(--t1);
 }
 .quote-card:hover { border-color: var(--line-hi); }
 .quote-card.sel { border-color: var(--acc-dim); background: var(--panel2); }
 .quote-card .l1 { display: flex; align-items: baseline; gap: 10px; }
 .quote-card .src { text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
 .quote-card .qstate { margin-left: auto; }
-.quote-card .qamt { margin-left: auto; font-size: 1.05em; white-space: nowrap; }
+/* the decision number outweighs the venue it came from */
+.quote-card .qamt { margin-left: auto; font-size: 1.05em; font-weight: 700; white-space: nowrap; }
 .quote-card .l2 {
   display: flex;
   justify-content: space-between;
@@ -693,44 +1288,170 @@ table.tbl { width: 100%; border-collapse: collapse; }
   flex-wrap: wrap;
 }
 
-/* sheep-choice route visualization: a split-proportion bar + one chip per
-   leg. Accent shades only — venue identity lives in the mono labels, so the
-   bar stays legible in every theme (the palette keeps hues semantic). */
-.route-viz {
+/* sheep-choice route map — a Sankey. Tokens are node bars, flows are curved
+   links, thickness is share. Colour reinforces a venue name the label already
+   spells out rather than replacing it, which is what keeps it safe on a palette
+   where green, red and amber already mean up, down and warn. Geometry comes
+   from lib/routeSankey in real pixels; this file only paints what it is told. */
+.rmap {
+  position: relative; /* the hover card positions against this box */
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  margin-top: 6px;
+  gap: 4px;
+  margin-top: 7px;
   padding-left: 18px; /* same gutter as .l2 */
 }
-.route-bar { display: flex; height: 4px; gap: 1px; }
-.route-bar i { flex: 0 0 auto; min-width: 3px; background: var(--acc); }
-.route-bar i:nth-child(2) { opacity: 0.68; }
-.route-bar i:nth-child(3) { opacity: 0.5; }
-.route-bar i:nth-child(4) { opacity: 0.38; }
-.route-bar i:nth-child(n + 5) { opacity: 0.26; }
-.route-legs { display: flex; flex-wrap: wrap; gap: 4px 6px; font-size: 0.8em; }
-.route-legs .leg {
-  border: 1px solid var(--line);
-  padding: 1px 6px;
-  color: var(--dim);
+.rmap-flow { display: flex; align-items: center; gap: 7px; }
+/* The SVG is sized in real pixels by a ResizeObserver, so this box only has to
+   give it a width to measure and a height to fill. */
+.rmap-canvas { flex: 1 1 auto; min-width: 0; }
+.rmap-svg { display: block; overflow: visible; }
+/* Probing one flow lights it and dims the rest. Nodes stay lit alongside the
+   links that touch them, so a waypoint and its traffic read as one thing. */
+.rmap-svg.probing .rmap-link { opacity: 0.28; }
+.rmap-svg.probing .rmap-link.lit { opacity: 1; }
+.rmap-svg.probing .rmap-lbl { opacity: 0.3; }
+.rmap-svg.probing .rmap-lbl.lit { opacity: 1; }
+.rmap-svg.probing .rmap-node { opacity: 0.4; }
+.rmap-svg.probing .rmap-node.lit { opacity: 1; }
+
+/* the immediate hover card — the native title's second of silence is an
+   eternity on a terminal. Follows the pointer, never catches it. */
+.rmap-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  max-width: 280px;
+  padding: 5px 8px;
+  font-size: 0.66rem;
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--panel-line, rgba(140, 155, 170, 0.35));
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.45);
+  white-space: normal;
+}
+/* The two end tokens sit OUTSIDE the svg — pinned to their own bars they would
+   overhang the card and clip on a phone. */
+.rmap-end {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 0.68rem;
+  letter-spacing: 0.5px;
+  color: var(--fg);
+  opacity: 0.85;
   white-space: nowrap;
 }
-.route-legs .leg b { color: var(--fg); font-weight: 500; }
-.route-legs .leg:first-child { border-color: var(--acc-dim); }
 
+/* A node is an object you can point at, not a hairline. Solid ink, because it
+   is the one part of the picture that is a THING rather than a quantity. */
+.rmap-link,
+.rmap-node { transition: opacity 0.12s ease; }
+.rmap-node {
+  fill: var(--fg);
+  opacity: 0.85;
+  cursor: default;
+  animation: rmap-rise 0.32s cubic-bezier(0.2, 0.8, 0.25, 1) backwards;
+  animation-delay: calc(var(--rmap-i, 0) * 40ms);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.rmap-node.end { opacity: 0.5; } /* the ends are anchors, not decisions */
+.rmap-node:not(.end):hover { opacity: 1; }
+
+.rmap-link {
+  cursor: default;
+  animation: rmap-wipe 0.42s cubic-bezier(0.2, 0.8, 0.25, 1) backwards;
+  animation-delay: calc(var(--rmap-i, 0) * 55ms);
+}
+.rmap-link:hover { filter: brightness(1.35); }
+/* a collective sliver band is a summary and dresses like one: an ordinary
+   slate band with a hatch ruled over it, so it can never be mistaken for a
+   single pool while still reading as a flow of its own size. The hatch is a
+   second path on top of that band — the band underneath owns the probe. */
+.rmap-link.fold {
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* the venue name wears its own colour; the share stays white, because the
+   number is the thing being compared and comparison wants one ink */
+.rmap-lbl {
+  pointer-events: none;
+  font-size: 0.68rem;
+  transition: opacity 0.12s ease;
+  animation: rmap-ink 0.5s ease backwards;
+  animation-delay: calc(var(--rmap-i, 0) * 55ms + 180ms);
+}
+.rmap-lbl text { fill: var(--fg); }
+.rmap-pct { font-weight: 600; }
+.rmap-venue { letter-spacing: 0.4px; opacity: 0.92; }
+.rmap-lbl .rmap-fee {
+  font-size: 0.62rem;
+  fill: var(--fg);
+  opacity: 0.5;
+}
+/* the waypoint tag, knocked out of the flows behind it so it stays readable
+   wherever a band happens to pass */
+.rmap-wall {
+  pointer-events: none;
+  font-size: 0.62rem;
+  letter-spacing: 0.5px;
+  animation: rmap-ink 0.5s ease backwards;
+  animation-delay: calc(var(--rmap-i, 0) * 40ms + 200ms);
+}
+.rmap-wall text { fill: var(--fg); }
+.rmap-wall-bg {
+  fill: var(--bg);
+  stroke: var(--panel-line, rgba(140, 155, 170, 0.35));
+  stroke-width: 1;
+}
+/* the collective waypoint wears the same dashed edge the collective band wears
+   a hatch for: a chip holding a COUNT should never be read as a token symbol */
+.rmap-wall.many .rmap-wall-bg { stroke-dasharray: 2 2; }
+.rmap-wall.many text { opacity: 0.82; }
+
+@keyframes rmap-wipe {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+@keyframes rmap-rise {
+  from { transform: scaleY(0.06); opacity: 0; }
+  to { transform: scaleY(1); }
+}
+@keyframes rmap-ink {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (max-width: 560px) {
+  .rmap { padding-left: 0; }
+  .rmap-lbl { font-size: 0.63rem; }
+}
+
+/* motion here is decoration on top of a picture that is already complete —
+   the shares, the thickness and the labels all survive without it */
+@media (prefers-reduced-motion: reduce) {
+  .rmap-link,
+  .rmap-node,
+  .rmap-lbl,
+  .rmap-wall { animation: none; }
+}
 /* token select */
 .tsel { position: relative; }
 .tsel-btn {
   background: var(--panel2);
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-md);
   color: var(--fg);
   padding: 5px 10px;
   cursor: pointer;
   min-width: 110px;
   text-align: left;
   white-space: nowrap;
+  transition: border-color var(--t1);
 }
+.tsel-btn.fixed { min-width: 0; }
 .tsel-btn:hover { border-color: var(--acc-dim); }
 .tsel-pop {
   position: absolute;
@@ -742,15 +1463,31 @@ table.tbl { width: 100%; border-collapse: collapse; }
   overflow-y: auto;
   background: var(--inset);
   border: 1px solid var(--acc-dim);
+  border-radius: var(--r-lg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
 }
 .tsel-pop .filter { position: sticky; top: 0; background: var(--inset); padding: 6px; border-bottom: 1px solid var(--line); }
+/* The slot: a picker row, and the status lines that share its shape. */
 .tsel-item {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: 10px;
   padding: 5px 10px;
+  width: 100%;
+  text-align: left;
+}
+/* A row that DOES something is a <button>, so it can be reached with Tab and
+   taken with Enter instead of by pointer alone. These resets used to sit under
+   .chain-pop, the one list that had already said so. Scoped to the element and
+   not the class, because "resolving…" and "not an ERC-20" occupy the same slot
+   as <div>s and have to keep their own .dim / .red. */
+button.tsel-item {
   cursor: pointer;
+  background: none;
+  border: none;
+  font: inherit;
+  color: inherit;
 }
 .tsel-item:hover { background: var(--panel2); color: var(--acc); }
 .tsel-backdrop { position: fixed; inset: 0; z-index: 20; }
@@ -759,6 +1496,7 @@ table.tbl { width: 100%; border-collapse: collapse; }
 .logpanel {
   border: 1px solid var(--line);
   border-top: 1px solid var(--line-hi);
+  border-radius: var(--r-lg);
   background: var(--inset);
   padding: 4px 10px;
   font-size: 0.9em;
@@ -790,7 +1528,9 @@ table.tbl { width: 100%; border-collapse: collapse; }
 .hist-btn.failed { color: var(--red); border-color: var(--red); }
 @keyframes hist-pulse { 50% { opacity: 0.55; } }
 .hist-n { color: var(--dim); font-size: 0.85em; margin-left: 5px; }
-.hist-btn.on .hist-n { color: var(--acc-dim); }
+/* --dim, not --acc-dim: the count has to recede from the accent beside it and
+   still be readable, and the accent's dim tint only reaches 3.5:1 on this fill */
+.hist-btn.on .hist-n { color: var(--dim); }
 .hist-pop {
   position: absolute;
   z-index: 30;
@@ -799,10 +1539,44 @@ table.tbl { width: 100%; border-collapse: collapse; }
   width: min(560px, 88vw);
   background: var(--inset);
   border: 1px solid var(--acc-dim);
+  border-radius: var(--r-lg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
 }
 .hist-pop .logpanel { max-height: 46vh; border: none; }
 
+/* chain switcher — same button + popover shell, a short list instead of a feed.
+   Narrower than the log: two chain names need nowhere near 560px. */
+.chain-pop { width: min(300px, 88vw); }
+/* The network's own mark. inline-block with a nudge rather than a flex child,
+   so dropping it into .hist-btn leaves that button's text layout alone; inside
+   .chain-opt it IS a flex child, and that row aligns on the baseline of type it
+   has none of. */
+.chain-mark { display: inline-block; vertical-align: -2px; }
+.chain-mark svg,
+.chain-mark img { height: 12px; width: 12px; display: block; }
+.hist-btn .chain-mark { margin-right: 5px; }
+.chain-opt .chain-mark { align-self: center; }
+.chain-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  color: var(--fg);
+  text-decoration: none;
+  cursor: pointer;
+}
+/* between options only — .news-hd already closes itself with a border-bottom,
+   and a border-top on the first row would draw a 2px seam under it */
+.chain-opt + .chain-opt { border-top: 1px solid var(--line); }
+.chain-opt:hover { background: var(--panel2); }
+.chain-opt.on { color: var(--acc); }
+/* the chain being read is named first and takes the width; the id stays quiet */
+.chain-nm { flex: 1; }
+.chain-id { color: var(--dim); font-size: 0.85em; }
+/* this row leaves the site — the arrow is the only warning the reader gets
+   before the host changes under them, so it sits at the end of the row */
+.chain-offsite { color: var(--dim); font-size: 0.85em; }
+.chain-foot { padding: 6px 10px; border-top: 1px solid var(--line); color: var(--dim); font-size: 0.85em; }
 /* what's new — same button + popover shell as the log next door, own body.
    The dot is red because it means "shipped in the last two days", not a
    semantic down/error; nothing else in the header uses a filled dot. */
@@ -929,6 +1703,9 @@ table.tbl { width: 100%; border-collapse: collapse; }
 }
 .pair-line > :not(.pair-btn) { flex: 0 0 auto; }
 .pair-line .proto-mini { margin-left: 0; } /* the gap above already spaces it */
+/* issuer chips under an OPEN pool row — wraps rather than widening the pair
+   column, which every other cell's width is measured against */
+.pair-stock { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 
 .addr-pop {
   position: fixed;
@@ -955,11 +1732,11 @@ table.tbl { width: 100%; border-collapse: collapse; }
 .addr-pop-head b { color: var(--fg); font-weight: 700; }
 .addr-pop-head .dim { font-size: 0.85em; margin-left: auto; }
 .addr-row { display: flex; align-items: center; gap: 6px; }
-/* the ticker column is fixed-width so the three addresses line up, but a long
-   symbol must ellipsize rather than push the address out of the card */
+/* the label column is fixed-width so token/pool identifiers line up, but a long
+   symbol must ellipsize rather than push the value out of the card */
 .addr-k {
   color: var(--dim);
-  flex: 0 0 6.5ch;
+  flex: 0 0 7.5ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1013,25 +1790,161 @@ table.tbl { width: 100%; border-collapse: collapse; }
 /* footer theme switcher */
 .theme-ctl { display: inline-flex; gap: 4px; align-items: center; }
 .theme-ctl .chip { padding: 0 6px; font-size: 0.95em; }
+/* The language switcher's two presentations (LangControl): both languages on a
+   desktop, one chip naming the other language on a phone. The hidden half takes
+   !important for the same reason .hide-m does — the `pointer: coarse` block at
+   the end of this file sets `display: inline-flex` on every chip at a higher
+   specificity, and a coarse 1024px tablet would otherwise show both halves. */
+.lang-pair { display: inline-flex; gap: 4px; }
+.lang-solo { display: none !important; }
 
-/* expander panel inside table/cards */
+/* expander panel inside table/cards.
+   One measure for the whole form. .zap already capped itself, so on a wide
+   screen the range chips and the range bar ran to the full table width while
+   everything under them stopped at 900 — two left-to-right rhythms in one
+   panel, which is most of what read as "messy". */
 .expander {
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-lg);
   background: var(--panel);
   padding: 10px;
   margin: 6px 0 10px;
+  max-width: 940px;
+}
+/* Two decision columns (AddCl): WHERE the band goes, beside HOW MUCH goes in.
+   940 stays the measure — of a COLUMN now, so a wide screen gets two of them
+   rather than one panel with 600px of nothing beside it. Below the split the
+   panel is one column again and the cap is back to being the panel's own.
+
+   Viewport, not container: this panel opens under a pools row and nowhere else,
+   so it is always the full width of the table, and a container query cannot
+   help here anyway — the element whose width would answer it is the element the
+   answer has to resize. 1180 of viewport leaves ~1130 of panel, which is two
+   columns of 550 plus the divider. */
+.add-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px 20px; }
+.add-col { min-width: 0; }
+@media (min-width: 1180px) {
+  .expander.add-cl { max-width: none; }
+  .add-grid { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); }
+  .add-grid > .add-col + .add-col { border-left: 1px solid var(--line); padding-left: 20px; }
+  /* the column has the height to spare, and depth reads far better with it —
+     76px of histogram is a band, and the shelves in it are two pixels apart */
+  .add-grid .lr-plot { height: 132px; }
 }
 .form-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
 .form-row .lbl { width: 110px; color: var(--dim); font-size: 0.9em; text-transform: uppercase; }
+
+/* ---------- segmented control ----------
+   One-of-N as ONE object.
+
+   A row of chips is the right control for a set of independent switches — the
+   market filters are exactly that, and each one earns its own outline. A set
+   of mutually exclusive choices is a different thing wearing the same clothes:
+   six frames and five gaps to say "pick one of these", which is both more ink
+   and a weaker statement than a single frame divided into six.
+
+   It costs about a third of the width too, and that is where it is spent. The
+   range presets were four wrapped rows in the 400px trade column and two and a
+   half on a phone, sitting directly above the chart they set — so the control
+   pushed its own subject off the screen.
+
+   Targets do not shrink: the coarse-pointer block below grows these to 44px
+   the same way it grows a chip. */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line-hi);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  min-width: 0;
+}
+.seg > button {
+  background: none;
+  border: none;
+  border-left: 1px solid var(--line);
+  color: var(--dim);
+  /* tighter than a chip's 8px on purpose: the dividers already separate these,
+     so the padding is breathing room and not the boundary. Six segments pay it
+     six times, which is the difference between the set fitting the trade column
+     and not */
+  padding: 2px 7px;
+  white-space: nowrap;
+  /* a segment may not be squeezed to make the set fit — where the set is wider
+     than the row, the group scrolls (see the 720px block) */
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: background-color var(--t1), color var(--t1);
+}
+.seg > button:first-child { border-left: none; }
+.seg > button:hover:not(:disabled) { color: var(--fg); background: var(--panel2); }
+/* the chosen segment is the only lit one, so it needs no border of its own —
+   the group already drew the frame, and a second one inside it reads as two
+   controls rather than one with a position */
+.seg > button.on { color: var(--acc); background: var(--panel2); }
+.seg > button:disabled { opacity: 0.45; cursor: default; }
+.seg > button:focus-visible { outline: 1px solid var(--acc); outline-offset: -2px; }
+
+/* The escape hatch is indented to the label column rather than carrying an
+   empty label of its own: it belongs to the RANGE row above it and says so by
+   starting where that row's controls start. Padding, not a spacer element,
+   because this is the row that wraps — a spacer indents the first line, and
+   the line that needed it was the second. */
+.range-adv { padding-left: 118px; }
+.trade-col .range-adv,
+.modal.bare .range-adv { padding-left: 66px; }
+
 .chip {
   background: none;
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-md);
   color: var(--dim);
   padding: 2px 8px;
   cursor: pointer;
+  transition: background-color var(--t1), color var(--t1), border-color var(--t1);
 }
 .chip:hover { color: var(--fg); }
 .chip.on { color: var(--acc); border-color: var(--acc-dim); background: var(--panel2); }
+/* IDENTITY chips — the launchpad and the equity issuers. These answer "what am
+   I looking at", while the rest of the row answers "hide some of it", and the
+   two were reading as one undifferentiated strip of outlines. So an identity
+   chip carries its mark's glyph and, when active, is FILLED in that mark's own
+   color (set inline, since the color belongs to the brand and not to a theme).
+   A fill states the current subject; an outline only offers one. */
+.chip.brand { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; }
+.chip.brand:hover { background: var(--panel2); }
+/* The launchpad's resting border, so it and the issuer chip beside it read as
+   one class of control. The issuer sets its own inline (the color is the
+   brand's, not a theme's); the launchpad's colour IS a theme token, so it
+   belongs here. */
+.chip.pad { border-color: var(--cyan); }
+.chip.pad:not(.on) { color: var(--fg); }
+/* Filled chips set background and text inline; only the hover may differ. */
+.chip.brand.on:hover { filter: brightness(1.08); }
+
+/* A sub-filter narrows the chip before it rather than competing with it: same
+   control, smaller, and dashed while inactive so a glance reads one selected
+   filter with two ways to cut it. It stays an OUTLINE even when active — its
+   parent is filled, and two fills side by side would read as two subjects
+   rather than one subject cut in half. No negative margins: this row wraps, and
+   a sub-chip that wrapped to the next line would sit under nothing. */
+.chip.sub {
+  padding: 2px 7px;
+  font-size: 0.9em;
+  font-weight: 600;
+  border-style: dashed;
+  border-color: var(--cyan);
+  /* readable at rest: these only appear once their parent is the subject, so
+     the moment they exist they are a live choice, not background furniture */
+  color: var(--fg);
+  opacity: 0.75;
+}
+.chip.sub:hover { opacity: 1; }
+.chip.sub.on {
+  border-style: solid;
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: var(--panel2);
+  opacity: 1;
+}
 
 .spin { animation: blink 0.6s steps(1) infinite; color: var(--amber); }
 
@@ -1058,6 +1971,15 @@ body::after {
 }
 
 :focus-visible { outline: 1px solid var(--acc-dim); outline-offset: 1px; }
+/* Rows and group heads are focusable (they toggle), and both sit inside a
+   scroll container that would clip an outward offset. Drawn inward, and at
+   full accent rather than --acc-dim: a row outline competes with the table's
+   own grid lines in a way a button's does not. */
+.tbl tr:focus-visible,
+.pool-group-head:focus-visible {
+  outline: 1px solid var(--acc);
+  outline-offset: -1px;
+}
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .brand { text-shadow: 0 0 12px rgba(var(--acc-rgb), 0.35); }
 
@@ -1069,6 +1991,35 @@ th.sortable.on { color: var(--acc); }
 
 /* owned-position rows carry a green left rail so they scan out of the list */
 .tbl tr.rowhover.is-mine td:first-child { box-shadow: inset 3px 0 0 var(--green); }
+
+/* Grouped by token: a summary row, and the markets it opens onto.
+ *
+ * The group row is the heavier of the two on purpose — it is the thing being
+ * compared (a company, a launch), and the markets under it are how that thing
+ * is traded. The nested rows are inset and share the group's background so the
+ * eye reads them as belonging to the row above rather than as more table.
+ */
+.tbl tr.group-row td { border-top: 1px solid var(--line-hi); }
+.tbl tr.group-row td:first-child { font-weight: 600; }
+.tbl tr.group-row.is-open td { background: var(--panel2); }
+.group-caret {
+  color: var(--dim);
+  font-size: 0.85em;
+  width: 10px;
+  flex: 0 0 auto;
+  /* the glyph swaps between ▸ and ▾, whose ink sits at different heights */
+  line-height: 1;
+}
+.tbl tr.group-row.is-open .group-caret { color: var(--fg); }
+.tbl tr.rowhover.is-nested td { background: var(--panel2); }
+.tbl tr.rowhover.is-nested:hover td { background: var(--panel); }
+/* inset the whole nested row from the group it belongs to, on the one edge a
+   table lets you do it without disturbing every column's alignment */
+.tbl tr.rowhover.is-nested td:first-child {
+  padding-left: 26px;
+  box-shadow: inset 2px 0 0 var(--line-hi);
+}
+.tbl tr.rowhover.is-nested.is-mine td:first-child { box-shadow: inset 3px 0 0 var(--green); }
 
 /* pools table: compact two-line cells */
 .pair-sub {
@@ -1085,13 +2036,6 @@ th.sortable.on { color: var(--acc); }
   margin-top: 1px;
 }
 .tbl td { padding: 6px 8px; }
-
-/* projected APR line in add-LP panels */
-.sim-line {
-  border-top: 1px dashed var(--line-hi);
-  margin-top: 8px;
-  padding-top: 8px;
-}
 
 /* ---------- spec box (LIMIT order ticket) ---------- */
 .spec {
@@ -1124,8 +2068,10 @@ th.sortable.on { color: var(--acc); }
 /* swap trade cards — SELL / BUY */
 .swap-card {
   border: 1px solid var(--line-hi);
+  border-radius: var(--r-lg);
   background: var(--panel2);
   padding: 10px 14px 12px;
+  transition: border-color var(--t1);
 }
 .swap-card:focus-within { border-color: var(--acc-dim); }
 .swap-card .hd {
@@ -1136,6 +2082,10 @@ th.sortable.on { color: var(--acc); }
   margin-bottom: 8px;
 }
 .swap-card .side-lbl { color: var(--dim); font-size: 0.8em; text-transform: uppercase; letter-spacing: 1.5px; }
+/* SELL/BUY plus, when there is one, the issuer of the token on that side. One
+   flex child so the header's space-between still puts the balance at the right
+   edge — a third child would have spread all three across the row. */
+.swap-card .side-id { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .swap-card .bal {
   background: none;
   border: none;
@@ -1158,6 +2108,7 @@ th.sortable.on { color: var(--acc); }
   outline: none;
   color: var(--fg);
   font-size: 2em;
+  font-weight: 600;
   width: 100%;
   caret-color: var(--acc);
   font-family: inherit;
@@ -1168,6 +2119,7 @@ th.sortable.on { color: var(--acc); }
 .swap-card .amt::placeholder { color: var(--placeholder); }
 .swap-card .out {
   font-size: 2em;
+  font-weight: 600;
   flex: 1;
   text-align: right;
   overflow: hidden;
@@ -1219,11 +2171,6 @@ th.sortable.on { color: var(--acc); }
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
 }
 .chain-pop .tsel-item {
-  background: none;
-  border: none;
-  width: 100%;
-  font: inherit;
-  color: inherit;
   letter-spacing: 1px;
 }
 .chain-pop .tsel-item.cur { color: var(--acc); }
@@ -1334,7 +2281,16 @@ th.sortable.on { color: var(--acc); }
 .kv .k { color: var(--dim); text-transform: uppercase; font-size: 0.85em; letter-spacing: 0.5px; flex-shrink: 0; }
 .kv .fill { flex: 1; border-bottom: 1px dotted var(--line); transform: translateY(-3px); min-width: 20px; }
 .kv .v { text-align: right; }
-.kv.click { cursor: pointer; }
+/* the two kv rows that toggle something are buttons; the rest stay plain rows */
+.kv.click {
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  font: inherit;
+  color: inherit;
+}
 .kv.click:hover .k { color: var(--fg); }
 /* indented breakdown rows under an expandable kv (e.g. IMPACT -> fees) */
 .kv.sub { padding-left: 16px; }
@@ -1343,6 +2299,32 @@ th.sortable.on { color: var(--acc); }
 /* full-width action button */
 .swap-cta { margin-top: 12px; }
 .swap-cta .btn { width: 100%; padding: 12px 16px; font-size: 1.05em; letter-spacing: 1.5px; }
+/* the page's ONE primary action holds the inversion .btn's hover promises for
+   as long as it is pressable — a filled bar reads "this is the trigger" from
+   across the room. The amber refresh state keeps its own fill; hover flips
+   back to outline as the pressed-state cue. */
+.swap-cta .btn.big:not(:disabled):not(.amber):not(.danger) {
+  background: var(--acc);
+  border-color: var(--acc);
+  color: var(--acc-fg);
+}
+.swap-cta .btn.big:not(:disabled):not(.amber):not(.danger):hover {
+  background: transparent;
+  color: var(--acc);
+}
+/* The armed press keeps the filled bar — it is still the trigger — and takes
+   the red, so the press that signs never wears the same face as the press that
+   asked. Without this it inherits the identity fill above and the two presses
+   are indistinguishable, which is the whole thing the second press is for. */
+.swap-cta .btn.big.danger:not(:disabled) {
+  background: var(--red);
+  border-color: var(--red);
+  color: #000;
+}
+.swap-cta .btn.big.danger:not(:disabled):hover {
+  background: transparent;
+  color: var(--red);
+}
 
 .logaction {
   color: var(--acc);
@@ -1361,12 +2343,93 @@ th.sortable.on { color: var(--acc); }
 .zap .spec-row .sv { white-space: normal; }
 .zap-steps { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; }
 .zstep { display: flex; gap: 8px; align-items: baseline; color: var(--dim); }
-.zstep .zn { min-width: 16px; text-align: right; color: var(--line-hi); }
+/* The number inherits its row's state, so a done step's index is green with its
+   check. It was pinned to the border token, which put it at 1.6:1 — a numbered
+   sequence whose numbers could not be read. */
+.zstep .zn { min-width: 16px; text-align: right; }
 .zstep .zm { min-width: 12px; }
 .zstep.done { color: var(--green); }
 .zstep.run { color: var(--fg); }
 .zstep.run .zm { animation: blink 1s step-end infinite; }
 .zstep.fail { color: var(--red); }
+
+/* ---------- zap flow: the split, drawn (ZapFlow.tsx) ---------- */
+/* Clear of the SLIP row above: flush against it, a full-width bar reads as
+   that row's chrome rather than as its own answer. */
+.zflow { margin: 14px 0 8px; }
+/* A rule, not a slab. Boxed in a track and filled solid, this was the heaviest
+   thing in the panel — a bright block where everything around it is hairlines
+   and small type. Six pixels of bare proportion carry the same split and stay
+   out of the way of the numbers under them, which is what gets read. */
+.zflow-bar { display: flex; gap: 2px; height: 6px; }
+.zseg { min-width: 3px; position: relative; overflow: hidden; }
+/* One hue, two densities: colour is spoken for — green/red/amber carry
+   up/down/warn in every theme and MONO has none. The parked pile is faint and
+   still, the pile being swapped is bright with a highlight running across it,
+   so which one MOVES reads before a number does. The gap between bands is what
+   keeps two adjacent swaps (funding from outside the pair) legible as two. */
+.zseg.keep { background: rgba(var(--range-rgb), 0.24); }
+.zseg.swap { background: rgba(var(--range-rgb), 0.62); }
+.zseg.swap::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(var(--range-rgb), 0.95), transparent);
+  transform: translateX(-100%);
+  /* staggered by pile, so two adjacent SWAP bands sweep out of phase */
+  animation: zseg-run 3.4s linear calc(var(--zi, 0) * -1.15s) infinite;
+}
+@keyframes zseg-run {
+  to { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .zseg.swap::after { animation: none; transform: none; opacity: 0.4; }
+}
+.zleg {
+  display: grid;
+  grid-template-columns: 14px 3.4em max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: 0.9em;
+  margin-top: 5px;
+}
+/* the same two densities at the same height, so a legend row is recognisably
+   the band above it rather than a key that has to be learned */
+.zsw { height: 6px; align-self: center; }
+.zsw.keep { background: rgba(var(--range-rgb), 0.24); }
+.zsw.swap { background: rgba(var(--range-rgb), 0.62); }
+.zleg .zpc { color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
+.zleg .zk { color: var(--dim); text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.9em; }
+.zleg .zv { white-space: nowrap; }
+/* Adjacent to the amount it annotates. It used to be pinned right, echoing the
+   far column of the spec box it replaced — but that box set its own width, and
+   this grid runs to the panel's 940, which turned the echo into eight hundred
+   pixels of nothing between a leg and the route that carries it. The phone
+   layout had already dropped the pin; this is desktop agreeing with it. */
+/* The dim/bright step alone did not separate them — "0.20968 WETH uniswap v3"
+   still read as one phrase across an 8px grid gap. The indent also does the
+   right thing on a phone, where this column drops to its own line and the
+   offset reads as subordinate to the leg above it. */
+.zleg .zd { color: var(--dim); padding-left: 12px; }
+/* one fact, one line-break unit — the detail column wraps between the facts it
+   lists and never inside one of them */
+.zleg .zd .nw { white-space: nowrap; }
+/* full brightness, unlike everything else annotating the flow: it is the one
+   number here that is money leaving, and the rest are the market's */
+.zfee { color: var(--fg); font-size: 0.85em; margin-top: 5px; }
+
+/* ---------- projected outcome strip (AddStats.tsx) ---------- */
+.zstats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0; }
+.zstats .stat { min-width: 0; }
+.zstats .stat .k,
+.zstats .stat .v,
+.zstats .stat .sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.zstats .stat .v { font-size: 1.1em; }
+.zstats-out { margin: 8px 0; }
 
 /* ---------- POSITIONS: same-pool aggregation (ClPoolGroup) ---------- */
 .pool-group { margin-bottom: 10px; }
@@ -1414,6 +2477,26 @@ th.sortable.on { color: var(--acc); }
   }
 }
 
+/* ---------- radius harmony ----------
+   the boxes the component passes above didn't reach, grouped once so the
+   square-outlier list stays auditable. Panels/cards r-lg, controls r-md,
+   the 14px range track r-sm. Table cells and full-width separators are
+   deliberately absent — rows are not boxes. */
+.rbar-track { border-radius: var(--r-sm); }
+.lr-unit,
+.lr-plot,
+.chain-tag,
+.chain-btn,
+.hist-btn,
+.ds-btn,
+.stat { border-radius: var(--r-md); }
+.spec,
+.bridge-progress,
+.pend-row,
+.pending-row,
+.swap-flip,
+.pool-group-head { border-radius: var(--r-lg); }
+
 /* ---------- mobile (≤720px) ----------
    one breakpoint: phones + narrow tablets. desktop layout is untouched. */
 @media (max-width: 720px) {
@@ -1422,22 +2505,36 @@ th.sortable.on { color: var(--acc); }
   .show-m { display: inline; }
   .cell-sub.show-m { display: block; } /* stacked second metric in a cell */
 
-  /* bottom padding clears the fixed tab bar */
-  .app { padding: 6px 8px calc(58px + env(safe-area-inset-bottom)); }
+  /* bottom padding clears the floating tab bar (bar ≈46px + 10px off the edge
+     + a little air) */
+  .app { padding: 6px 8px calc(66px + env(safe-area-inset-bottom)); }
   .main { padding: 12px 10px; }
 
-  /* header keeps brand + history + news + lang + connect on one row. It is
-     tight: at 360px the English CONNECT leaves 322px for 335px of buttons, so
-     the wordmark contracts (Header.tsx) and these two densities buy the rest —
-     measure before adding a sixth control here. */
-  .hdr { gap: 6px; padding: 7px 10px; }
+  /* header keeps brand + history + news + lang + chain + connect on one row. It
+     is tight: at 360px the English CONNECT leaves 322px for 335px of buttons,
+     so the wordmark contracts (Header.tsx) and these densities buy the rest.
+     The chain switcher is the sixth control and it is allowed to cost width —
+     which chain you are looking at outranks a block number. Measured at 360px
+     it now holds one 48px row with room to spare, which the single-chip
+     language switcher below is what paid for. .hdr still wraps if a longer
+     chain name ever spends that room, and the popovers below are written for
+     the case where it does. */
+  .hdr { gap: 6px; padding: 2px 10px; }
+  .chain-ctl .hist-btn { padding: 4px 6px; }
   .hist-btn { padding: 4px 7px; }
   .hdr-meta { display: none; } /* block number is a desktop nicety */
+  /* One chip naming the language it switches TO, in place of two naming both.
+     That is the ~90px which decides whether this row holds or grows to two —
+     and a second header row is 58px off the top of every tab at once. */
+  .lang-pair { display: none !important; }
+  .lang-solo { display: inline-flex !important; }
   /* pushes the utility cluster right — only the FIRST button in it may take the
      auto margin, otherwise the free space splits between them and the cluster
-     scatters across the row */
+     scatters across the row. General sibling, not adjacent: the chain switcher
+     is a .hist too and sits past the language chips, so `+` would have handed
+     it a second auto margin and split the cluster around LANG. */
   .hdr .hist { margin-left: auto; }
-  .hdr .hist + .hist { margin-left: 0; }
+  .hdr .hist ~ .hist { margin-left: 0; }
   .hdr .theme-ctl > .dim { display: none; } /* "lang:" label */
 
   /* Popovers span the header instead of hanging off their own button. At
@@ -1448,25 +2545,175 @@ th.sortable.on { color: var(--acc); }
   .hdr .hist { position: static; }
   .hist-pop { left: 0; right: 0; width: auto; }
 
-  /* the tab bar drops to the bottom edge — thumb territory */
+  /* the tab bar drops to the bottom edge — thumb territory. Floating, not
+     edge-to-edge: the same segmented container the desktop header shows,
+     lifted off the screen edge so it reads as one object. The segmented
+     chrome (bg/border/radius/padding) is inherited from the base .tabs. */
   .tabs {
     position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    left: 10px;
+    right: 10px;
     z-index: 60;
-    gap: 6px;
+    flex-wrap: nowrap;
     background: var(--panel);
-    border-top: 1px solid var(--line-hi);
-    /* a sliver of air under the buttons — they shouldn't kiss the screen edge */
-    padding: 7px 10px calc(13px + env(safe-area-inset-bottom));
+    border-color: var(--line-hi);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   }
   .tab { flex: 1; padding: 8px 2px; text-align: center; }
   .tab .key { display: none; } /* [1]/[2]/[3] are keyboard affordances */
 
+  /* The fixed tab bar vs. the software keyboard: an input taking focus pushes
+     the bar up with the keyboard, and it lands exactly on the row being edited
+     (the SwapTab BUY card's token button sat under it). The bar has no job
+     while a field owns the keyboard, so it leaves and comes back on blur.
+     :has() is already load-bearing here (the .hint anchoring above), and where
+     it is unsupported the bar simply stays — the old behavior, not a new break. */
+  body:has(.main :is(input, textarea, select):focus) .tabs { display: none; }
+
+  /* Pickers must beat the fixed chrome. .tsel-pop/.chain-pop (z-30) and their
+     backdrop (z-20) all stacked UNDER the z-60 tab bar: rows near the bottom
+     were hidden behind it, and the bar stayed clickable while a picker was
+     open. On a phone the token picker becomes a full overlay — the standard
+     mobile pattern, and the only shape whose filter field survives the
+     keyboard it summons (autoFocus) — with the backdrop promoted above the
+     bar so the stray tap closes the picker instead of switching the tab. */
+  .tsel-backdrop { z-index: 80; }
+  .tsel-pop {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    max-height: none;
+    border-left: none;
+    border-right: none;
+    border-radius: 0; /* full-screen overlay — no card corners */
+    z-index: 85;
+    /* the last row must clear the home indicator — the list scrolls, but a
+       half-clipped row reads as broken, not as scrollable */
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .chain-pop { z-index: 85; }
+
   /* fixed 110px form labels waste a third of a phone row */
   .form-row .lbl { width: auto; }
   .form-row { row-gap: 6px; }
+
+  /* ---------- POOLS: the chrome above the markets ----------
+     Measured at 390x844 before this block: the first pool row began 340px down,
+     forty percent of the screen. The chips were 128px of it — six 44px targets
+     wrapped into two and a half rows — and the catalog tallies another 78px of
+     wrapped telemetry. Both are answers to questions asked before arriving; the
+     markets are the question the page is for.
+
+     So the search box takes a row of its own, and the chips become ONE strip
+     that scrolls sideways: every filter is still there, still a full 44px
+     target, and the set costs one row however many of them a chain can prove. */
+  .market-filters { row-gap: 6px; }
+  .market-filters > #pool-search { flex: 1 1 100%; max-width: none; }
+  .chip-strip {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain; /* the strip's end is not the page's back gesture */
+    scrollbar-width: none;
+  }
+  .chip-strip::-webkit-scrollbar { display: none; }
+  /* a chip may not be squeezed to make the set fit — that is what scrolling is for */
+  .chip-strip > * { flex: 0 0 auto; }
+
+  /* The pager goes under the markets it extends. Above them it was asking for
+     a second page of something the reader had not started reading, and charging
+     62px of the first page for the privilege. `order` alone moves it: the
+     column is already a flex column, and the table is the item that grows. */
+  .market-more { order: 1; margin-top: 8px; }
+
+  /* see PoolsTab: while the sheet is up, the strip above it is markets */
+  .market-col.behind-sheet > .market-filters,
+  .market-col.behind-sheet > .market-stat { display: none; }
+
+  /* ---------- POSITIONS: the summary above the positions ----------
+     A 320px minimum column meant one card per row on every phone, so three
+     totals cost 248px before the first position card. The numbers themselves
+     are short — a USD figure, a count, a range verdict — and it is the line
+     UNDER them that wants width. Two columns lets that line wrap, which is the
+     cheap direction, instead of the grid, which is the expensive one. */
+  .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .grid2 .stat .v { font-size: 1.15em; }
+
+  /* A 220px amount field is set from the component (inline style), and on a
+     360px phone it leaves no room for MAX and the balance, which then drop to
+     a row of their own. Let it take what is left of the row instead — this is
+     the one place an inline width has to be overruled. */
+  .expander .form-row .input {
+    width: auto !important;
+    flex: 1 1 120px;
+    min-width: 0;
+  }
+
+  /* the leg detail drops under its own pile — four columns of it on a phone
+     starve the last one to a character per line */
+  .zleg { grid-template-columns: 14px 3.4em minmax(0, 1fr); }
+  .zleg .zv { white-space: normal; }
+  .zleg .zd { grid-column: 3; }
+  .zstats { gap: 6px; }
+  .zstats .stat { padding: 6px 7px; }
+  .zstats .stat .v { font-size: 1em; }
+  /* a third of a phone row cannot hold "+41.2% staked" on one line, and the
+     ellipsis ate the word that says which APR it is */
+  .zstats .stat .sub { white-space: normal; }
+
+  /* ---------- the range control, on one line ----------
+     Six widths and the way into the rest of them, sitting directly above the
+     chart that answers whether the width is any good. Wrapping was the whole
+     problem: a second row of 44px targets pushed that chart down by a fifteenth
+     of the screen, so the control displaced its own subject.
+
+     So these rows do not wrap here, and the segment group is what gives. It is
+     a fallback and not the plan — the sets fit at 390 and clear 360 by a
+     nudge — and a longer locale costs that nudge sideways instead of the
+     chart's place. The scrollbar is hidden for the reason the market chip
+     strip hides its own: the strip is one control tall, and a horizontal bar
+     inside it reads as breakage rather than as a hint. */
+  .range-row,
+  .zap-in { flex-wrap: nowrap; }
+  .range-row > *,
+  .zap-in > * { flex: 0 0 auto; }
+  .range-row > .seg,
+  .zap-in > .seg {
+    flex: 0 1 auto;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .range-row > .seg::-webkit-scrollbar,
+  .zap-in > .seg::-webkit-scrollbar { display: none; }
+
+  /* The escape hatch DOES wrap. It carries a field — a percent, or two raw
+     ticks — and a field cannot be squeezed to a nudge the way a set of labels
+     can. So the group stays whole and the field takes the next line when it
+     has to. It is also the rare path: the chart above is the answer for
+     everyone who did not come here to type a tick number. */
+  .range-adv > .seg { flex: 0 0 auto; }
+  .range-adv .input { flex: 1 1 70px; min-width: 0; }
+
+  /* A segment is already 44px tall here, so the width it does not need is the
+     width the SET needs to fit — and the set fitting beats a pixel of air per
+     side. Seven controls in the range row pay it, which is what clears the
+     widest state: TICKS, five Latin characters in either locale. */
+  .seg > button { padding: 2px 6px; }
+  .range-row > .chip { padding-left: 6px; padding-right: 6px; }
+
+  /* The column count is measured from the plot's own width now (see
+     useElementWidth), so a phone draws about twenty wide columns instead of
+     fifty-six five-pixel ones — the gap stays at 1px everywhere, because the
+     gap is what makes a distribution read as buckets rather than as a shape. */
+  .lr-plot { height: 88px; } /* taller, since a thumb needs the grip to be worth aiming at */
+  .lr-grip { width: 26px; margin-left: -13px; }
+  .lr-grip::after { left: 11px; }
+  /* the price readout drops below the two bounds rather than squeezing three
+     numbers onto one phone line */
+  .lr-axis { flex-wrap: wrap; }
+  .lr-mid { order: 1; width: 100%; text-align: center; }
 
   /* no rpc/theme/blockscout chrome on a phone — the bottom bar owns that edge */
   .footer { display: none; }
@@ -1546,5 +2793,33 @@ th.sortable.on { color: var(--acc); }
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+}
+
+/* ---------- touch: hit area, bought without spending density ----------
+   .btn/.tab/.chip run ~28px tall on the desktop grid. That clears WCAG 2.5.8
+   (24px, AA) and sits under the 44px every touch guideline asks for, so the
+   gap is comfort rather than compliance — which is why it is paid for here
+   and not in the base rules. Density is the brief; a mouse keeps it.
+
+   Keyed on `pointer: coarse`, not a width: a 1024px tablet is a finger and a
+   700px desktop window is still a mouse. Vertical only — the mobile header is
+   width-critical at 360px (see the 720px block), so growing these downward
+   costs it nothing. .quote-card already clears 44px on its own two lines, and
+   .logaction is a chip riding inside a log line, where 44px would be wrong. */
+@media (pointer: coarse) {
+  .btn,
+  .tab,
+  .tsel-btn,
+  .seg > button,
+  .chip:not(.logaction) {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .tsel-item {
+    min-height: 44px;
+    align-items: center;
   }
 }

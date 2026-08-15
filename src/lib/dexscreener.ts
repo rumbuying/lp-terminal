@@ -19,9 +19,11 @@
 // scheme checks, the target page gets no Referer (these URLs sit beside a
 // connected wallet) and no window.opener handle back into this tab.
 
-/** dexscreener's chain slug for Robinhood Chain — the same one every API path
+/** dexscreener's slug for the active chain — the same one every API path
  *  in lib/poolstats.ts and lib/uniBrowse.ts already uses */
-const DS_PAIR_BASE = 'https://dexscreener.com/robinhood/'
+import { CHAIN } from '../config/chains'
+
+const DS_PAIR_BASE = `https://dexscreener.com/${CHAIN.slugs.dexscreener}/`
 
 /** a 20-byte hex address and nothing else: no whitespace, prefix or tail */
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/

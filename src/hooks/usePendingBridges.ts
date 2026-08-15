@@ -4,10 +4,8 @@
 // fill. Leaving the tab pauses polling; entries persist and resume later.
 import { useEffect, useSyncExternalStore } from 'react'
 import type { Hex } from 'viem'
-import { getPublicClient } from 'wagmi/actions'
 import { CHAIN_ID } from '../config/addresses'
 import { explorerOf } from '../config/bridge'
-import { asConfiguredChain, wagmiConfig } from '../config/wagmi'
 import { t } from '../i18n'
 import {
   checkPendingTransfer,
@@ -16,11 +14,12 @@ import {
   pendingBridges,
   type PendingTransfer,
 } from '../lib/bridge/pending'
-import { invalidateAll } from '../lib/tx'
+import { invalidateTransactionState } from '../lib/tx'
 import { txlog } from '../lib/txlog'
+import { homeClient } from '../lib/homeClient'
 
 const portalReceiptProbe = async (childTxHash: Hex): Promise<boolean> => {
-  const client = getPublicClient(wagmiConfig, { chainId: asConfiguredChain(CHAIN_ID) })
+  const client = homeClient()
   const rcpt = await client.getTransactionReceipt({ hash: childTxHash }).catch(() => null)
   return rcpt !== null
 }
@@ -31,7 +30,7 @@ function announce(t0: PendingTransfer, status: PendingTransfer['status'], fillTx
   if (status === 'filled') {
     const id = txlog.push('ok', t('bridge.filled'), fillTxHash)
     if (fillTxHash) txlog.update(id, { href: `${explorerOf(t0.destChainId)}/tx/${fillTxHash}` })
-    invalidateAll()
+    invalidateTransactionState('balances')
   } else if (status === 'refunded') txlog.push('err', t('bridge.refunded'))
   else if (status === 'failed') txlog.push('err', t('bridge.fillFailed'))
 }

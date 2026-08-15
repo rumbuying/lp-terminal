@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fmtCompact, fmtNum, fmtUsd, sanitizeAmountInput } from './format'
+import { clampWidth, displayWidth, fmtCompact, fmtNum, fmtUsd, sanitizeAmountInput } from './format'
 
 test('amount input: fraction clamps to the token decimals, never silently zero', () => {
   // 6-decimal USDG: the 7th fraction digit is untypeable, not a hidden zero
@@ -63,4 +63,43 @@ test('fmtUsd is exact for real money and bounded for impossible money', () => {
   // trillion the number is wrong, and rendering it exactly costs 30 columns
   assert.equal(fmtUsd(2.99e23), '$3.0e+23')
   assert.ok(fmtUsd(298_973_758_851_651_660_000_000).length <= 9)
+})
+
+test('a wide character costs two columns, and a character count does not say so', () => {
+  assert.equal(displayWidth('WBNB'), 4)
+  assert.equal(displayWidth('回车键代币'), 10) // five characters, ten columns
+  assert.equal(displayWidth('ＵＳＤＴ'), 8) // fullwidth forms are wide too
+  assert.equal(displayWidth('é'), 1) // e + combining acute: the mark is free
+  assert.equal(displayWidth('한글'), 4)
+  // the shape of the bug this exists for: the cap that let it through
+  assert.equal('回车键代币名称回车键代币名称回车键代币名称回车键代币名称回车键代币名称'.slice(0, 32).length, 32)
+  assert.equal(displayWidth('回车键代币名称回车键代币名称回车键代币名称回车键代币名称回车键代币名称'.slice(0, 32)), 64)
+})
+
+test('clamped names never exceed their column budget, in any script', () => {
+  const budget = 14
+  for (const name of [
+    'WBNB',
+    'SOME-VERY-LONG-LP-TOKEN-NAME-V2',
+    '回车键代币名称回车键代币名称回车键代币名称',
+    'ＵＳＤＴ ｆｕｌｌｗｉｄｔｈ ｎａｍｅ',
+    '🚀🚀🚀 MOON TOKEN 🚀🚀🚀',
+    'MIXED混合NAME名称TOKEN',
+    '한국어토큰이름입니다',
+  ])
+    assert.ok(
+      displayWidth(clampWidth(name, budget)) <= budget,
+      `"${name}" clamped to "${clampWidth(name, budget)}" = ${displayWidth(clampWidth(name, budget))} columns`,
+    )
+})
+
+test('clamping keeps whole characters and only marks what it cut', () => {
+  assert.equal(clampWidth('WBNB', 14), 'WBNB') // fits: returned untouched, no ellipsis
+  assert.equal(clampWidth('ABCDEFGHIJKLMNOP', 8), 'ABCDEFG…')
+  assert.equal(clampWidth('回车键代币名称', 8), '回车键…') // 3 wide + ellipsis = 7, a 4th would be 9
+  // a surrogate pair is one character: `.slice` would halve it and leave U+FFFD
+  assert.equal(clampWidth('🚀🚀🚀🚀', 5), '🚀🚀…')
+  assert.ok(!clampWidth('🚀🚀🚀🚀', 5).includes('�'))
+  assert.equal(clampWidth('anything', 1), '…')
+  assert.equal(clampWidth('anything', 0), '')
 })

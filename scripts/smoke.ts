@@ -13,7 +13,12 @@ import {
   v2GaugeAbi,
   voterAbi,
 } from '../src/abi'
-import { ADDR } from '../src/config/addresses'
+import { CHAIN } from '../src/config/chains'
+import { ADDR, requireGov } from '../src/config/addresses'
+
+// This smoke test drives UP33's ve(3,3) contracts end to end, so it only
+// means anything on a chain that has them.
+const gov = requireGov()
 import {
   getAmountsForLiquidity,
   getLiquidityForAmounts,
@@ -32,13 +37,16 @@ function check(name: string, cond: boolean, detail = '') {
 }
 
 const envText = readFileSync(fileURLToPath(new URL('../../.env', import.meta.url)), 'utf8')
-const rpc =
-  envText.match(/^\s*RPC\s*=\s*(\S+)\s*$/m)?.[1] ?? 'https://rpc.mainnet.chain.robinhood.com'
+// The private RPC only matches the chain this build targets; a CHAIN override
+// falls back to that chain's public endpoint rather than pointing a BSC run at
+// a Robinhood node.
+const envRpc = envText.match(/^\s*RPC\s*=\s*(\S+)\s*$/m)?.[1]
+const rpc = (CHAIN.key === 'robinhood' ? envRpc : undefined) ?? CHAIN.publicRpc
 
 const chain = defineChain({
-  id: 4663,
-  name: 'Robinhood Chain',
-  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  id: CHAIN.id,
+  name: CHAIN.name,
+  nativeCurrency: CHAIN.nativeCurrency,
   rpcUrls: { default: { http: [rpc] } },
   contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } },
 })
@@ -49,11 +57,11 @@ const ok = <T,>(r: Res | undefined): T | undefined =>
   r && r.status === 'success' ? (r.result as T) : undefined
 
 async function main() {
-  console.log('== UP33 TERMINAL smoke test ==')
+  console.log(`== LP TERMINAL smoke test — ${CHAIN.name} ==`)
 
   // 1. chain id
   const id = await pc.getChainId()
-  check('chainId == 4663', id === 4663, String(id))
+  check(`chainId == ${CHAIN.id}`, id === CHAIN.id, String(id))
 
   // 2. TickMath constants vs float reference
   let maxRel = 0
@@ -144,8 +152,8 @@ async function main() {
   const wethUp = clPools
     .filter(
       (p) =>
-        (p.t0.toLowerCase() === ADDR.WETH.toLowerCase() && p.t1.toLowerCase() === ADDR.UP.toLowerCase()) ||
-        (p.t1.toLowerCase() === ADDR.WETH.toLowerCase() && p.t0.toLowerCase() === ADDR.UP.toLowerCase()),
+        (p.t0.toLowerCase() === ADDR.WNATIVE.toLowerCase() && p.t1.toLowerCase() === gov.UP.toLowerCase()) ||
+        (p.t1.toLowerCase() === ADDR.WNATIVE.toLowerCase() && p.t0.toLowerCase() === gov.UP.toLowerCase()),
     )
     .sort((a, b) => (b.liq > a.liq ? 1 : -1))[0]
   check('WETH/UP CL pool exists', !!wethUp, wethUp?.addr ?? '')
@@ -160,8 +168,8 @@ async function main() {
           functionName: 'quoteExactInputSingle',
           args: [
             {
-              tokenIn: ADDR.WETH,
-              tokenOut: ADDR.UP,
+              tokenIn: ADDR.WNATIVE,
+              tokenOut: gov.UP,
               amountIn: oneWeth,
               tickSpacing: wethUp.ts,
               sqrtPriceLimitX96: 0n,
@@ -177,10 +185,10 @@ async function main() {
     // spot price sanity vs quoter (small trade impact expected)
     const spot = sqrtPriceToPrice(
       wethUp.sqrtP,
-      wethUp.t0.toLowerCase() === ADDR.WETH.toLowerCase() ? 18 : 18,
+      wethUp.t0.toLowerCase() === ADDR.WNATIVE.toLowerCase() ? 18 : 18,
       18,
     )
-    const upPerWeth = wethUp.t0.toLowerCase() === ADDR.WETH.toLowerCase() ? spot : 1 / spot
+    const upPerWeth = wethUp.t0.toLowerCase() === ADDR.WNATIVE.toLowerCase() ? spot : 1 / spot
     if (quoterOut) {
       const outF = Number(quoterOut) / 1e18
       const rel = Math.abs(outF - upPerWeth) / upPerWeth
@@ -189,7 +197,7 @@ async function main() {
 
     const smokePool: ClPool = {
       kind: 'cl',
-      protocol: 'up33',
+      protocol: 'home',
       address: wethUp.addr,
       token0: wethUp.t0,
       token1: wethUp.t1,
@@ -206,16 +214,16 @@ async function main() {
       rewardRate: 0n,
       periodFinish: 0n,
     }
-    const direct = await quoteDirectCandidates(pc, [smokePool], ADDR.WETH, ADDR.UP, oneWeth, 9)
+    const direct = await quoteDirectCandidates(pc, [smokePool], ADDR.WNATIVE, gov.UP, oneWeth, 9)
     check(
       'direct comparison quotes Uniswap and UP33',
-      direct.status.uniswap === 'quoted' && direct.status.up33 === 'quoted',
-      `${direct.status.uniswap}/${direct.status.up33}`,
+      direct.status.uniswap === 'quoted' && direct.status.home === 'quoted',
+      `${direct.status.uniswap}/${direct.status.home}`,
     )
     check(
       'direct UP33 quote is net of the exact 9 bps fee',
-      !!quoterOut && direct.byProtocol.up33?.amountOut === netAfterFee(quoterOut, 9),
-      direct.byProtocol.up33?.amountOut.toString() ?? 'no quote',
+      !!quoterOut && direct.byProtocol.home?.amountOut === netAfterFee(quoterOut, 9),
+      direct.byProtocol.home?.amountOut.toString() ?? 'no quote',
     )
     check(
       'direct comparison selects a concrete route',
@@ -237,7 +245,7 @@ async function main() {
   const gaugeRes = (await pc.multicall({
     contracts: v2Addrs.map((p) => ({
       abi: voterAbi,
-      address: ADDR.VOTER,
+      address: gov.VOTER,
       functionName: 'gauges',
       args: [p],
     })) as never,

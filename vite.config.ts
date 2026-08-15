@@ -2,22 +2,27 @@ import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
 
-// envDir points at the repo root so `.env` (RPC / KYBERSWAP_*) is picked up.
-// envPrefix exposes exactly those keys to the client bundle.
+// envDir points at the parent workspace so its shared .env is picked up.
+// envPrefix exposes public/runtime client config.
 //
 // SECRET RULE: `RPC` (private key-bearing URL) is for personal/local builds only —
 // a build meant for public serving must NOT have it set (see README "Deploy").
-// A public build reads the chain through same-origin `/rpc` instead; the dev and
-// preview servers below emulate that reverse proxy so the mode is testable locally.
+// The deployed app reads the chain through same-origin `/rpc` instead; the dev and
+// preview servers below emulate that nginx proxy so the mode is testable locally.
 export default defineConfig(({ mode }) => {
-  const envDir = fileURLToPath(new URL('.', import.meta.url))
-  const env = loadEnv(mode, envDir, ['RPC', 'KYBERSWAP_'])
+  const envDir = fileURLToPath(new URL('..', import.meta.url))
+  // THEGRAPH_ is loaded here but deliberately absent from `envPrefix` below:
+  // this process needs the key to build the proxy header, and the bundle must
+  // never see it. Adding it there would ship a metered credential to every
+  // visitor.
+  const env = loadEnv(mode, envDir, ['RPC', 'KYBERSWAP_', 'CHAIN', 'THEGRAPH_'])
   const feeReceiver = (process.env.KYBERSWAP_FEE_RECEIVER ?? env.KYBERSWAP_FEE_RECEIVER ?? '').trim()
   if (!/^0x[0-9a-fA-F]{40}$/.test(feeReceiver)) {
-    throw new Error('KYBERSWAP_FEE_RECEIVER must be a valid address; the swap/zap fee sweep requires a configured receiver (see .env.example)')
+    throw new Error('KYBERSWAP_FEE_RECEIVER must be a valid address')
   }
-  // local emulation of the production reverse proxies, so the server deployment
-  // mode is fully testable via `RPC="" npm run build && npm run preview`:
+  // local emulation of the reverse proxy a server deploy fronts the app with,
+  // so that deployment mode
+  // is fully testable via `RPC="" npm run build && npm run preview`:
   //  - /rpc   -> the .env RPC (or RPC_PROXY_TARGET override); key stays in node
   //  - /kyber -> read-only Kyber valuation endpoint
   const upstream = (process.env.RPC_PROXY_TARGET ?? env.RPC ?? '').trim()
@@ -26,10 +31,20 @@ export default defineConfig(({ mode }) => {
     changeOrigin: true,
     rewrite: (p: string) => p.replace(new RegExp(`^${prefix}`), ''),
   })
+  const graphKey = (process.env.THEGRAPH_API_KEY ?? env.THEGRAPH_API_KEY ?? '').trim()
   const proxy: Record<string, object> = {
     '/kyber': passthru('/kyber', 'https://aggregator-api.kyberswap.com'),
     '/dexscreener': passthru('/dexscreener', 'https://api.dexscreener.com'),
     '/goldsky': passthru('/goldsky', 'https://api.goldsky.com'),
+    // The Graph is the one AUTHENTICATED upstream here, so this proxy exists to
+    // hold a credential rather than to dodge a blocked host. The key is
+    // attached in node and never reaches the browser — same contract nginx
+    // keeps in production, emulated so the path works in `npm run dev` too.
+    // With no key configured the gateway answers 401 and callers degrade.
+    '/thegraph': {
+      ...passthru('/thegraph', 'https://gateway.thegraph.com'),
+      headers: graphKey ? { Authorization: `Bearer ${graphKey}` } : {},
+    },
     // local pool indexer (`npm run indexer`) — same-origin /api like the
     // production nginx route; the frontend falls back to client-side
     // dexscreener discovery when it isn't running
@@ -40,7 +55,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     envDir,
-    envPrefix: ['VITE_', 'RPC', 'KYBERSWAP_'],
+    // CHAIN selects the build/local default. Both configured home chains ship
+    // in the production bundle; the URL selects one at page load.
+    envPrefix: ['VITE_', 'RPC', 'KYBERSWAP_', 'CHAIN'],
     server: { port: 5173, proxy },
     preview: { port: 4173, proxy },
     build: {

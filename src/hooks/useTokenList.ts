@@ -1,13 +1,11 @@
-import type { Address } from 'viem'
-import { ADDR, NATIVE } from '../config/addresses'
+import { mergeSwapTokens } from '../lib/swapTokens'
 import type { TokenInfo } from '../types'
 import { usePools } from './usePools'
 import { useUniPools } from './useUniPools'
 
-const PINNED: string[] = [NATIVE, ADDR.WETH, ADDR.UP, ADDR.USDG].map((a) => a.toLowerCase())
-
 type SwapTokenList = {
   tokens: TokenInfo[]
+  loading: boolean
   up33Loading: boolean
   up33Error: Error | null
   uniswapSource: 'index' | 'fallback' | null
@@ -19,30 +17,15 @@ export function useTokenList(): SwapTokenList {
   const up33 = usePools()
   const uniswap = useUniPools('', 1_000)
 
-  const map = new Map<string, TokenInfo>()
-  map.set(NATIVE.toLowerCase(), {
-    address: NATIVE as Address,
-    symbol: 'ETH',
-    decimals: 18,
-    native: true,
-  })
-  if (up33.data) {
-    for (const [k, t] of Object.entries(up33.data.tokens)) map.set(k, t)
-  }
-  if (uniswap.data) {
-    for (const [k, t] of Object.entries(uniswap.data.tokens)) map.set(k, t)
-  }
+  // Merging is pure and lives in lib/swapTokens, which is also where the
+  // native fold is explained: the Uniswap catalog names the coin `address(0)`
+  // on every v4 pool, and the picker is a list of things a wallet can spend.
+  const tokens = mergeSwapTokens([up33.data?.tokens, uniswap.data?.tokens])
 
-  const list = [...map.values()]
-  list.sort((a, b) => {
-    const ai = PINNED.indexOf(a.address.toLowerCase())
-    const bi = PINNED.indexOf(b.address.toLowerCase())
-    if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi)
-    return a.symbol.localeCompare(b.symbol)
-  })
   return {
-    tokens: list,
-    up33Loading: up33.isPending,
+    tokens,
+    loading: up33.isLoading || uniswap.isLoading,
+    up33Loading: up33.isLoading,
     up33Error: up33.error,
     uniswapSource: uniswap.data?.source ?? null,
     uniswapError: uniswap.error,

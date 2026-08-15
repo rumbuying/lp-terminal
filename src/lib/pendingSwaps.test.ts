@@ -6,6 +6,7 @@ import {
   isSameUnresolvedSwap,
   isUnresolved,
   PENDING_SWAP_LINGER_MS,
+  PENDING_SWAP_PREFIX,
   PENDING_SWAP_STALE_POLL_MS,
   PENDING_SWAP_STALE_MS,
   pendingSwapTickAction,
@@ -14,7 +15,9 @@ import {
 } from './pendingSwaps'
 
 const hash = (n: number) => `0x${n.toString(16).padStart(64, '0')}` as Hex
-const prefix = 'up33.pendingSwaps.v2.'
+// the module's own prefix, not a copy of it — it carries the active chain now,
+// and a second literal here would drift the moment either side moved
+const prefix = PENDING_SWAP_PREFIX
 const base: PendingSwap = {
   id: hash(1),
   account: '0x3333333333333333333333333333333333333333',

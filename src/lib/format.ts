@@ -115,6 +115,65 @@ export function shortAddr(a: string): string {
   return a.slice(0, 6) + '…' + a.slice(-4)
 }
 
+/* Characters that render into the cell before them — accents, variation
+   selectors, the zero-width joiner — and so cost no column of their own. */
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\p{Cf}]/u
+/* The two-cell ranges: Hangul, the kana and CJK blocks including the astral
+   extensions, and the fullwidth forms. Listed explicitly because JS regex has
+   no `East_Asian_Width` property to ask for.
+
+   Emoji ride a property instead of a range list. They are spread across five
+   discontinuous blocks and gain more with each Unicode revision, so a list is
+   a silent under-count waiting to happen — 🚀 alone sits in Transport, outside
+   the Emoticons range an earlier draft of this stopped at. The property rounds
+   a few legacy dingbats (™, ©) up to two columns, which is the safe direction:
+   this is a budget, and over-stating a width clips a name one character early
+   rather than letting it past the edge of the column. */
+const WIDE =
+  /\p{Extended_Pictographic}|[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦]|[\u{17000}-\u{18aff}\u{20000}-\u{3fffd}]/u
+
+function charWidth(ch: string): number {
+  if (ZERO_WIDTH.test(ch)) return 0
+  return WIDE.test(ch) ? 2 : 1
+}
+
+/**
+ * How many columns a string occupies in this terminal's monospace face.
+ *
+ * A count of characters is not a width, and the difference is not cosmetic: a
+ * CJK ideograph, kana, Hangul syllable or fullwidth form takes TWO cells in
+ * every monospace font. A name that passes a 32-character cap can therefore lay
+ * out 64 columns — which is how a Chinese token name pushed the pools table's
+ * right-hand columns off the screen while the cap that was supposed to stop it
+ * reported no problem.
+ */
+export function displayWidth(s: string): number {
+  let w = 0
+  for (const ch of s) w += charWidth(ch)
+  return w
+}
+
+/**
+ * Clip to `max` display columns, the ellipsis paid for out of the same budget.
+ *
+ * Walks code points instead of slicing. `.slice()` counts UTF-16 units and cuts
+ * an emoji or an astral ideograph in half, leaving a replacement glyph sitting
+ * in the one field on the row that a stranger controls completely.
+ */
+export function clampWidth(s: string, max: number): string {
+  if (max <= 0) return ''
+  if (displayWidth(s) <= max) return s
+  let out = ''
+  let width = 0
+  for (const ch of s) {
+    const w = charWidth(ch)
+    if (width + w > max - 1) break // the ellipsis owns the last column
+    out += ch
+    width += w
+  }
+  return out + '…'
+}
+
 /** signed bps difference of a vs b (positive = a better) */
 export function bpsDiff(a: bigint, b: bigint): number {
   if (b === 0n) return 0

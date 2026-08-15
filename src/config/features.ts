@@ -1,0 +1,56 @@
+import { CHAIN, type ChainConfig } from './chains'
+
+/**
+ * What the active chain can actually do.
+ *
+ * Each flag is derived from the chain config rather than set by hand, so a new
+ * chain cannot forget to declare one. Surfaces that read a capability the chain
+ * lacks must be gated here, not left to fail at runtime.
+ */
+export function solverEnabledForChain(
+  chain: Pick<ChainConfig, 'solverUrl' | 'solverAllowanceTarget'>,
+): boolean {
+  return chain.solverUrl !== null && chain.solverAllowanceTarget !== null
+}
+
+export const FEATURES = {
+  /** ve(3,3): vote weights, gauges, emission APR, the UP token itself */
+  emissions: CHAIN.gov !== null,
+  /** the split-routing solver — direct routes only when absent */
+  solver: solverEnabledForChain(CHAIN),
+  /** UP33's v2 subgraph backs volume stats the DexScreener feed cannot supply */
+  v2Subgraph: CHAIN.goldskySubgraph !== null,
+  /**
+   * How v2 LP is discovered — the two methods are not interchangeable, and
+   * conflating them with the EXPLORER is what hid v2 positions on BSC.
+   *
+   * A v2 LP token is a plain ERC-20, so it can be found either by asking what
+   * a wallet holds or by guessing which pairs to ask about. Blockscout's REST
+   * API answers the first question and finds ANY pair; an Etherscan-family
+   * explorer has no equivalent, and on BSC no free one exists at all.
+   */
+  v2PositionsFromExplorer: CHAIN.explorer.api === 'blockscout',
+  /**
+   * The fallback where nothing can be asked: derive candidate pairs by CREATE2
+   * and read their balances directly. Coverage is bounded by the candidate
+   * list — a pair nobody proposed is a pair nobody checks — which is why this
+   * is second choice rather than the default.
+   */
+  v2PositionsFromSweep: CHAIN.v2Sweep.length > 0,
+  /**
+   * Staked v2 LP read from a pid-keyed farm. Independent of the two flags
+   * above: staking transfers the LP away, so NEITHER discovery method can see
+   * it — the farm has to be asked directly, by pid.
+   */
+  v2StakedFromFarm:
+    CHAIN.homeV2Farm !== null && CHAIN.v2Sweep.some((v) => v.protocol === 'home'),
+  /**
+   * Uniswap v4 LP positions. Needs BOTH halves: the PositionManager to read
+   * from, and an index to enumerate against — v4's PositionManager implements
+   * no ERC-721 enumeration, so a chain with v4 deployed but no subgraph can
+   * read a position it is handed and can never find one.
+   */
+  v4Positions: CHAIN.uniV4 !== null && CHAIN.uniV4.positionSubgraph !== null,
+  /** the BRIDGE tab — hidden entirely where no route model exists */
+  bridge: CHAIN.hasBridge,
+} as const

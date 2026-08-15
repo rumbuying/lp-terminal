@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { binsForWidth, useElementWidth } from '../hooks/useElementWidth'
+import { useOnScreen } from '../hooks/useOnScreen'
+import { usePriceUnit } from '../hooks/usePriceUnit'
+import { useTickLiquidity } from '../hooks/useTickLiquidity'
 import { MAX_TICK, MIN_TICK, sqrtPriceToPrice, tickToPrice } from '../lib/clmath'
 import { fmtNum } from '../lib/format'
+import { binLiquidity, buildSegments } from '../lib/tickLiq'
+import type { ClPool } from '../types'
 import { Flash } from './Flash'
+import { UnitToggle } from './UnitToggle'
 
 // a bound within this many ticks of the tick-space extreme is a FULL-RANGE
 // edge — its price is astronomical/zero, so render ∞/0 instead of the number.
@@ -10,6 +17,18 @@ import { Flash } from './Flash'
 // without ever catching a real band (real bands sit near the current tick).
 const UNBOUNDED_MARGIN = 1000
 const INF = '∞'
+/**
+ * Depth columns behind the track — pitch, not count, because this track shares
+ * its row with a price at each end and so is narrower than the add chart at
+ * every screen size, phone most of all. 12px is tighter than the add chart's 16
+ * since these columns are a backdrop, and a backdrop can afford to be finer.
+ */
+const BIN_PITCH = 12
+const BIN_MIN = 10
+// high enough that a full-width card still resolves at the stated pitch — at 48
+// a 990px track stretched to 20.7px columns, which is the ceiling deciding the
+// look rather than the rule
+const BIN_MAX = 72
 
 /**
  * The LP range bar:
@@ -20,6 +39,18 @@ const INF = '∞'
  *   out of range, the move needed to re-enter.
  * Marker position is linear in tick space; a padding zone on both sides makes
  * out-of-range drift visible instead of clamping at the border.
+ *
+ * Given a `pool`, the track also carries the liquidity ALREADY there, drawn as
+ * columns behind everything else. For a position that exists, the band cannot
+ * move, so the useful question is no longer where to put it — it is whether the
+ * rest of the pool has crowded in around it since. That answer is a backdrop,
+ * not a subject: it sits at a third of the weight the add chart gives it,
+ * underneath the window, marker and trail that this bar is actually about.
+ *
+ * The reads are gated on the bar having been scrolled to. A wallet with
+ * positions in a dozen pools would otherwise pay two multicalls per card at
+ * first paint for cards nobody has looked at; react-query then shares one fetch
+ * between every position sitting in the same pool and window.
  */
 export function RangeBar(props: {
   tickLower: number
@@ -33,11 +64,31 @@ export function RangeBar(props: {
   /** order mode: this position is a range order — out-of-range is the intended
    *  resting state, so relabel the status instead of alarming in red */
   order?: { fillFrac: number; sellSym: string; buySym: string }
+  /** draw the pool's depth behind the track; omitted, the track stays bare */
+  pool?: ClPool
+  /** anchors for the dollar reading — the pool supplies whichever side these don't */
+  upUsd?: number
+  wethUsd?: number | null
 }) {
   const { t } = useTranslation()
-  // order mode defaults to the SELL token's price orientation ("fills as it rises")
-  const [flipped, setFlipped] = useState(props.order ? props.order.sellSym === props.sym1 : false)
-  const { tickLower, tickUpper, tick, sqrtPriceX96, dec0, dec1, sym0, sym1, order } = props
+  const { tickLower, tickUpper, tick, sqrtPriceX96, dec0, dec1, sym0, sym1, order, pool } = props
+  // An order bar starts in the sell token's direction, which is what makes
+  // "fills as it rises" true, so it opts out of the dollar default rather than
+  // having its orientation decided for it. The toggle still overrides.
+  const unit = usePriceUnit({
+    pool: pool ?? null,
+    dec0,
+    dec1,
+    upUsd: props.upUsd,
+    wethUsd: props.wethUsd,
+    defaultUsd: !order,
+    defaultFlipped: order ? order.sellSym === sym1 : false,
+  })
+  const { usd, flipped, money } = unit
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const trackRef = useRef<HTMLDivElement>(null)
+  const onScreen = useOnScreen(wrapRef)
+  const binCount = binsForWidth(useElementWidth(trackRef), BIN_PITCH, BIN_MIN, BIN_MAX, 24)
 
   // prices in token1-per-token0 orientation
   const pLower = tickToPrice(tickLower, dec0, dec1)
@@ -51,9 +102,22 @@ export function RangeBar(props: {
   const base = flipped ? sym1 : sym0
   const quote = flipped ? sym0 : sym1
 
-  // marker fraction, linear in ticks, padded 15% each side
+  // A dollar reading converted through WETH moves whenever ETH does while the
+  // bounds sit still, so it says so; against the $1 stable there is nothing to
+  // qualify, because the pool's own price IS the dollar price.
+  const derived = !!usd && !usd.exact
+  let unitLabel = `${quote}/${base}`
+  if (usd) unitLabel = t('lrange.per', { sym: base })
+  if (derived) unitLabel = `≈ ${unitLabel}`
+
+  // Marker fraction, linear in ticks, padded each side. 15% is enough to show
+  // drift off a bound, which is all the bare bar has to do. With depth drawn it
+  // is not enough to show anything ABOUT the depth: a band's own neighbourhood
+  // is frequently one liquidity segment, and a window that narrow renders it as
+  // a flat line with nothing to compare against. 60% reaches far enough to
+  // catch the boundaries the band sits between.
   const width = tickUpper - tickLower
-  const pad = Math.max(1, Math.round(width * 0.15))
+  const pad = Math.max(1, Math.round(width * (pool ? 0.6 : 0.15)))
   const lo = tickLower - pad
   const hi = tickUpper + pad
   let frac = (tick - lo) / (hi - lo)
@@ -61,6 +125,20 @@ export function RangeBar(props: {
   const fracPct = Math.min(99.5, Math.max(0.5, frac * 100))
   const winLeft = (pad / (hi - lo)) * 100
   const winWidth = (width / (hi - lo)) * 100
+
+  // Depth across exactly the window the marker moves in, so a column sits under
+  // the price it belongs to. The anchor is the pool's own tick and liquidity,
+  // one measurement — `tick` here may be a fresher feed, and pairing it with a
+  // stale active liquidity would shift the whole curve by the boundaries the
+  // price crossed in between.
+  const liq = useTickLiquidity(pool ?? null, lo, hi, onScreen)
+  const bins = useMemo(() => {
+    if (!pool || !liq.data) return null
+    const segs = buildSegments(liq.data.nets, pool.tick, pool.liquidity, liq.data.loTick, liq.data.hiTick)
+    return binLiquidity(segs, lo, hi, binCount)
+  }, [pool, liq.data, lo, hi, binCount])
+  const peak = useMemo(() => bins?.reduce((m, b) => (b > m ? b : m), 0n) ?? 0n, [bins])
+  const dispBins = useMemo(() => (bins && flipped ? [...bins].reverse() : bins), [bins, flipped])
 
   const inRange = tick >= tickLower && tick < tickUpper
   const posPct = ((tick - tickLower) / width) * 100
@@ -142,7 +220,7 @@ export function RangeBar(props: {
   }
 
   return (
-    <div className="rbar-wrap">
+    <div className="rbar-wrap" ref={wrapRef}>
       {!order && (!leftUnbounded || !rightUnbounded) && (
         <div className="rbar-holds mono-sm">
           {leftUnbounded ? (
@@ -158,11 +236,23 @@ export function RangeBar(props: {
         </div>
       )}
       <div className="rbar">
-        <span className="rbar-price">{leftUnbounded ? '0' : fmtNum(dLower)}</span>
+        <span className="rbar-price">{leftUnbounded ? '0' : money(dLower)}</span>
         <div
-          className="rbar-track"
+          ref={trackRef}
+          className={`rbar-track${dispBins ? ' deep' : ''}`}
           title={t('rbar.ticksTip', { lo: tickLower, hi: tickUpper, tick })}
         >
+          {dispBins && (
+            <div className="rbar-depth" aria-hidden>
+              {dispBins.map((b, i) => {
+                const f = (i + 0.5) / binCount
+                const mid = lo + Math.round((hi - lo) * (flipped ? 1 - f : f))
+                const on = mid >= tickLower && mid < tickUpper
+                const h = peak > 0n ? Math.max(2, Number((b * 100n) / peak)) : 0
+                return <div key={i} className={`rbar-bin${on ? ' on' : ''}`} style={{ height: `${h}%` }} />
+              })}
+            </div>
+          )}
           <div
             className={`rbar-window${!order && !inRange ? ' out' : ''}${warnSide}`}
             style={{ left: `${winLeft}%`, width: `${winWidth}%` }}
@@ -179,7 +269,7 @@ export function RangeBar(props: {
           )}
           <div className={`rbar-marker ${tone}`} style={{ left: `${fracPct}%` }} />
         </div>
-        <span className="rbar-price">{rightUnbounded ? INF : fmtNum(dUpper)}</span>
+        <span className="rbar-price">{rightUnbounded ? INF : money(dUpper)}</span>
       </div>
       <div className="rbar-sub">
         <span className={heldLow ? 'red' : 'dim'}>
@@ -188,14 +278,12 @@ export function RangeBar(props: {
         <span>
           px{' '}
           <Flash v={dCur} arrow>
-            <span className={tone || 'green'}>{fmtNum(dCur)}</span>
+            <span className={tone || 'green'}>{money(dCur)}</span>
           </Flash>{' '}
-          <span className="dim">
-            {quote}/{base}
+          <span className="dim" title={derived ? t('lrange.usdDerived', { sym: quote }) : undefined}>
+            {unitLabel}
           </span>
-          <button className="rbar-flip" title={t('rbar.flipTip')} onClick={() => setFlipped(!flipped)}>
-            ⇄
-          </button>
+          <UnitToggle unit={unit} />
         </span>
         <span className={heldHigh ? 'red' : 'dim'}>
           {t('rbar.fromHigh')} {rightMove}

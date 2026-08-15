@@ -9,16 +9,35 @@ import { clGaugeAbi, clPmAbi, v2GaugeAbi } from '../abi'
 import { CHAIN_ID } from '../config/addresses'
 import { wagmiConfig } from '../config/wagmi'
 import { t } from '../i18n'
-import { ensureAllowance, shortErr, step } from './tx'
+import {
+  accountChangedMessage,
+  activeAccountMatches,
+  ensureAllowance,
+  shortErr,
+  step,
+} from './tx'
 import { txlog } from './txlog'
 
 const ERC721_TRANSFER = parseAbiItem(
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
 )
 
+function stakeAccountReady(user: Address, label: string): boolean {
+  if (activeAccountMatches(user)) return true
+  txlog.push('err', `${label} — ${accountChangedMessage()}`)
+  return false
+}
+
 /** Stake a CL position NFT into its gauge: approve the id if needed, then deposit. */
-export async function stakeClNft(gauge: Address, npm: Address, tokenId: bigint): Promise<boolean> {
+export async function stakeClNft(
+  gauge: Address,
+  npm: Address,
+  tokenId: bigint,
+  user: Address,
+): Promise<boolean> {
+  const label = t('pos.stStake', { id: tokenId.toString() })
   try {
+    if (!stakeAccountReady(user, label)) return false
     const approved = await readContract(wagmiConfig, {
       abi: clPmAbi,
       address: npm,
@@ -27,19 +46,25 @@ export async function stakeClNft(gauge: Address, npm: Address, tokenId: bigint):
       chainId: CHAIN_ID,
     })
     if (approved.toLowerCase() !== gauge.toLowerCase()) {
-      const ok = await step(t('pos.stApproveNft', { id: tokenId.toString() }), () =>
-        writeContract(wagmiConfig, {
-          abi: clPmAbi,
-          address: npm,
-          functionName: 'approve',
-          args: [gauge, tokenId],
-          chainId: CHAIN_ID,
-        }),
+      const ok = await step(
+        t('pos.stApproveNft', { id: tokenId.toString() }),
+        () =>
+          writeContract(wagmiConfig, {
+            account: user,
+            abi: clPmAbi,
+            address: npm,
+            functionName: 'approve',
+            args: [gauge, tokenId],
+            chainId: CHAIN_ID,
+          }),
+        { invalidate: 'none' },
       )
       if (!ok) return false
     }
-    const ok = await step(t('pos.stStake', { id: tokenId.toString() }), () =>
+    if (!stakeAccountReady(user, label)) return false
+    const ok = await step(label, () =>
       writeContract(wagmiConfig, {
+        account: user,
         abi: clGaugeAbi,
         address: gauge,
         functionName: 'deposit',
@@ -49,7 +74,7 @@ export async function stakeClNft(gauge: Address, npm: Address, tokenId: bigint):
     )
     return ok !== null
   } catch (e) {
-    txlog.push('err', `${t('pos.stStake', { id: tokenId.toString() })} — ${shortErr(e)}`)
+    txlog.push('err', `${label} — ${shortErr(e)}`)
     return false
   }
 }
@@ -63,10 +88,14 @@ export async function stakeV2Lp(
   pair: string,
 ): Promise<boolean> {
   if (lp === 0n) return false
+  const label = t('pos.stStakeLp', { pair })
   try {
+    if (!stakeAccountReady(user, label)) return false
     if (!(await ensureAllowance(pool, user, gauge, lp, 'LP'))) return false
-    const ok = await step(t('pos.stStakeLp', { pair }), () =>
+    if (!stakeAccountReady(user, label)) return false
+    const ok = await step(label, () =>
       writeContract(wagmiConfig, {
+        account: user,
         abi: v2GaugeAbi,
         address: gauge,
         functionName: 'deposit',
@@ -76,7 +105,7 @@ export async function stakeV2Lp(
     )
     return ok !== null
   } catch (e) {
-    txlog.push('err', `${t('pos.stStakeLp', { pair })} — ${shortErr(e)}`)
+    txlog.push('err', `${label} — ${shortErr(e)}`)
     return false
   }
 }

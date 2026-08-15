@@ -6,7 +6,7 @@ export function parseSolverPriceImpactBps(value: unknown): number | null {
   return value
 }
 
-/** The fee-free baseline quote costs are divided by; null means no probe. */
+/** Fee-free executable-probe baseline; null means no valid counterfactual probe. */
 export function parseSolverMidAmountOut(value: unknown): bigint | null {
   if (value === null) return null
   if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) {

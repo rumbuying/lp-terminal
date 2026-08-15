@@ -1,6 +1,7 @@
 // Persistent registry of unresolved SWAP transactions. Each hash gets its own
 // localStorage key so concurrent tabs cannot overwrite each other's entries.
 import { isAddress, isHex, type Address, type Hex } from 'viem'
+import { chainKey } from './chainStore'
 
 export type PendingSwapStatus = 'pending' | 'confirmed' | 'failed' | 'stale'
 
@@ -22,9 +23,13 @@ export type PendingSwap = {
   settledAt?: number
 }
 
-const PREFIX = 'up33.pendingSwaps.v2.'
+// per chain, and the chain sits BEFORE the hash so the prefix scan below still
+// cannot see another chain's entries. A hash from the wrong chain never gets a
+// receipt, so the row would sit "pending" forever and link into the wrong
+// explorer (lib/chainStore.ts).
+export const PENDING_SWAP_PREFIX = chainKey('up33.pendingSwaps.v2') + '.'
 const statuses: readonly PendingSwapStatus[] = ['pending', 'confirmed', 'failed', 'stale']
-const keyOf = (id: Hex) => PREFIX + id.toLowerCase()
+const keyOf = (id: Hex) => PENDING_SWAP_PREFIX + id.toLowerCase()
 
 export const isSettled = (status: PendingSwapStatus) => status === 'confirmed' || status === 'failed'
 export const isUnresolved = (status: PendingSwapStatus) => !isSettled(status)
@@ -103,7 +108,7 @@ function loadAll(): PendingSwap[] | null {
     const found: PendingSwap[] = []
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i)
-      if (!key?.startsWith(PREFIX)) continue
+      if (!key?.startsWith(PENDING_SWAP_PREFIX)) continue
       const entry = parse(localStorage.getItem(key))
       if (entry && key === keyOf(entry.id)) found.push(entry)
     }
@@ -242,7 +247,7 @@ export const pendingSwaps = {
     if (!storageHooked && typeof window !== 'undefined') {
       storageHooked = true
       window.addEventListener('storage', (event) => {
-        if (!event.key?.startsWith(PREFIX) || !storageUsable) return
+        if (!event.key?.startsWith(PENDING_SWAP_PREFIX) || !storageUsable) return
         const stored = loadAll()
         if (stored === null) storageUsable = false
         else entries = stored

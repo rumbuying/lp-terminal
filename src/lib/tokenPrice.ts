@@ -5,6 +5,8 @@
 // v4 pool vs $0.140 on the two $250k pools). Every token except ETH ran high.
 // The most-liquid pair's trade-derived price is the honest mark.
 
+import { CHAIN } from '../config/chains'
+
 export type DsPair = {
   chainId?: string
   priceUsd?: string | number
@@ -17,14 +19,14 @@ export type DsPair = {
 /** dust pools sit at stale prices — never price a token off one */
 export const DS_MIN_LIQ_USD = 100
 
-/** USD price of `token` from its most-liquid robinhood pair, or null when no
+/** USD price of `token` from its most-liquid pair on this chain, or null when no
  *  pair above the dust floor prices it. Quote-side tokens derive via
  *  priceUsd / priceNative (USD per quote unit). */
 export function pickDsTokenUsd(pairs: DsPair[], token: string): number | null {
   const t = token.toLowerCase()
   let best: { liq: number; price: number } | null = null
   for (const p of pairs) {
-    if (p?.chainId !== 'robinhood') continue
+    if (p?.chainId !== CHAIN.slugs.dexscreener) continue
     const liq = Number(p?.liquidity?.usd)
     if (!Number.isFinite(liq) || liq < DS_MIN_LIQ_USD) continue
     const pu = Number(p?.priceUsd)

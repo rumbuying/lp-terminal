@@ -12,7 +12,11 @@ import {
   v2PoolAbi,
   voterAbi,
 } from '../abi'
-import { ADDR, CHAIN_ID } from '../config/addresses'
+import { ADDR, CHAIN_ID, requireGov } from '../config/addresses'
+import { FEATURES } from '../config/features'
+import { PUBLIC_POOL_QUERY_POLICY } from '../config/query'
+import { chainKey } from '../lib/chainStore'
+import { effectiveClFeePpm } from '../lib/poolIdentity'
 import type { ClPool, Pool, PoolsData, TokenInfo, V2Pool } from '../types'
 
 type McRes = { status: 'success' | 'failure'; result?: unknown; error?: Error }
@@ -29,7 +33,10 @@ function ok<T>(r: McRes | undefined): T | undefined {
 const range = (n: number) => Array.from({ length: n }, (_, i) => i)
 
 // ---- token metadata cache (localStorage, shared with the univ3 browser) ----
-const TOKEN_CACHE_KEY = 'up33:tokens:v2'
+// per chain: entries are keyed by ADDRESS, and the same address is a different
+// token on each chain — a cached `decimals` from the wrong one misprices every
+// amount rendered through it (lib/chainStore.ts)
+const TOKEN_CACHE_KEY = chainKey('up33:tokens:v2')
 
 export function loadTokenCache(): Record<string, TokenInfo> {
   try {
@@ -47,14 +54,36 @@ export function saveTokenCache(cache: Record<string, TokenInfo>) {
 }
 
 export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
+  // This hook is also the readiness gate for positions and the Uniswap catalog.
+  // Chains without ve(3,3) still need a successful, empty home-registry result;
+  // otherwise the disabled query stays pending forever and blocks those surfaces.
+  if (!FEATURES.emissions) {
+    return {
+      pools: [],
+      tokens: {},
+      protocol: {
+        weekly: 0n,
+        epochCount: 0,
+        activePeriod: 0,
+        totalWeight: 0n,
+        capMode: null,
+        blockNumber: await pc.getBlockNumber(),
+      },
+    }
+  }
+
+  // UP33's factories speak the Solidly enumeration interface (allPoolsLength /
+  // allPools) and its gauges are ve(3,3) — a chain without that protocol never
+  // reaches here; usePools answers with an empty catalogue instead.
+  const gov = requireGov()
   const head = await mc(pc, [
     { abi: v2FactoryAbi, address: ADDR.V2_FACTORY, functionName: 'allPoolsLength' },
     { abi: clFactoryAbi, address: ADDR.CL_FACTORY, functionName: 'allPoolsLength' },
-    { abi: minterAbi, address: ADDR.MINTER, functionName: 'weekly' },
-    { abi: minterAbi, address: ADDR.MINTER, functionName: 'epochCount' },
-    { abi: minterAbi, address: ADDR.MINTER, functionName: 'activePeriod' },
-    { abi: voterAbi, address: ADDR.VOTER, functionName: 'totalWeight' },
-    { abi: voterAbi, address: ADDR.VOTER, functionName: 'capMode' },
+    { abi: minterAbi, address: gov.MINTER, functionName: 'weekly' },
+    { abi: minterAbi, address: gov.MINTER, functionName: 'epochCount' },
+    { abi: minterAbi, address: gov.MINTER, functionName: 'activePeriod' },
+    { abi: voterAbi, address: gov.VOTER, functionName: 'totalWeight' },
+    { abi: voterAbi, address: gov.VOTER, functionName: 'capMode' },
   ])
   const blockNumber = await pc.getBlockNumber()
 
@@ -84,8 +113,8 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
     detail.push(
       { abi: v2PoolAbi, address: p, functionName: 'metadata' },
       { abi: v2PoolAbi, address: p, functionName: 'totalSupply' },
-      { abi: voterAbi, address: ADDR.VOTER, functionName: 'gauges', args: [p] },
-      { abi: voterAbi, address: ADDR.VOTER, functionName: 'weights', args: [p] },
+      { abi: voterAbi, address: gov.VOTER, functionName: 'gauges', args: [p] },
+      { abi: voterAbi, address: gov.VOTER, functionName: 'weights', args: [p] },
       { abi: v2FactoryAbi, address: ADDR.V2_FACTORY, functionName: 'getFee', args: [p, false] },
     )
   }
@@ -99,8 +128,8 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
       { abi: clPoolAbi, address: p, functionName: 'tickSpacing' },
       { abi: clPoolAbi, address: p, functionName: 'token0' },
       { abi: clPoolAbi, address: p, functionName: 'token1' },
-      { abi: voterAbi, address: ADDR.VOTER, functionName: 'gauges', args: [p] },
-      { abi: voterAbi, address: ADDR.VOTER, functionName: 'weights', args: [p] },
+      { abi: voterAbi, address: gov.VOTER, functionName: 'gauges', args: [p] },
+      { abi: voterAbi, address: gov.VOTER, functionName: 'weights', args: [p] },
     )
   }
   const det = await mc(pc, detail)
@@ -116,7 +145,7 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
     if (!md) continue
     v2Pools.push({
       kind: 'v2',
-      protocol: 'up33',
+      protocol: 'home',
       address: p,
       token0: md[5],
       token1: md[6],
@@ -149,7 +178,7 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
     if (!s0 || !token0 || !token1) continue
     clPools.push({
       kind: 'cl',
-      protocol: 'up33',
+      protocol: 'home',
       address: p,
       token0,
       token1,
@@ -184,7 +213,7 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
   allPools.forEach((p, idx) => {
     if (!p.gauge) return
     const gaugeAbi = p.kind === 'v2' ? v2GaugeAbi : clGaugeAbi
-    pass2.push({ abi: voterAbi, address: ADDR.VOTER, functionName: 'isAlive', args: [p.gauge] })
+    pass2.push({ abi: voterAbi, address: gov.VOTER, functionName: 'isAlive', args: [p.gauge] })
     pass2Tag.push({ kind: 'alive', idx })
     pass2.push({ abi: gaugeAbi, address: p.gauge, functionName: 'rewardRate' })
     pass2Tag.push({ kind: 'rate', idx })
@@ -264,13 +293,41 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
   }
 }
 
+/**
+ * What a chain with no ve(3,3) protocol has to say for itself: no registry to
+ * enumerate, no epoch, and a block number — which the header renders and which
+ * is true on every chain.
+ *
+ * An empty ANSWER rather than no answer. Leaving the query `enabled: false`
+ * parks it in `pending` with `data` undefined forever, and both tabs read that
+ * as something other than "this chain has no home DEX registry": POOLS reports
+ * `pool scan failed: null` (its error IS null — nothing failed), and POSITIONS
+ * sits on a scanning spinner that can never stop. Neither tab needs the
+ * registry to do its job; both need an object.
+ */
+async function emptyRegistry(pc: PublicClient): Promise<PoolsData> {
+  return {
+    pools: [],
+    tokens: {},
+    protocol: {
+      weekly: 0n,
+      epochCount: 0,
+      activePeriod: 0,
+      totalWeight: 0n,
+      capMode: null,
+      blockNumber: await pc.getBlockNumber(),
+    },
+  }
+}
+
 export function usePools() {
   const pc = usePublicClient({ chainId: CHAIN_ID })
   return useQuery({
-    queryKey: ['pools'],
+    queryKey: ['pools', CHAIN_ID],
     enabled: !!pc,
-    refetchInterval: 20_000,
-    queryFn: () => fetchPools(pc as PublicClient),
+    ...PUBLIC_POOL_QUERY_POLICY,
+    queryFn: () =>
+      FEATURES.emissions ? fetchPools(pc as PublicClient) : emptyRegistry(pc as PublicClient),
   })
 }
 
@@ -296,10 +353,11 @@ export function poolTypeLabel(p: Pool): string {
     if (p.protocol === 'univ2') return 'uniswap v2'
     return p.stable ? 'v2 STABLE' : 'v2 VOLATILE'
   }
+  if (p.protocol === 'univ4') return `uniswap v4 ts${p.tickSpacing}`
   if (p.protocol === 'univ3') return `uniswap v3 ts${p.tickSpacing}`
   return `CL ts${p.tickSpacing}`
 }
 
 export function poolFeePct(p: Pool): number {
-  return p.kind === 'v2' ? p.feeBps / 100 : p.feePpm / 10_000
+  return p.kind === 'v2' ? p.feeBps / 100 : effectiveClFeePpm(p) / 10_000
 }

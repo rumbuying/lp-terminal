@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { CHAIN_ID } from '../config/addresses'
 import { fetchDexscreener, fetchPoolStats } from '../lib/poolstats'
 import { usePools } from './usePools'
 
@@ -6,11 +7,11 @@ import { usePools } from './usePools'
 export function usePoolStats() {
   const pools = usePools()
   return useQuery({
-    queryKey: ['poolStats'],
+    queryKey: ['poolStats', CHAIN_ID],
     enabled: !!pools.data,
-    refetchInterval: 60_000,
-    staleTime: 45_000,
-    retry: 1,
+    refetchInterval: 5 * 60_000,
+    staleTime: 4 * 60_000,
+    retry: false,
     queryFn: () => fetchPoolStats(pools.data!.pools),
   })
 }
@@ -24,11 +25,11 @@ export function usePoolStats() {
  */
 export function useDsFallbackStats(addrs: string[]) {
   return useQuery({
-    queryKey: ['dsFallback', addrs.join(',')],
+    queryKey: ['dsFallback', CHAIN_ID, addrs.join(',')],
     enabled: addrs.length > 0,
-    refetchInterval: 60_000,
-    staleTime: 45_000,
-    retry: 1,
+    refetchInterval: 5 * 60_000,
+    staleTime: 4 * 60_000,
+    retry: false,
     queryFn: async () => (await fetchDexscreener(addrs)).stats,
   })
 }
