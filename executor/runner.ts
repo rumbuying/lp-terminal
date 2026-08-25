@@ -41,6 +41,7 @@ import { walletBusy, withWalletLock } from './wallet-lock'
 import { ADDR } from '../src/config/addresses'
 import { ensureRestaked, ensureUnstakedAndRewardConverted } from './staking'
 import { clearStrategyRetry, deferStrategyRetry, strategyRetryReady } from './retry-state'
+import { strategyCapitalHarvest } from './capital-policy'
 
 const low = (value: string) => value.toLowerCase()
 
@@ -77,10 +78,13 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
   try {
     setJobState(job.id, 'running')
     setStrategyState(job.config.id, 'executing')
+    const queueCheckAt = Math.floor(Date.now() / 1000)
+    const maxQueueAge = Math.max(300, job.plan.safeguards.maxPlanAgeSeconds * 2)
+    if (job.plan.createdAt < queueCheckAt - maxQueueAge) throw new Error('E_PLAN_QUEUE_STALE')
     const snapshot = await readStrategySnapshot(job.config)
     const fresh = job.plan.action === 'collect_fees'
       ? makeFeeCollectionPlan({ config: job.config, snapshot })
-      : makeRebalancePlan({ config: job.config, snapshot, triggerSide: job.plan.triggerSide })
+      : makeRebalancePlan({ config: job.config, snapshot, triggerSide: job.plan.triggerSide, rangeScale: job.plan.rangeScale ?? 1 })
     // Unguarded ORIGINAL mode re-reads the complete position and pool before
     // every state-changing step. A slow RPC response must not invalidate that
     // fresh chain state merely because the deterministic planning envelope is
@@ -97,6 +101,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
     const priorComponents = strategyAllocationComponents(job.config.id)
     const priorPrincipal = Object.fromEntries(Object.entries(priorComponents).map(([token, component]) => [token, component.principal]))
     const priorHeld = Object.fromEntries(Object.entries(priorComponents).map(([token, component]) => [token, component.heldFee]))
+    const priorProfit = Object.fromEntries(Object.entries(priorComponents).map(([token, component]) => [token, component.heldProfit]))
     for (const token of tokens) if ((prior[low(token)] ?? 0n) > baseline[low(token)]) throw new Error('E_ALLOCATION_MISMATCH')
     const gasPrice = await publicClient.getGasPrice()
     const nativeBalance = await publicClient.getBalance({ address: job.config.owner })
@@ -114,6 +119,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       prior: Object.fromEntries(Object.entries(prior).map(([token, value]) => [token, value.toString()])),
       priorPrincipal: Object.fromEntries(Object.entries(priorPrincipal).map(([token, value]) => [token, value.toString()])),
       priorHeld: Object.fromEntries(Object.entries(priorHeld).map(([token, value]) => [token, value.toString()])),
+      priorProfit: Object.fromEntries(Object.entries(priorProfit).map(([token, value]) => [token, value.toString()])),
       trackedTokens,
       blockNumber: snapshot.blockNumber,
     })
@@ -158,7 +164,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       const withHeadroom = (estimated * 105n + 99n) / 100n
       reserveDailyTurnover({ jobId: job.id, walletId: job.walletId, quoteToken: job.config.quoteToken, amount: withHeadroom, limit: parseUnits(job.config.execution.maxDailyTurnoverQuote!, quoteDecimals) })
     } else {
-      const livePreflight = await preflightStrategy(job.config)
+      const livePreflight = await preflightStrategy(job.config, { rangeScale: job.plan.rangeScale ?? 1 })
       if (livePreflight.position.tokenId !== snapshot.tokenId || livePreflight.position.liquidity !== snapshot.liquidity || low(livePreflight.position.owner) !== low(snapshot.owner))
         throw new Error('E_POSITION_CHANGED')
       const quoteDecimals = low(job.config.quoteToken) === low(snapshot.token0) ? snapshot.token0Decimals : snapshot.token1Decimals
@@ -308,7 +314,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
     }
 
     const pool = await readPoolState(job.config)
-    const range = freshRange(job.config, snapshot, pool.tick, job.plan.triggerSide)
+    const range = freshRange(job.config, snapshot, pool.tick, job.plan.triggerSide, job.plan.rangeScale ?? 1)
     const cycle = await planCycleSwaps({
       config: job.config,
       snapshot,
@@ -322,7 +328,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       },
     })
     const allSwaps = [...tax.swaps, ...cycle.swaps]
-    setJobContext(job.id, 'swap_plan', {
+    let swapPlan = {
       tick: pool.tick,
       sqrtPriceX96: pool.sqrtPriceX96.toString(),
       tickLower: range.tickLower,
@@ -338,15 +344,16 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
         feeIn: intent.feeIn.toString(),
         route: routeAudit(intent.routeSummary),
       })),
-    })
+    }
+    setJobContext(job.id, 'swap_plan', swapPlan)
     let lp0 = cycle.lp0
     let lp1 = cycle.lp1
     let held0 = cycle.held0 + (job.config.fees.handling !== 'reinvest' && low(snapshot.token0) === low(job.config.quoteToken) ? rewardAfterTax : 0n)
     let held1 = cycle.held1 + (job.config.fees.handling !== 'reinvest' && low(snapshot.token1) === low(job.config.quoteToken) ? rewardAfterTax : 0n)
     const projected = { amount0: lp0, amount1: lp1 }
     const projectedTotal = {
-      amount0: lp0 + held0 + (priorHeld[low(snapshot.token0)] ?? 0n),
-      amount1: lp1 + held1 + (priorHeld[low(snapshot.token1)] ?? 0n),
+      amount0: lp0 + held0 + (priorHeld[low(snapshot.token0)] ?? 0n) + (priorProfit[low(snapshot.token0)] ?? 0n),
+      amount1: lp1 + held1 + (priorHeld[low(snapshot.token1)] ?? 0n) + (priorProfit[low(snapshot.token1)] ?? 0n),
     }
     for (const intent of cycle.swaps) {
       const split = allocateSwapOutput(intent, intent.quotedOut)
@@ -382,6 +389,16 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       const turnover = rewardTurnover + allSwaps.reduce((total, intent) => total + quoteTurnover(intent.amountIn, intent.tokenIn, job.config, snapshot, pool.sqrtPriceX96), 0n)
       reserveDailyTurnover({ jobId: job.id, walletId: job.walletId, quoteToken: job.config.quoteToken, amount: turnover, limit: dailyLimit })
     }
+    // Prove the immutable baseline and USDG threshold route before the first
+    // swap. The actual retained amounts are recomputed from receipt-backed
+    // balances immediately before minting.
+    await strategyCapitalHarvest({
+      config: job.config,
+      snapshot,
+      sqrtPriceX96: pool.sqrtPriceX96,
+      amount0: projected.amount0,
+      amount1: projected.amount1,
+    })
 
     stepIndex = 4
     let approvalTx = 0
@@ -402,17 +419,32 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       const quote = approvalQuote
       const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: intent.tokenIn, tokenOut: intent.tokenOut, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
       if (gated.approvalTarget.toLowerCase() !== approvalGate.approvalTarget.toLowerCase()) throw new Error('E_SWAP_SPENDER_CHANGED')
+      const txIndex = swapTx++
+      const executableIntent = { ...intent, quotedOut: BigInt(quote.routeSummary.amountOut), routeSummary: quote.routeSummary }
+      swapPlan = {
+        ...swapPlan,
+        swaps: swapPlan.swaps.map((record) => record.txIndex === txIndex ? {
+          ...record,
+          quotedOut: quote.routeSummary.amountOut,
+          minOut: gated.minOut.toString(),
+          route: routeAudit(quote.routeSummary, gated),
+        } : record),
+      }
+      // The exact quote/minimum and route identity are durable before signing.
+      // Recovery must validate a confirmed transaction against what it actually
+      // executed, never against an older numerical-planning quote.
+      setJobContext(job.id, 'swap_plan', swapPlan)
       const before = await readTokenBalances(job.config.owner, [intent.tokenIn, intent.tokenOut])
-      const swapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 5, txIndex: swapTx++, privateKey: unlocked.privateKey, tx: gated })
+      const swapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 5, txIndex, privateKey: unlocked.privateKey, tx: gated })
       receipts.push(swapReceipt)
       const after = await readTokenBalances(job.config.owner, [intent.tokenIn, intent.tokenOut])
       const spent = before[low(intent.tokenIn)] - after[low(intent.tokenIn)]
       const gained = after[low(intent.tokenOut)] - before[low(intent.tokenOut)]
-      const execution = allocateSwapExecution(intent, spent, gained, gated.minOut)
+      const execution = allocateSwapExecution(executableIntent, spent, gained, gated.minOut)
       const revokeReceipts = await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 4, txIndexStart: approvalTx, privateKey: unlocked.privateKey, token: intent.tokenIn, spender: gated.approvalTarget, forceExact: gated.exactApproval })
       receipts.push(...revokeReceipts)
       approvalTx += revokeReceipts.length
-      executedSwaps.push({ intent, spent, gained, receipt: swapReceipt, routeSummary: quote.routeSummary, gated })
+      executedSwaps.push({ intent: executableIntent, spent, gained, receipt: swapReceipt, routeSummary: quote.routeSummary, gated })
       setJobContext(job.id, 'executed_swaps', executedSwaps.map((item) => ({
         tokenIn: item.intent.tokenIn,
         tokenOut: item.intent.tokenOut,
@@ -459,8 +491,8 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
     }
     if (job.config.safeguards.enabled && job.config.safeguards.maxRiskAssetPct !== undefined) {
       const actualRiskPct = riskAssetPct(
-        lp0 + held0 + (priorHeld[low(snapshot.token0)] ?? 0n),
-        lp1 + held1 + (priorHeld[low(snapshot.token1)] ?? 0n),
+        lp0 + held0 + (priorHeld[low(snapshot.token0)] ?? 0n) + (priorProfit[low(snapshot.token0)] ?? 0n),
+        lp1 + held1 + (priorHeld[low(snapshot.token1)] ?? 0n) + (priorProfit[low(snapshot.token1)] ?? 0n),
         job.config,
         snapshot,
         pool.sqrtPriceX96,
@@ -468,20 +500,29 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       if (actualRiskPct > job.config.safeguards.maxRiskAssetPct) throw new Error('E_RISK_LIMIT')
     }
 
+    const mintPool = await readPoolState(job.config)
+    const capital = await strategyCapitalHarvest({ config: job.config, snapshot, sqrtPriceX96: mintPool.sqrtPriceX96, amount0: lp0, amount1: lp1 })
+    setJobContext(job.id, 'capital_allocation', {
+      triggered: capital.triggered,
+      deploy0: capital.deploy0.toString(), deploy1: capital.deploy1.toString(),
+      profit0: capital.profit0.toString(), profit1: capital.profit1.toString(),
+      activeValueQuote: capital.activeValueQuote.toString(), capitalCapQuote: capital.capitalCapQuote.toString(),
+      excessValueQuote: capital.excessValueQuote.toString(), excessValueUsdg: capital.excessValueUsdg.toString(),
+    })
+
     stepIndex = 6
-    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex, privateKey: unlocked.privateKey, token: snapshot.token0, spender: job.config.positionManager, amount: lp0 }))
+    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex, privateKey: unlocked.privateKey, token: snapshot.token0, spender: job.config.positionManager, amount: capital.deploy0 }))
     stepIndex = 7
-    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex, privateKey: unlocked.privateKey, token: snapshot.token1, spender: job.config.positionManager, amount: lp1 }))
+    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex, privateKey: unlocked.privateKey, token: snapshot.token1, spender: job.config.positionManager, amount: capital.deploy1 }))
 
     stepIndex = 8
-    const mintPool = await readPoolState(job.config)
-    const mintRange = freshRange(job.config, snapshot, mintPool.tick, job.plan.triggerSide)
+    const mintRange = freshRange(job.config, snapshot, mintPool.tick, job.plan.triggerSide, job.plan.rangeScale ?? 1)
     const mintReceipt = await sendTracked({
       config: job.config,
       jobId: job.id,
       stepIndex,
       privateKey: unlocked.privateKey,
-      tx: mintCall({ config: job.config, snapshot, tickLower: mintRange.tickLower, tickUpper: mintRange.tickUpper, amount0Desired: lp0, amount1Desired: lp1, feePpm: mintPool.feePpm, sqrtPriceX96: mintPool.sqrtPriceX96 }),
+      tx: mintCall({ config: job.config, snapshot, tickLower: mintRange.tickLower, tickUpper: mintRange.tickUpper, amount0Desired: capital.deploy0, amount1Desired: capital.deploy1, feePpm: mintPool.feePpm, sqrtPriceX96: mintPool.sqrtPriceX96 }),
     })
     receipts.push(mintReceipt)
     const mintFlows = receiptLiquidityFlows(mintReceipt, job.config.positionManager, 0n)
@@ -501,13 +542,15 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
 
     stepIndex = 11
     const finalBalances = await readTokenBalances(job.config.owner, trackedTokens)
-    const principalCarry0 = lp0 - mintFlows.minted0
-    const principalCarry1 = lp1 - mintFlows.minted1
+    const principalCarry0 = capital.deploy0 - mintFlows.minted0
+    const principalCarry1 = capital.deploy1 - mintFlows.minted1
     const heldFee0 = (priorHeld[low(tokens[0])] ?? 0n) + held0
     const heldFee1 = (priorHeld[low(tokens[1])] ?? 0n) + held1
-    const allocation0 = principalCarry0 + heldFee0
-    const allocation1 = principalCarry1 + heldFee1
-    if ([principalCarry0, principalCarry1, heldFee0, heldFee1].some((value) => value < 0n)) throw new Error('E_ALLOCATION_MISMATCH')
+    const heldProfit0 = (priorProfit[low(tokens[0])] ?? 0n) + capital.profit0
+    const heldProfit1 = (priorProfit[low(tokens[1])] ?? 0n) + capital.profit1
+    const allocation0 = principalCarry0 + heldFee0 + heldProfit0
+    const allocation1 = principalCarry1 + heldFee1 + heldProfit1
+    if ([principalCarry0, principalCarry1, heldFee0, heldFee1, heldProfit0, heldProfit1].some((value) => value < 0n)) throw new Error('E_ALLOCATION_MISMATCH')
     assertWalletAllocationUpdate(job.walletId, job.config.id, finalBalances, {
       [low(snapshot.token0)]: allocation0,
       [low(snapshot.token1)]: allocation1,
@@ -561,6 +604,10 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       blockNumber: collectReceipt.blockNumber.toString(),
     })
     if (retainedTaxEntry) ledger.push(retainedTaxEntry)
+    if (capital.triggered) ledger.push(
+      { id: `${job.id}-profit-0`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, kind: 'profit_harvest', token: snapshot.token0, amount: capital.profit0.toString(), meta: { thresholdUsdg: job.config.capitalProtection.profitThresholdUsdg, excessValueUsdg: capital.excessValueUsdg.toString() } },
+      { id: `${job.id}-profit-1`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, kind: 'profit_harvest', token: snapshot.token1, amount: capital.profit1.toString(), meta: { thresholdUsdg: job.config.capitalProtection.profitThresholdUsdg, excessValueUsdg: capital.excessValueUsdg.toString() } },
+    )
     ledger.push(
       { id: `${job.id}-mint-0`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, kind: 'mint_principal', token: snapshot.token0, amount: mintFlows.minted0.toString(), txHash: mintReceipt.transactionHash },
       { id: `${job.id}-mint-1`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, kind: 'mint_principal', token: snapshot.token1, amount: mintFlows.minted1.toString(), txHash: mintReceipt.transactionHash },
@@ -572,14 +619,15 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       oldTokenId: snapshot.tokenId,
       newTokenId: mintFlows.mintedTokenId.toString(),
       triggerSide: job.plan.triggerSide,
+      rangeScale: job.plan.rangeScale ?? 1,
       allocations: { [low(snapshot.token0)]: allocation0, [low(snapshot.token1)]: allocation1 },
       allocationComponents: {
-        [low(snapshot.token0)]: { principal: principalCarry0, heldFee: heldFee0 },
-        [low(snapshot.token1)]: { principal: principalCarry1, heldFee: heldFee1 },
+        [low(snapshot.token0)]: { principal: principalCarry0, heldFee: heldFee0, heldProfit: heldProfit0 },
+        [low(snapshot.token1)]: { principal: principalCarry1, heldFee: heldFee1, heldProfit: heldProfit1 },
       },
       ledger,
       txHashes: receipts.map((receipt) => receipt.transactionHash),
-      commitResult: { newTokenId: mintFlows.mintedTokenId.toString(), held0: held0.toString(), held1: held1.toString(), rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: rewardQuote.toString(), rewardQuoteToken: job.config.quoteToken, rewardTaxWeth: low(job.config.quoteToken) === low(ADDR.WETH) ? tax.rewardTax.toString() : '0', rewardTaxQuote: tax.rewardTax.toString(), incomeTaxApplied: tax.applied, feeTaxApplied: tax.applied, incomeTaxUsdgQuoted: tax.swaps.reduce((total, intent) => total + intent.quotedOut, tax.retainedUsdg).toString(), feeTaxUsdgQuoted: tax.swaps.reduce((total, intent) => total + intent.quotedOut, tax.retainedUsdg).toString(), staked: job.config.staking?.enabled === true },
+      commitResult: { newTokenId: mintFlows.mintedTokenId.toString(), held0: held0.toString(), held1: held1.toString(), heldProfit0: heldProfit0.toString(), heldProfit1: heldProfit1.toString(), profitHarvested: capital.triggered, profitHarvestUsdg: capital.excessValueUsdg.toString(), capitalCapQuote: capital.capitalCapQuote.toString(), rangeScale: job.plan.rangeScale ?? 1, rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: rewardQuote.toString(), rewardQuoteToken: job.config.quoteToken, rewardTaxWeth: low(job.config.quoteToken) === low(ADDR.WETH) ? tax.rewardTax.toString() : '0', rewardTaxQuote: tax.rewardTax.toString(), incomeTaxApplied: tax.applied, feeTaxApplied: tax.applied, incomeTaxUsdgQuoted: tax.swaps.reduce((total, intent) => total + intent.quotedOut, tax.retainedUsdg).toString(), feeTaxUsdgQuoted: tax.swaps.reduce((total, intent) => total + intent.quotedOut, tax.retainedUsdg).toString(), staked: job.config.staking?.enabled === true },
     })
     clearStrategyRetry(job.config.id)
     audit('runner', 'job_completed', 'job', job.id, { newTokenId: mintFlows.mintedTokenId.toString() })
@@ -594,6 +642,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       && transactions.every((tx) => tx.state === 'failed' && tx.error_code === 'E_TX_REVERTED')
     const retryableBeforeMutation = transactions.length === 0 && (
       code === 'E_PLAN_STALE'
+      || code === 'E_PLAN_QUEUE_STALE'
       || code === 'E_KYBER_QUOTE'
       || code === 'E_SWAP_IMPACT'
       || /RPC Request failed|HTTP request failed|fetch failed|network|socket|timeout|timed out|rate limit|\b429\b|\b502\b|\b503\b|\b504\b/i.test(code)

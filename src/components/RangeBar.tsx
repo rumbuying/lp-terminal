@@ -30,14 +30,22 @@ export function RangeBar(props: {
   dec1: number
   sym0: string
   sym1: string
+  /** Controlled price orientation so companion charts can mirror with this bar. */
+  flipped?: boolean
+  onFlippedChange?: (flipped: boolean) => void
   /** order mode: this position is a range order — out-of-range is the intended
    *  resting state, so relabel the status instead of alarming in red */
   order?: { fillFrac: number; sellSym: string; buySym: string }
 }) {
   const { t } = useTranslation()
   // order mode defaults to the SELL token's price orientation ("fills as it rises")
-  const [flipped, setFlipped] = useState(props.order ? props.order.sellSym === props.sym1 : false)
+  const [uncontrolledFlipped, setUncontrolledFlipped] = useState(props.order ? props.order.sellSym === props.sym1 : false)
   const { tickLower, tickUpper, tick, sqrtPriceX96, dec0, dec1, sym0, sym1, order } = props
+  const flipped = props.flipped ?? uncontrolledFlipped
+  const setFlipped = (next: boolean) => {
+    if (props.flipped === undefined) setUncontrolledFlipped(next)
+    props.onFlippedChange?.(next)
+  }
 
   // prices in token1-per-token0 orientation
   const pLower = tickToPrice(tickLower, dec0, dec1)

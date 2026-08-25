@@ -33,6 +33,9 @@ export const UNI = {
   V3_SWAP_ROUTER: '0xcaf681a66d020601342297493863e78c959e5cb2',
   V2_FACTORY: '0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f',
   V2_ROUTER: '0x89e5DB8B5aA49aA85AC63f691524311AEB649eba',
+  // Official 0.30% WETH/USDG pool. Its spot price is the durable USDG mark
+  // used by strategy performance accounting (including historical baselines).
+  V3_WETH_USDG_POOL: '0xa9188730fe85be88ad499d7d52b099e800fb0334',
 } as const satisfies Record<string, Address>
 
 export const EXPLORER = 'https://robinhoodchain.blockscout.com'

@@ -80,6 +80,11 @@ const cfg = originalStrategyDraft({
   quoteToken: '0x0000000000000000000000000000000000000005',
 })
 assert.equal(parseStrategyConfig(JSON.parse(JSON.stringify(cfg))).preset, 'original')
+const legacyConfig = JSON.parse(JSON.stringify(cfg))
+delete legacyConfig.capitalProtection
+delete legacyConfig.adaptiveRange
+assert.deepEqual(parseStrategyConfig(legacyConfig).capitalProtection, { enabled: true, profitThresholdUsdg: '10' })
+assert.deepEqual(parseStrategyConfig(legacyConfig).adaptiveRange, { enabled: true, targetMinutes: 120, maxMultiplier: 4, recoveryDecay: 0.5, contractionReviewMinutes: 360, contractionStabilityMinutes: 120, contractionMaxVolatilityBps: 250, contractionFeeCoverage: 1.25 })
 
 const stableQuotedStake = originalStrategyDraft({
   owner: cfg.owner,
@@ -129,6 +134,16 @@ assert.ok(plan.nextRange.tickLower < snapshot.tick && plan.nextRange.tickUpper >
 assert.equal(plan.hash, makeRebalancePlan({ config: plannedConfig, snapshot, now: 1_001 }).hash)
 const guardedPlan = makeRebalancePlan({ config: { ...plannedConfig, safeguards: { ...plannedConfig.safeguards, enabled: true } }, snapshot, now: 1_001 })
 assert.ok(BigInt(String(guardedPlan.steps[1].intent.amount1Min)) > 0n)
+const widenedPlan = makeRebalancePlan({ config: plannedConfig, snapshot, now: 1_001, rangeScale: 3 })
+assert.equal(widenedPlan.rangeScale, 3)
+assert.ok(widenedPlan.nextRange.tickLower < plan.nextRange.tickLower)
+assert.ok(widenedPlan.nextRange.tickUpper > plan.nextRange.tickUpper)
+const inRangeSnapshot = { ...snapshot, tick: 0 }
+const contractionPlan = makeRebalancePlan({ config: plannedConfig, snapshot: inRangeSnapshot, now: 1_001, triggerSide: 'adaptive_contraction', rangeScale: 1.5 })
+assert.equal(contractionPlan.triggerSide, 'adaptive_contraction')
+assert.equal(contractionPlan.action, 'recenter')
+assert.ok(contractionPlan.nextRange.tickLower < inRangeSnapshot.tick && contractionPlan.nextRange.tickUpper > inRangeSnapshot.tick)
+assert.throws(() => makeRebalancePlan({ config: plannedConfig, snapshot, now: 1_001, triggerSide: 'adaptive_contraction', rangeScale: 1.5 }))
 const fixedConfig = { ...plannedConfig, range: { ...plannedConfig.range, mode: 'fixed_ticks' as const, tickLower: -120, tickUpper: 340 } }
 const fixedPlan = makeRebalancePlan({ config: fixedConfig, snapshot, now: 1_001 })
 assert.deepEqual(fixedPlan.nextRange, { tickLower: -120, tickUpper: 340 })

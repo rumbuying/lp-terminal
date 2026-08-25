@@ -36,7 +36,7 @@
 // capped at maxSideOverDepth × the credible depth that established its price.
 // Every bounded figure flags tvl_approx.
 import { erc20Abi, formatUnits } from 'viem'
-import { uniV2PairAbi, uniV3PoolAbi } from '../src/abi'
+import { clGaugeAbi, clPoolAbi, erc20Abi as appErc20Abi, uniV2PairAbi, uniV3PoolAbi, voterAbi } from '../src/abi'
 import { ADDR, TUNE, log, now } from './config'
 import { mc, ok, type Call } from './rpc'
 import {
@@ -82,7 +82,7 @@ export async function ensureTokenMeta(): Promise<number> {
 
 const poolRowsQ = (addrs: string[]): PoolRow[] => {
   const out: PoolRow[] = []
-  const q = db.prepare('SELECT address, proto, token0, token1, fee_ppm, tick_spacing FROM pools WHERE address = ?')
+  const q = db.prepare('SELECT address, proto, token0, token1, fee_ppm, unstaked_fee_ppm, tick_spacing, gauge FROM pools WHERE address = ?')
   for (const a of addrs) {
     const r = q.get(a.toLowerCase()) as PoolRow | undefined
     if (r) out.push(r)
@@ -114,6 +114,19 @@ async function sweepSlice(addrs: string[]): Promise<number> {
         { abi: erc20Abi, address: p.token0 as `0x${string}`, functionName: 'balanceOf', args: [a] },
         { abi: erc20Abi, address: p.token1 as `0x${string}`, functionName: 'balanceOf', args: [a] },
       )
+    else if (p.proto === 'up33cl')
+      calls.push(
+        { abi: clPoolAbi, address: a, functionName: 'slot0' },
+        { abi: clPoolAbi, address: a, functionName: 'liquidity' },
+        { abi: clPoolAbi, address: a, functionName: 'stakedLiquidity' },
+        { abi: appErc20Abi, address: p.token0 as `0x${string}`, functionName: 'balanceOf', args: [a] },
+        { abi: appErc20Abi, address: p.token1 as `0x${string}`, functionName: 'balanceOf', args: [a] },
+        ...(p.gauge ? [
+          { abi: clGaugeAbi, address: p.gauge as `0x${string}`, functionName: 'rewardRate' },
+          { abi: clGaugeAbi, address: p.gauge as `0x${string}`, functionName: 'periodFinish' },
+          { abi: voterAbi, address: ADDR.VOTER, functionName: 'isAlive', args: [p.gauge as `0x${string}`] },
+        ] : []),
+      )
     else
       calls.push(
         { abi: uniV2PairAbi, address: a, functionName: 'getReserves' },
@@ -137,6 +150,22 @@ async function sweepSlice(addrs: string[]): Promise<number> {
           liquidity: liq,
           reserve0: b0,
           reserve1: b1,
+        })
+        done++
+      } else if (p.proto === 'up33cl') {
+        const s0 = ok<readonly [bigint, number, ...unknown[]]>(res[i++])
+        const liq = ok<bigint>(res[i++])
+        const staked = ok<bigint>(res[i++])
+        const b0 = ok<bigint>(res[i++])
+        const b1 = ok<bigint>(res[i++])
+        const rewardRate = p.gauge ? ok<bigint>(res[i++]) : 0n
+        const periodFinish = p.gauge ? ok<bigint>(res[i++]) : 0n
+        const gaugeAlive = p.gauge ? ok<boolean>(res[i++]) : false
+        if (!s0 || liq === undefined || staked === undefined || b0 === undefined || b1 === undefined) continue
+        upsertState(p.address, {
+          sqrtPrice: s0[0], tick: s0[1], liquidity: liq, stakedLiquidity: staked,
+          rewardRate: rewardRate ?? 0n, periodFinish: periodFinish ?? 0n, gaugeAlive: gaugeAlive ?? false,
+          reserve0: b0, reserve1: b1,
         })
         done++
       } else {
@@ -168,20 +197,6 @@ const loadSeeds = (): Map<string, PriceEntry> => {
   for (const t of allTokens())
     if (t.price_src && t.price_src !== 'pool' && plausibleUsd(t.price_usd))
       m.set(t.address, { usd: t.price_usd!, depth: t.price_depth_usd, src: t.price_src, hops: 0 })
-  return m
-}
-
-/** every stored price, for TVL arithmetic only (computeTvlFor — no propagation) */
-const loadPrices = (): Map<string, PriceEntry> => {
-  const m = new Map<string, PriceEntry>()
-  for (const t of allTokens())
-    if (plausibleUsd(t.price_usd))
-      m.set(t.address, {
-        usd: t.price_usd!,
-        depth: t.price_depth_usd,
-        src: t.price_src ?? '?',
-        hops: t.price_src === 'pool' ? 1 : 0,
-      })
   return m
 }
 
@@ -232,7 +247,7 @@ export function v3SpotOk(liquidity: string | null, tick: number | null): boolean
 
 /** HUMAN token1-per-token0 spot, or null when this pool may not set a price */
 const spotOf = (s: StateRow, b0: number, b1: number, decs: Map<string, number>): number | null => {
-  if (s.proto !== 'univ3') return b0 > 0 && b1 > 0 ? b1 / b0 : null
+  if (s.proto !== 'univ3' && s.proto !== 'up33cl') return b0 > 0 && b1 > 0 ? b1 / b0 : null
   if (!v3SpotOk(s.liquidity, s.tick)) return null
   return v3Price1Per0(s.sqrt_price, decs.get(s.token0) ?? 18, decs.get(s.token1) ?? 18)
 }
@@ -390,16 +405,27 @@ export function reprice(): { priced: number; tvlPools: number } {
 /** cheap TVL refresh for a few pools using already-stored prices (no propagation) */
 export function computeTvlFor(addrs: string[]): void {
   if (!addrs.length) return
-  const decs = new Map(allTokens().map((t) => [t.address, t.decimals]))
-  const prices = loadPrices()
   const q = db.prepare(
     `SELECT p.address, p.proto, p.token0, p.token1, s.reserve0, s.reserve1, s.sqrt_price, s.liquidity, s.tick
      FROM pools p JOIN pool_state s ON s.address = p.address WHERE p.address = ?`,
   )
-  tx(() => {
-    for (const a of addrs) {
-      const s = q.get(a.toLowerCase()) as StateRow | undefined
-      if (!s) continue
+  for (let offset = 0; offset < addrs.length; offset += 1_000) {
+    const rows = addrs.slice(offset, offset + 1_000)
+      .map((address) => q.get(address.toLowerCase()) as StateRow | undefined)
+      .filter((row): row is StateRow => Boolean(row))
+    const tokenAddrs = [...new Set(rows.flatMap((row) => [row.token0, row.token1]))]
+    const tokenRows: { address: string; decimals: number; price_usd: number | null; price_depth_usd: number; price_src: string | null }[] = []
+    for (let tokenOffset = 0; tokenOffset < tokenAddrs.length; tokenOffset += 500) {
+      const chunk = tokenAddrs.slice(tokenOffset, tokenOffset + 500)
+      tokenRows.push(...db.prepare(`SELECT address,decimals,price_usd,price_depth_usd,price_src FROM tokens
+        WHERE address IN (${chunk.map(() => '?').join(',')})`).all(...chunk) as typeof tokenRows)
+    }
+    const decs = new Map(tokenRows.map((token) => [token.address, token.decimals]))
+    const prices = new Map<string, PriceEntry>()
+    for (const token of tokenRows) if (plausibleUsd(token.price_usd)) prices.set(token.address, {
+      usd: token.price_usd, depth: token.price_depth_usd, src: token.price_src ?? '?', hops: token.price_src === 'pool' ? 1 : 0,
+    })
+    tx(() => { for (const s of rows) {
       const human = (raw: string, addr: string) => Number(formatUnits(BigInt(raw), decs.get(addr) ?? 18))
       const p0 = prices.get(s.token0)
       const p1 = prices.get(s.token1)
@@ -407,8 +433,8 @@ export function computeTvlFor(addrs: string[]): void {
       const u1 = p1 ? human(s.reserve1, s.token1) * p1.usd : null
       const { tvl, approx } = tvlOf(u0, credible(p0), u1, credible(p1), capOf(p0), capOf(p1))
       setTvl(s.address, tvl, approx)
-    }
-  })
+    } })
+  }
 }
 
 export const sweepLog = (label: string, n: number, ms: number) =>

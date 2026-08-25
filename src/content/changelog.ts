@@ -29,6 +29,90 @@ export type NewsEntry = {
 
 export const CHANGELOG: NewsEntry[] = [
   {
+    id: '2026-08-24-retained-profit-withdrawals',
+    date: '2026-08-24',
+    tag: 'new',
+    title: { en: 'Retained LP profit is now withdrawable', zh: 'LP 留存利润现在可以提取' },
+    items: [
+      {
+        en: 'Withdraw all retained profit from a strategy as USDG, WETH or native ETH without touching principal carry or parked fees.',
+        zh: '现在可以把策略的全部留存利润结算为 USDG、WETH 或原生 ETH；本金余量和暂存手续费不会被动用。',
+      },
+      {
+        en: 'Each withdrawal and the cumulative total stay visible, while lifetime P/L continues from the same original baseline.',
+        zh: '每次提取和累计提取都会保留展示；累计盈亏仍沿用原始本金基线，不会因资金离开策略钱包而被重置。',
+      },
+    ],
+  },
+  {
+    id: '2026-08-24-durable-lp-recommendations',
+    date: '2026-08-24',
+    tag: 'fix',
+    title: { en: 'LP recommendations stopped chasing hot hours', zh: 'LP 推荐不再追逐短时暴涨' },
+    items: [
+      {
+        en: 'A hot one-hour volume burst can no longer be projected across the next full day. Longer windows, reversal stress and the cost of repeated recenters now decide whether an LP is worth opening.',
+        zh: '单个小时的成交暴增不会再直接外推成全天收益；系统会用更长窗口、反转压力和重复重开成本判断是否值得开单。',
+      },
+      {
+        en: 'The page now shows one Best LP Now across fees and rewards—or clearly says that no LP passes the opening gates.',
+        zh: '页面会在手续费与排放候选中直接给出一个“当前首选”；如果没有 LP 通过开单门槛，也会明确提示暂时不要开单。',
+      },
+    ],
+  },
+  {
+    id: '2026-08-23-dual-pnl-units',
+    date: '2026-08-23',
+    tag: 'new',
+    title: { en: 'P/L now has two points of view', zh: '盈亏现在支持两种计量口径' },
+    items: [
+      {
+        en: 'Switch strategy P/L between the original quote-token result and stablecoin value. A position can now show a USDG profit even when its WETH amount declined.',
+        zh: '策略盈亏可在原有报价币口径和稳定币价值口径之间一键切换；即使 WETH 数量减少，只要 USDG 价值上涨，也会正确显示为盈利。',
+      },
+      {
+        en: 'The same preference follows you into strategy history and the daily P/L calendar.',
+        zh: '同一口径设置会同步应用到历史策略和每日盈亏日历。',
+      },
+    ],
+  },
+  {
+    id: '2026-08-17-lp-profit-protection',
+    date: '2026-08-17',
+    tag: 'new',
+    title: { en: 'LP profits now stay protected', zh: 'LP 盈利现在会自动留存' },
+    items: [
+      {
+        en: 'Once a strategy has at least 10 USDG of new profit, the next rebalance keeps the excess out of the replacement position instead of putting everything back at risk.',
+        zh: '策略新增盈利达到 10 USDG 后，下次再平衡会把超出本金的部分留存，不再把全部资金重新投入风险区间。',
+      },
+      {
+        en: 'A quick boundary hit only widens the next range when the strategy is losing and the previous cycle fees did not cover its costs.',
+        zh: '快速触边后，只有策略仍在亏损且上一轮手续费不足以覆盖成本时，下一轮才会扩大区间。',
+      },
+      {
+        en: 'An expanded range is reviewed after six hours and narrows gradually only after two calm in-range hours, profit recovery, and enough fees to cover the previous cycle costs with a safety margin.',
+        zh: '扩大后的区间会在 6 小时后进入收窄检查；只有最近 2 小时持续在区间内且波动回落、盈利恢复、手续费也留足上一轮成本的安全余量后，才会逐级收窄。',
+      },
+    ],
+  },
+  {
+    id: '2026-08-15-lp-recommendations',
+    date: '2026-08-15',
+    tag: 'new',
+    title: { en: 'LP recommendations have their own page', zh: 'LP 推荐现在有独立页面了' },
+    items: [
+      {
+        en: 'See three ranked LP choices at a time. Strict recommendations come first, and watchlist candidates explain exactly why they did not pass the opening threshold.',
+        zh: '每次展示 3 个排序后的 LP；正式推荐优先，观察候选会明确说明尚未达到开仓门槛的原因。',
+      },
+      {
+        en: 'Open any choice in Pools with its exact range and model capital already filled in.',
+        zh: '可以把任一候选带入池子页，精确区间和模型投入会自动填好。',
+      },
+    ],
+  },
+  {
     id: '2026-07-22-sheriff',
     date: '2026-07-22',
     tag: 'new',

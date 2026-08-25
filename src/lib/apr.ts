@@ -14,6 +14,10 @@ const YEAR = 31_536_000
 
 export type VolumeWindow = 'm5' | 'h1' | 'h6' | 'h24'
 
+export function volumeWindowLabel(window: VolumeWindow): string {
+  return window === 'm5' ? '5M' : `${window.slice(1)}H`
+}
+
 const VOLUME_FIELD: Record<VolumeWindow, keyof Pick<PoolStat, 'vol5mUsd' | 'vol1hUsd' | 'vol6hUsd' | 'vol24hUsd'>> = {
   m5: 'vol5mUsd',
   h1: 'vol1hUsd',
@@ -40,6 +44,11 @@ export function feesOf(p: Pool, stat: PoolStat | undefined, window: VolumeWindow
 }
 
 export const fees24Of = (p: Pool, stat?: PoolStat): number | null => feesOf(p, stat, 'h24')
+
+export type TokenUsdMap = Readonly<Record<string, number | null | undefined>>
+
+const validUsd = (price: number | null | undefined): price is number =>
+  price !== null && price !== undefined && Number.isFinite(price) && price > 0
 
 /** Pool-average fee APR for an UNSTAKED LP, annualized from the selected
  * rolling window and net of the CL unstaked levy. Short windows are intentionally
@@ -92,7 +101,15 @@ export function clTokenUsd(
   dec1: number,
   upUsd?: number,
   wethUsd?: number | null,
+  tokenUsd?: TokenUsdMap,
 ): { p0: number; p1: number } | null {
+  const token0 = pool.token0.toLowerCase()
+  const token1 = pool.token1.toLowerCase()
+  const direct0 = tokenUsd?.[token0]
+  const direct1 = tokenUsd?.[token1]
+  // Prefer independently depth-checked indexer marks when both are known.
+  if (validUsd(direct0) && validUsd(direct1)) return { p0: direct0, p1: direct1 }
+
   const anchors: Record<string, number | undefined> = {
     [ADDR.USDG.toLowerCase()]: 1,
     [ADDR.WETH.toLowerCase()]: wethUsd ?? undefined,
@@ -100,8 +117,12 @@ export function clTokenUsd(
   }
   const P = sqrtPriceToPrice(pool.sqrtPriceX96, dec0, dec1) // token1 per 1 token0
   if (!Number.isFinite(P) || P <= 0) return null
-  const a0 = anchors[pool.token0.toLowerCase()]
-  const a1 = anchors[pool.token1.toLowerCase()]
+  // With one credible mark, value the counter-asset from this pool's live spot.
+  if (validUsd(direct0)) return { p0: direct0, p1: direct0 / P }
+  if (validUsd(direct1)) return { p0: P * direct1, p1: direct1 }
+
+  const a0 = anchors[token0]
+  const a1 = anchors[token1]
   if (a0 !== undefined && a0 > 0) return { p0: a0, p1: a0 / P }
   if (a1 !== undefined && a1 > 0) return { p0: P * a1, p1: a1 }
   return null
@@ -136,6 +157,7 @@ export function simulateClAdd(args: {
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  volumeWindow?: VolumeWindow
 }): AddSim | null {
   const { pool, liquidity } = args
   if (liquidity <= 0n) return null
@@ -149,10 +171,12 @@ export function simulateClAdd(args: {
   const feeShare = L / (Number(pool.liquidity) + L)
   const emitShare = L / (Number(pool.stakedLiquidity) + L)
   const keep = 1 - pool.unstakedFeePpm / 1e6
+  const volumeWindow = args.volumeWindow ?? 'h24'
+  const windowFees = feesOf(pool, args.stat, volumeWindow)
   const feeApr =
-    args.stat?.vol24hUsd == null
+    windowFees == null
       ? NaN
-      : ((args.stat.vol24hUsd * 365 * (pool.feePpm / 1e6) * keep * feeShare) / depositUsd) * 100
+      : ((windowFees * (YEAR / WINDOW_SECONDS[volumeWindow]) * keep * feeShare) / depositUsd) * 100
   const emitApr =
     !args.upUsd || !isEmitting(pool)
       ? NaN
@@ -169,6 +193,7 @@ export function simulateV2Add(args: {
   dec1: number
   stat?: PoolStat
   upUsd?: number
+  volumeWindow?: VolumeWindow
 }): AddSim | null {
   const { pool, stat } = args
   if (stat?.liqUsd == null || stat.liqUsd <= 0) return null
@@ -180,10 +205,12 @@ export function simulateV2Add(args: {
   const p1 = stat.liqUsd / 2 / r1h
   const depositUsd = args.amount0h * p0 + args.amount1h * p1
   if (!(depositUsd > 0)) return null
+  const volumeWindow = args.volumeWindow ?? 'h24'
+  const windowFees = feesOf(pool, stat, volumeWindow)
   const feeApr =
-    stat.vol24hUsd == null
+    windowFees == null
       ? NaN
-      : ((stat.vol24hUsd * 365 * (pool.feeBps / 10_000)) / (stat.liqUsd + depositUsd)) * 100
+      : ((windowFees * (YEAR / WINDOW_SECONDS[volumeWindow])) / (stat.liqUsd + depositUsd)) * 100
   const stakedTvl = stat.liqUsd * stakedShareOf(pool)
   const emitApr =
     !args.upUsd || !isEmitting(pool)

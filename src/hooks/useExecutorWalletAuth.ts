@@ -19,7 +19,7 @@ function savedSession(address: Address): StoredSession | undefined {
   } catch { return undefined }
 }
 
-export function useExecutorWalletAuth(address: Address | undefined, enabled = true) {
+export function useExecutorWalletAuth(address: Address | undefined, enabled = true, auto = true) {
   const { signMessageAsync } = useSignMessage()
   const [token, setToken] = useState('')
   const [status, setStatus] = useState<ExecutorWalletAuthStatus>('idle')
@@ -88,8 +88,8 @@ export function useExecutorWalletAuth(address: Address | undefined, enabled = tr
     const normalized = address.toLowerCase()
     if (attemptedAddress.current === normalized) return
     attemptedAddress.current = normalized
-    void authenticate()
-  }, [address, enabled, authenticate])
+    if (auto) void authenticate()
+  }, [address, enabled, auto, authenticate])
 
   return { token, status, error, retry, invalidate }
 }

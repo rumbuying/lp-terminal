@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchDexscreener, fetchPoolStats } from '../lib/poolstats'
 import { usePools } from './usePools'
+import type { Pool } from '../types'
 
 /** rolling volume windows / liquidity USD (DexScreener; Goldsky v2 remains 24h-only) */
 export function usePoolStats() {
@@ -12,6 +13,20 @@ export function usePoolStats() {
     staleTime: 45_000,
     retry: 1,
     queryFn: () => fetchPoolStats(pools.data!.pools),
+  })
+}
+
+/** Stats for the small set of UP33 pools represented in the connected wallet. */
+export function useHeldPoolStats(pools: Pool[]) {
+  const key = [...new Set(pools.map((pool) => pool.address.toLowerCase()))].sort().join(',')
+  return useQuery({
+    queryKey: ['heldPoolStats', key],
+    enabled: pools.length > 0,
+    refetchInterval: 60_000,
+    staleTime: 45_000,
+    retry: 1,
+    placeholderData: (previous) => previous,
+    queryFn: () => fetchPoolStats(pools),
   })
 }
 

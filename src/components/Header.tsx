@@ -9,9 +9,10 @@ import { LangControl } from './LangControl'
 import { NewsButton } from './NewsButton'
 import { MobileThemeControl } from './ThemeControl'
 
-export type TabId = 'pools' | 'positions' | 'swap' | 'bridge' | 'strategy' | 'strategy-history' | 'pnl-calendar'
+export type TabId = 'pools' | 'recommendations' | 'positions' | 'swap' | 'bridge' | 'strategy' | 'strategy-history' | 'pnl-calendar'
 const TABS = [
   { id: 'pools', labelKey: 'hdr.pools', key: '1' },
+  { id: 'recommendations', labelKey: 'hdr.recommendations', key: '9' },
   { id: 'positions', labelKey: 'hdr.positions', key: '2' },
   { id: 'swap', labelKey: 'hdr.swap', key: '3' },
   { id: 'bridge', labelKey: 'hdr.bridge', key: '5' },

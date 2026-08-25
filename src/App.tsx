@@ -14,6 +14,7 @@ import { Btn } from './components/ui'
 const BridgeTab = lazy(() => import('./components/tabs/BridgeTab').then(({ BridgeTab }) => ({ default: BridgeTab })))
 const LabTab = lazy(() => import('./components/tabs/LabTab').then(({ LabTab }) => ({ default: LabTab })))
 const PositionsTab = lazy(() => import('./components/tabs/PositionsTab').then(({ PositionsTab }) => ({ default: PositionsTab })))
+const RecommendationsTab = lazy(() => import('./components/tabs/RecommendationsTab').then(({ RecommendationsTab }) => ({ default: RecommendationsTab })))
 const SwapTab = lazy(() => import('./components/tabs/SwapTab').then(({ SwapTab }) => ({ default: SwapTab })))
 const StrategyTab = lazy(() => import('./components/tabs/StrategyTab').then(({ StrategyTab }) => ({ default: StrategyTab })))
 const StrategyHistoryTab = lazy(() => import('./components/tabs/StrategyHistoryTab').then(({ StrategyHistoryTab }) => ({ default: StrategyHistoryTab })))
@@ -31,6 +32,7 @@ export default function App() {
 
 const KEYS: Record<string, TabId> = {
   '1': 'pools',
+  '9': 'recommendations',
   '2': 'positions',
   '3': 'swap',
   '5': 'bridge',
@@ -42,7 +44,7 @@ const KEYS: Record<string, TabId> = {
 const validTab = (h: string): TabId | null => {
   if (h === 'limit') return 'swap' // LIMIT mode is a sub-view of the swap tab
   if (h === 'lab') return 'pools' // hidden component lab rides the pools slot
-  return (['pools', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar'] as const).includes(h as TabId) ? (h as TabId) : null
+  return (['pools', 'recommendations', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar'] as const).includes(h as TabId) ? (h as TabId) : null
 }
 
 function Shell() {
@@ -97,6 +99,7 @@ function Shell() {
         )}
         <Suspense fallback={<div className="panel dim mono-sm">{t('app.loadingTab')}</div>}>
           {tab === 'pools' && (location.hash === '#lab' ? <LabTab /> : <PoolsTab />)}
+          {tab === 'recommendations' && <RecommendationsTab onOpenPool={() => setTab('pools')} />}
           {tab === 'positions' && <PositionsTab />}
           {tab === 'swap' && <SwapTab />}
           {tab === 'bridge' && <BridgeTab />}

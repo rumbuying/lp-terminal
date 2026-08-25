@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { allocateProRata, executionShortfall, incomeTaxRetentionEntry } from '../../shared/strategy/accounting'
+import { allocateProRata, distributionAdjustedPnl, executionShortfall, incomeTaxRetentionEntry } from '../../shared/strategy/accounting'
 
 test('execution cost uses source-pool spot when it is the better baseline', () => {
   assert.deepEqual(
@@ -43,4 +43,11 @@ test('directly retained income tax becomes an explicit ledger fact', () => {
   assert.equal(entry?.kind, 'income_tax')
   assert.equal(entry?.amount, '123')
   assert.deepEqual(entry?.meta, { purpose: 'fee_tax', source: 'direct_retention' })
+})
+
+test('withdrawing profit changes custody without erasing lifetime P/L', () => {
+  const before = distributionAdjustedPnl({ currentValue: 120n, withdrawnValue: 0n, baselineValue: 100n, gasCost: 2n })
+  const after = distributionAdjustedPnl({ currentValue: 105n, withdrawnValue: 15n, baselineValue: 100n, gasCost: 2n })
+  assert.equal(before, 18n)
+  assert.equal(after, before)
 })

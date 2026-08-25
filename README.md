@@ -15,6 +15,10 @@ Unattended LP strategy development and production operations are documented in
 there before changing the executor, recovery logic, production data, or wallet
 secrets.
 
+The implementation proposal for ranking LP candidates and recommending an
+adaptive lookback window plus concentrated-liquidity range is documented in
+[`docs/LP_AUTO_RECOMMENDATION_IMPLEMENTATION.zh-CN.md`](docs/LP_AUTO_RECOMMENDATION_IMPLEMENTATION.zh-CN.md).
+
 ## Run
 
 ```bash

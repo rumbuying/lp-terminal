@@ -62,6 +62,29 @@ export type StrategyConfig = {
     thresholdQuote?: string
     intervalMinutes?: number
   }
+  capitalProtection: {
+    /** Never deploy more than the immutable strategy-start value after a harvest. */
+    enabled: boolean
+    /** Harvest when deployable profit reaches this executable USDG value. */
+    profitThresholdUsdg: string
+  }
+  adaptiveRange: {
+    enabled: boolean
+    /** Desired minimum lifetime before a fast boundary crossing can widen the next range. */
+    targetMinutes: number
+    /** Hard ceiling for the cumulative square-root widening multiplier. */
+    maxMultiplier: number
+    /** Fraction of excess width retained after a position survives the target. */
+    recoveryDecay: number
+    /** An expanded in-range position is eligible for an economically-gated contraction review after this time. */
+    contractionReviewMinutes: number
+    /** Complete recent price-sample window required before contraction. */
+    contractionStabilityMinutes: number
+    /** Maximum sampled peak-to-trough movement allowed during the stability window. */
+    contractionMaxVolatilityBps: number
+    /** Current uncollected fees must cover this multiple of the prior execution cost before a timed contraction. */
+    contractionFeeCoverage: number
+  }
   safeguards: {
     enabled: boolean
     minCrossingMinutes?: number
@@ -105,7 +128,7 @@ export type StrategyConfig = {
   updatedAt: number
 }
 
-export type TriggerSide = 'lower' | 'upper' | 'manual'
+export type TriggerSide = 'lower' | 'upper' | 'manual' | 'adaptive_contraction'
 
 export type TriggerDecision =
   | { kind: 'none'; reason: 'in_range' | 'confirming' | 'cooldown' | 'guard_not_met' }
@@ -215,6 +238,8 @@ export type StrategyExecutionPlan = {
   action: StrategyPlanAction
   snapshot: StrategyPositionSnapshot
   nextRange: { tickLower: number; tickUpper: number }
+  /** Frozen for deterministic execution/recovery; 1 means the configured base range. */
+  rangeScale: number
   steps: StrategyPlanStep[]
   safeguards: { maxSlippageBps: number; maxPlanAgeSeconds: number; dryRun: boolean }
 }
@@ -253,6 +278,10 @@ export type LedgerEntryKind =
   | 'swap_cost'
   | 'gas'
   | 'mint_principal'
+  | 'profit_harvest'
+  | 'profit_withdrawal_swap_in'
+  | 'profit_withdrawal_swap_out'
+  | 'profit_withdrawal'
   | 'external_collect'
   | 'staking_reward'
   | 'adjustment'
@@ -271,5 +300,5 @@ export type LedgerEntry = {
   quoteValue?: string
   /** true means calculated from a levy snapshot, not an observed transfer. */
   estimated?: boolean
-  meta?: Record<string, string | number | boolean>
+  meta?: Record<string, unknown>
 }

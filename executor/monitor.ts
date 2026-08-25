@@ -4,9 +4,11 @@ import { StrategyError } from '../shared/strategy/errors'
 import { rangeSide } from '../shared/strategy/range'
 import { decideBoundaryTrigger } from '../shared/strategy/trigger'
 import { evaluateMarketQuality, shouldStartBurstWait } from '../shared/strategy/market-guard'
+import { evaluateAdaptiveRangeStability, nextAdaptiveRangeScale, shouldContractAdaptiveRange, shouldWidenAdaptiveRange } from '../shared/strategy/adaptive-range'
 import { publicClient, readCollectableFees, readMonitorSnapshots, readStrategySnapshot } from './chain'
 import { EXECUTOR } from './config'
 import { quoteTurnover } from './risk'
+import { strategyPerformance } from './performance'
 import {
   audit,
   completedCyclesSince,
@@ -14,12 +16,14 @@ import {
   enabledExecutorStrategies,
   executorPaused,
   latestCompletedCycleAt,
+  latestCompletedCycleRange,
   latestFeeCollectionAt,
   monitorState,
   recordPriceSample,
   sampledAverageTick,
   sampledTickStats,
   setStrategyState,
+  strategyBaseline,
   updateMonitorState,
 } from './store'
 import { clearStrategyRetry, deferStrategyRetry, strategyRetryReady } from './retry-state'
@@ -27,6 +31,31 @@ import { clearStrategyRetry, deferStrategyRetry, strategyRetryReady } from './re
 let running = false
 const low = (value: string) => value.toLowerCase()
 const nextMonitorAt = new Map<string, number>()
+
+const raw = (value: string | null | undefined) => value === null || value === undefined ? undefined : BigInt(value)
+
+async function adaptiveEconomics(config: Parameters<typeof readStrategySnapshot>[0], state: string) {
+  try {
+    // This valuation controls whether capital is put back at risk, so it must
+    // see the cycle that just completed rather than the dashboard's 30-second
+    // presentation cache.
+    const performance = await strategyPerformance(config, state)
+    const summary = performance.summary
+    const latest = performance.cycles?.[0]
+    if (!summary || !latest) return undefined
+    const cycleCost = BigInt(latest.gasCostQuoteRaw) + BigInt(latest.executionCostQuoteRaw)
+    return {
+      pnlQuoteRaw: raw(summary.pnlQuoteRaw),
+      currentFeesQuoteRaw: raw(summary.currentUncollectedFeesQuoteRaw),
+      lastNetFeesQuoteRaw: BigInt(latest.netFeesQuoteRaw),
+      lastCycleCostQuoteRaw: cycleCost,
+    }
+  } catch {
+    // Valuation is advisory for adaptive sizing. A temporary quote failure must
+    // not prevent the base rebalance from protecting an out-of-range position.
+    return undefined
+  }
+}
 
 async function feeCollectionDue(config: Parameters<typeof readStrategySnapshot>[0], snapshot: Awaited<ReturnType<typeof readStrategySnapshot>>, now: number) {
   if (config.fees.timing === 'on_rebalance' || config.fees.handling === 'reinvest') return false
@@ -78,7 +107,8 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
       return
     }
     const snapshots = await readMonitorSnapshots(ready.map(({ config }) => config), blockNumber)
-    for (const { config } of ready) {
+    for (const current of ready) {
+      const { config, state: strategyState } = current
       try {
         const snapshot = snapshots.get(config.id)
         if (snapshot instanceof Error) throw snapshot
@@ -167,6 +197,8 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
         }
 
         const side = rangeSide(triggerTick, snapshot.tickLower, snapshot.tickUpper)
+        const latestRange = latestCompletedCycleRange(config.id)
+        const positionStartedAt = latestRange?.completedAt ?? strategyBaseline(config.id)?.observedAt ?? config.createdAt
         const reset = !previous || previous.revision !== config.revision || previous.lastTokenId !== snapshot.tokenId
         const outSince = side === 'in' ? undefined : reset || previous.outSide !== side ? now : previous.outSince ?? now
         const latestCompleted = latestCompletedCycleAt(config.id)
@@ -175,6 +207,63 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
           config.trigger.confirmationSeconds,
           config.safeguards.enabled ? (config.safeguards.minCrossingMinutes ?? 0) * 60 : 0,
         )
+        const contractionDue = side === 'in'
+          && config.adaptiveRange.enabled
+          && config.range.mode !== 'fixed_ticks'
+          && (latestRange?.rangeScale ?? 1) > 1.000001
+          && now - positionStartedAt >= config.adaptiveRange.contractionReviewMinutes * 60
+        if (contractionDue && latestRange) {
+          const stabilityWindowSeconds = config.adaptiveRange.contractionStabilityMinutes * 60
+          const contractionStats = sampledTickStats(config.id, now - stabilityWindowSeconds)
+          const sampleSlackSeconds = Math.max(60, config.trigger.pollSeconds * 2)
+          const historyReady = !!contractionStats
+            && contractionStats.count >= 2
+            && contractionStats.firstTs <= now - stabilityWindowSeconds + sampleSlackSeconds
+            && contractionStats.lastTs >= now - sampleSlackSeconds
+          const stability = historyReady && contractionStats ? evaluateAdaptiveRangeStability({
+            minTick: contractionStats.minTick,
+            maxTick: contractionStats.maxTick,
+            tickLower: snapshot.tickLower,
+            tickUpper: snapshot.tickUpper,
+            maxVolatilityBps: config.adaptiveRange.contractionMaxVolatilityBps,
+          }) : undefined
+          const economics = stability?.stable ? await adaptiveEconomics(config, strategyState) : undefined
+          const nextScale = nextAdaptiveRangeScale({
+            enabled: true,
+            now,
+            positionStartedAt,
+            previousScale: latestRange.rangeScale,
+            targetSeconds: config.adaptiveRange.targetMinutes * 60,
+            maxMultiplier: config.adaptiveRange.maxMultiplier,
+            recoveryDecay: config.adaptiveRange.recoveryDecay,
+            allowWiden: false,
+          })
+          const allowed = economics && shouldContractAdaptiveRange({
+            pnlQuoteRaw: economics.pnlQuoteRaw,
+            currentFeesQuoteRaw: economics.currentFeesQuoteRaw,
+            priorCycleCostQuoteRaw: economics.lastCycleCostQuoteRaw,
+            feeCoverageMultiplier: config.adaptiveRange.contractionFeeCoverage,
+          })
+          if (allowed && nextScale < latestRange.rangeScale - 0.000001) {
+            const plan = makeRebalancePlan({ config, snapshot, triggerSide: 'adaptive_contraction', rangeScale: nextScale })
+            if (createPlannedJob(plan)) {
+              audit('monitor', 'adaptive_contraction_plan_created', 'strategy', config.id, {
+                planId: plan.id,
+                previousScale: latestRange.rangeScale,
+                rangeScale: nextScale,
+                positionAgeSeconds: now - positionStartedAt,
+                currentFeesQuoteRaw: economics.currentFeesQuoteRaw?.toString() ?? null,
+                priorCycleCostQuoteRaw: economics.lastCycleCostQuoteRaw.toString(),
+                feeCoverageMultiplier: config.adaptiveRange.contractionFeeCoverage,
+                stabilityWindowSeconds,
+                volatilityBps: stability?.volatilityBps ?? null,
+                maxVolatilityBps: config.adaptiveRange.contractionMaxVolatilityBps,
+              })
+              setStrategyState(config.id, 'planned')
+            } else setStrategyState(config.id, 'monitoring')
+            continue
+          }
+        }
         if (side === 'in' && await feeCollectionDue(config, snapshot, now)) {
           updateMonitorState(config.id, {
             revision: config.revision,
@@ -272,9 +361,43 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
             continue
           }
         }
-        const plan = makeRebalancePlan({ config, snapshot, triggerSide: decision.side })
+        // The age of an imported/pre-existing NFT is not known reliably. Its
+        // first automated replacement establishes the durable timing origin;
+        // square-root widening begins with the following boundary crossing.
+        // A quick crossing enlarges only when the strategy is underwater and
+        // its prior cycle's net fees did not pay for gas plus swap costs.
+        const needsAdaptiveEconomics = !!latestRange
+          && config.adaptiveRange.enabled
+          && config.range.mode !== 'fixed_ticks'
+          && now - positionStartedAt < config.adaptiveRange.targetMinutes * 60
+        const economics = needsAdaptiveEconomics ? await adaptiveEconomics(config, strategyState) : undefined
+        const allowWiden = economics ? shouldWidenAdaptiveRange({
+          pnlQuoteRaw: economics.pnlQuoteRaw,
+          lastNetFeesQuoteRaw: economics.lastNetFeesQuoteRaw,
+          lastCycleCostQuoteRaw: economics.lastCycleCostQuoteRaw,
+        }) : false
+        const rangeScale = latestRange ? nextAdaptiveRangeScale({
+          enabled: config.adaptiveRange.enabled && config.range.mode !== 'fixed_ticks',
+          now,
+          positionStartedAt,
+          previousScale: latestRange.rangeScale,
+          targetSeconds: config.adaptiveRange.targetMinutes * 60,
+          maxMultiplier: config.adaptiveRange.maxMultiplier,
+          recoveryDecay: config.adaptiveRange.recoveryDecay,
+          allowWiden,
+        }) : 1
+        const plan = makeRebalancePlan({ config, snapshot, triggerSide: decision.side, rangeScale })
         if (createPlannedJob(plan)) {
-          audit('monitor', 'plan_created', 'strategy', config.id, { planId: plan.id, side: plan.triggerSide })
+          audit('monitor', 'plan_created', 'strategy', config.id, {
+            planId: plan.id,
+            side: plan.triggerSide,
+            rangeScale,
+            positionAgeSeconds: now - positionStartedAt,
+            adaptiveWidenAllowed: allowWiden,
+            adaptivePnlQuoteRaw: economics?.pnlQuoteRaw?.toString() ?? null,
+            adaptiveLastNetFeesQuoteRaw: economics?.lastNetFeesQuoteRaw?.toString() ?? null,
+            adaptiveLastCycleCostQuoteRaw: economics?.lastCycleCostQuoteRaw?.toString() ?? null,
+          })
           setStrategyState(config.id, 'planned')
         } else setStrategyState(config.id, 'monitoring')
       } catch (error) {

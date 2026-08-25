@@ -5,11 +5,10 @@
 // Free tier is 30 calls/min: calls are paced ≥ TUNE.gtPaceMs apart and the
 // whole cycle (≤30 calls) runs every TUNE.statsMs.
 //
-// NOTE: GT has no UP33 dex entry — UP33 pool stats stay on the frontend's
-// existing dexscreener path; this indexer only serves the Uniswap catalog.
+// GT has no UP33 dex entry, so UP33 CL is enriched through DexScreener below.
 import { GT, TUNE, log, sleep } from './config'
 import { plausibleUsd } from './state'
-import { poolRow, setTokenPrice, upsertStats } from './store'
+import { db, poolRow, setTokenPrice, upsertStats } from './store'
 
 const LISTS = [
   { path: '/networks/robinhood/pools', label: 'network' },
@@ -103,4 +102,57 @@ export async function gtCycle(): Promise<void> {
     }
   }
   log(`[stats] gt cycle: ${matched}/${seen} list entries matched catalog`)
+}
+
+type DsPair = {
+  pairAddress?: string
+  baseToken?: { address?: string }
+  quoteToken?: { address?: string }
+  priceUsd?: string
+  priceNative?: string
+  volume?: { m5?: number; h1?: number; h6?: number; h24?: number }
+  liquidity?: { usd?: number }
+  txns?: { h24?: { buys?: number; sells?: number } }
+}
+
+export async function dsCycle(): Promise<void> {
+  const addresses = (db.prepare("SELECT address FROM pools WHERE proto='up33cl' ORDER BY pair_index").all() as { address: string }[]).map((row) => row.address)
+  let matched = 0
+  for (let index = 0; index < addresses.length; index += 30) {
+    const batch = addresses.slice(index, index + 30)
+    let pairs: DsPair[] = []
+    try {
+      const response = await fetch(`https://api.dexscreener.com/latest/dex/pairs/robinhood/${batch.join(',')}`, {
+        headers: { accept: 'application/json', 'user-agent': 'up33-lp-indexer/0.1' },
+        signal: AbortSignal.timeout(12_000),
+      })
+      if (response.ok) pairs = ((await response.json()) as { pairs?: DsPair[] }).pairs ?? []
+    } catch { /* next cycle retries */ }
+    for (const pair of pairs) {
+      const address = pair.pairAddress?.toLowerCase()
+      if (!address || !poolRow(address)) continue
+      const h24 = pair.txns?.h24
+      const txns = h24 ? (h24.buys ?? 0) + (h24.sells ?? 0) : null
+      const liquidity = num(pair.liquidity?.usd)
+      upsertStats(address, {
+        m5: num(pair.volume?.m5), h1: num(pair.volume?.h1), h6: num(pair.volume?.h6), h24: num(pair.volume?.h24),
+      }, txns, liquidity, 'dexscreener')
+      const depth = (liquidity ?? 0) / 2
+      const base = pair.baseToken?.address?.toLowerCase()
+      const quote = pair.quoteToken?.address?.toLowerCase()
+      const baseUsd = num(pair.priceUsd)
+      const native = num(pair.priceNative)
+      if (depth > 0 && base && plausibleUsd(baseUsd)) setTokenPrice(base, baseUsd, depth, 'ds')
+      if (depth > 0 && quote && plausibleUsd(baseUsd) && native && native > 0 && plausibleUsd(baseUsd / native))
+        setTokenPrice(quote, baseUsd / native, depth, 'ds')
+      matched++
+    }
+    if (index + 30 < addresses.length) await sleep(250)
+  }
+  log(`[stats] dexscreener cycle: ${matched}/${addresses.length} up33 cl pools matched`)
+}
+
+export async function statsCycle(): Promise<void> {
+  await gtCycle()
+  await dsCycle()
 }

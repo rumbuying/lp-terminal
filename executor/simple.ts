@@ -29,7 +29,7 @@ export async function startSimpleStrategy(input: unknown, walletId: string) {
   const draft = parseStrategyConfig(input)
   if (!draft.activeTokenId) throw new Error('E_POSITION_REQUIRED')
   const current = strategyById(draft.id)
-  if (current && ['planned', 'executing', 'recovery'].includes(current.state)) throw new Error('E_STRATEGY_BUSY')
+  if (current && ['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(current.state)) throw new Error('E_STRATEGY_BUSY')
 
   const wallet = walletById(walletId)
   if (!wallet) throw new Error('E_WALLET_UNKNOWN')

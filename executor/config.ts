@@ -102,6 +102,7 @@ export const EXECUTOR = {
   kyberChain: env('LP_EXECUTOR_KYBER_CHAIN') ?? 'robinhood',
   kyberRouter: getAddress(env('LP_EXECUTOR_KYBER_ROUTER') ?? '0x6131B5fae19EA4f9D964eAc0408E4408b66337b5'),
   solverBase: (env('LP_EXECUTOR_SOLVER_BASE') ?? 'https://solver.lp-terminal.xyz').replace(/\/+$/, ''),
+  indexerBase: (env('LP_EXECUTOR_INDEXER_BASE') ?? 'http://127.0.0.1:8787').replace(/\/+$/, ''),
   // Solver calldata is opaque. It is never executable unless both returned
   // addresses are explicitly allowlisted by the operator.
   solverSettlers: addressList('LP_EXECUTOR_SOLVER_SETTLERS'),

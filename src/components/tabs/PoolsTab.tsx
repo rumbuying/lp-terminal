@@ -30,6 +30,7 @@ import {
   type AddSim,
   type VolumeWindow,
   volumeOf,
+  volumeWindowLabel as aprVolumeWindowLabel,
 } from '../../lib/apr'
 import { fmtAmount, fmtCompact, fmtCompactAmount, fmtNum, fmtUsd, nowSec } from '../../lib/format'
 import { poolStatWithFallback } from '../../lib/poolStatFallback'
@@ -41,6 +42,7 @@ import { useBalances } from '../../hooks/useBalances'
 import { usePositions } from '../../hooks/usePositions'
 import { useDsFallbackStats, usePoolStats } from '../../hooks/usePoolStats'
 import { useUpPrice } from '../../hooks/useUpPrice'
+import { takeRecommendationPrefill } from '../../lib/recommendationPrefill'
 import type { PoolStat } from '../../lib/poolstats'
 import { poolTypeLabel, tokenOf, usePools } from '../../hooks/usePools'
 import { useUniPools } from '../../hooks/useUniPools'
@@ -50,6 +52,7 @@ import { Flash } from '../Flash'
 import { PairAddrs } from '../PairAddrs'
 import { ProtoBadge } from '../ProtoBadge'
 import { RangeBar } from '../RangeBar'
+import { LiquidityDistributionChart } from '../LiquidityDistributionChart'
 import { StakeAfterToggle } from '../StakeAfterToggle'
 import { ZapPanel } from '../ZapPanel'
 import { AmountRow, Btn, NumInput } from '../ui'
@@ -78,14 +81,15 @@ export function PoolsTab() {
   const upPrice = useUpPrice()
   const { address: user } = useAccount()
   const positions = usePositions(user)
-  const [q, setQ] = useState('') // one input: filters up33 locally + queries the indexer
-  const [open, setOpen] = useState<string | null>(null)
+  const [recPrefill] = useState(() => takeRecommendationPrefill())
+  const [q, setQ] = useState(() => recPrefill?.pool ?? '') // one input: filters up33 locally + queries the indexer
+  const [open, setOpen] = useState<string | null>(() => recPrefill?.pool ?? null)
   const [sort, setSortState] = useState<SortKey>(rememberedSort)
   const [onlyMine, setOnlyMine] = useState(false)
-  const [proto, setProtoState] = useState<ProtoFilter>(rememberedProto)
+  const [proto, setProtoState] = useState<ProtoFilter>(() => recPrefill?.protocol ?? rememberedProto)
   const [volumeWindow, setVolumeWindowState] = useState<VolumeWindow>(rememberedVolumeWindow)
-  const [uniQuery, setUniQuery] = useState('') // '' = whole catalog by TVL (index) / WETH pools (fallback)
-  const [hideDust, setHideDust] = useState(true) // 95% of the uniswap catalog is <$1k meme dust
+  const [uniQuery, setUniQuery] = useState(() => recPrefill?.pool ?? '') // '' = whole catalog by TVL (index) / WETH pools (fallback)
+  const [hideDust, setHideDust] = useState(() => !recPrefill) // 95% of the uniswap catalog is <$1k meme dust
   // APR explainer popover, anchored under the ⓘ that opened it (fixed: the
   // sticky thead is its own stacking context, so the pop must live outside)
   const [aprInfo, setAprInfo] = useState<{ top: number; right: number } | null>(null)
@@ -192,7 +196,7 @@ export function PoolsTab() {
     // uniswap rows arrive already query-matched by the API (which also handles
     // reversed pairs and raw addresses) — only up33 rows filter locally
     if (p.protocol !== 'up33') return true
-    const label = `${tokenOf(data, p.token0).symbol}/${tokenOf(data, p.token1).symbol} ${poolTypeLabel(p)}`.toLowerCase()
+    const label = `${tokenOf(data, p.token0).symbol}/${tokenOf(data, p.token1).symbol} ${poolTypeLabel(p)} ${p.address} ${p.token0} ${p.token1}`.toLowerCase()
     return label.includes(q.toLowerCase())
   })
   if (sort) {
@@ -356,9 +360,13 @@ export function PoolsTab() {
                 wethUsd={stats.data?.wethUsd}
                 totalWeight={totalWeight}
                 mine={mySet.has(p.address.toLowerCase())}
-                open={open === p.address}
-                onToggle={() => setOpen(open === p.address ? null : p.address)}
+                open={open === p.address.toLowerCase()}
+                onToggle={() => setOpen(open === p.address.toLowerCase() ? null : p.address.toLowerCase())}
                 rewardsSub={proto === 'up33'}
+                recommendedPct={recPrefill?.pool === p.address.toLowerCase() ? recPrefill.pct : undefined}
+                recommendedCapitalUsd={recPrefill?.pool === p.address.toLowerCase() ? recPrefill.capitalUsd : undefined}
+                recommendedTicks={recPrefill?.pool === p.address.toLowerCase() ? { lower: recPrefill.tickLower, upper: recPrefill.tickUpper } : undefined}
+                recommendationStatus={recPrefill?.pool === p.address.toLowerCase() ? recPrefill.status : undefined}
               />
             ))}
           </tbody>
@@ -389,6 +397,10 @@ function PoolRow(props: {
   onToggle: () => void
   /** UP33 filter view: show the emissions detail sub-line (wide column) */
   rewardsSub: boolean
+  recommendedPct?: number
+  recommendedCapitalUsd?: number
+  recommendedTicks?: { lower: number; upper: number }
+  recommendationStatus?: 'recommended' | 'observed'
 }) {
   const { t } = useTranslation()
   const { p, data, totalWeight, stat } = props
@@ -541,9 +553,20 @@ function PoolRow(props: {
         <tr>
           <td colSpan={8}>
             {p.kind === 'v2' ? (
-              <AddV2 pool={p} data={data} stat={stat} upUsd={props.upUsd} />
+              <AddV2 pool={p} data={data} stat={stat} upUsd={props.upUsd} volumeWindow={props.volumeWindow} />
             ) : (
-              <AddCl pool={p} data={data} stat={stat} upUsd={props.upUsd} wethUsd={props.wethUsd} />
+              <AddCl
+                pool={p}
+                data={data}
+                stat={stat}
+                upUsd={props.upUsd}
+                wethUsd={props.wethUsd}
+                recommendedPct={props.recommendedPct}
+                recommendedCapitalUsd={props.recommendedCapitalUsd}
+                recommendedTicks={props.recommendedTicks}
+                recommendationStatus={props.recommendationStatus}
+                volumeWindow={props.volumeWindow}
+              />
             )}
           </td>
         </tr>
@@ -569,7 +592,7 @@ function PxCell(props: { sqrtPriceX96: bigint; d0: number; d1: number; s0: strin
 }
 
 /** projected APRs line shown in the add-LP panels; emitless = no gauge system (univ3) */
-function SimLine({ sim, emitless }: { sim: AddSim | null; emitless?: boolean }) {
+function SimLine({ sim, emitless, volumeWindow = 'h24' }: { sim: AddSim | null; emitless?: boolean; volumeWindow?: VolumeWindow }) {
   const { t } = useTranslation()
   if (!sim) return null
   if (!sim.inRange)
@@ -584,7 +607,8 @@ function SimLine({ sim, emitless }: { sim: AddSim | null; emitless?: boolean }) 
       <span className="lbl">{t('add.projected')}</span>
       <span className="dim">{t('add.projDep', { usd: fmtUsd(sim.depositUsd) })}</span>
       <span>
-        {t('add.projFeeApr')} {!emitless && <span className="dim">{t('add.projIfUnstaked')}</span>} ≈{' '}
+        {t('add.projFeeAprWindow', { window: aprVolumeWindowLabel(volumeWindow) })}{' '}
+        {!emitless && <span className="dim">{t('add.projIfUnstaked')}</span>} ≈{' '}
         <b>{fmtApr(sim.feeApr)}</b>
       </span>
       {!emitless && (
@@ -600,7 +624,7 @@ function SimLine({ sim, emitless }: { sim: AddSim | null; emitless?: boolean }) 
 
 // ---------------- add liquidity: v2 ----------------
 
-export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsData; stat?: PoolStat; upUsd?: number }) {
+export function AddV2({ pool, data, stat, upUsd, volumeWindow = 'h24' }: { pool: V2Pool; data: PoolsData; stat?: PoolStat; upUsd?: number; volumeWindow?: VolumeWindow }) {
   const { t } = useTranslation()
   const { address: user } = useAccount()
   const t0 = tokenOf(data, pool.token0)
@@ -639,8 +663,9 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
         dec1: t1.decimals,
         stat,
         upUsd,
+        volumeWindow,
       }),
-    [pool, a0, a1, t0.decimals, t1.decimals, stat, upUsd],
+    [pool, a0, a1, t0.decimals, t1.decimals, stat, upUsd, volumeWindow],
   )
 
   const uni2 = pool.protocol === 'univ2'
@@ -722,7 +747,7 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
     <div className="expander">
       <FundSwitch fund={fund} onFund={setFund} />
       {fund === 'zap' ? (
-        <ZapPanel target={{ kind: 'v2', pool }} t0={t0} t1={t1} stat={stat} upUsd={upUsd} />
+        <ZapPanel target={{ kind: 'v2', pool }} t0={t0} t1={t1} stat={stat} upUsd={upUsd} volumeWindow={volumeWindow} />
       ) : (
         <>
           <AmountRow
@@ -741,7 +766,7 @@ export function AddV2({ pool, data, stat, upUsd }: { pool: V2Pool; data: PoolsDa
             dec={t1.decimals}
             onMax={(v) => link(v, false)}
           />
-          <SimLine sim={sim} emitless={uni2} />
+          <SimLine sim={sim} emitless={uni2} volumeWindow={volumeWindow} />
           <div className="form-row">
             <Btn busy={busy} onClick={add} disabled={!user}>
               {t('add.addLiquidity')}
@@ -788,7 +813,9 @@ const PRESETS = [
   { id: 'p05', label: '±0.5%', pct: 0.005 },
   { id: 'p1', label: '±1%', pct: 0.01 },
   { id: 'p2', label: '±2%', pct: 0.02 },
+  { id: 'p3', label: '±3%', pct: 0.03 },
   { id: 'p5', label: '±5%', pct: 0.05 },
+  { id: 'p8', label: '±8%', pct: 0.08 },
   { id: 'p10', label: '±10%', pct: 0.1 },
   { id: 'p20', label: '±20%', pct: 0.2 },
   { id: 'p30', label: '±30%', pct: 0.3 },
@@ -817,28 +844,50 @@ export function AddCl({
   stat,
   upUsd,
   wethUsd,
+  recommendedPct,
+  recommendedCapitalUsd,
+  recommendedTicks,
+  recommendationStatus,
+  volumeWindow = 'h24',
 }: {
   pool: ClPool
   data: PoolsData
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  recommendedPct?: number
+  recommendedCapitalUsd?: number
+  recommendedTicks?: { lower: number; upper: number }
+  recommendationStatus?: 'recommended' | 'observed'
+  volumeWindow?: VolumeWindow
 }) {
   const { t } = useTranslation()
   const { address: user } = useAccount()
   const t0 = tokenOf(data, pool.token0)
   const t1 = tokenOf(data, pool.token1)
   const [fund, setFund] = useState<'pair' | 'zap'>('zap')
-  const [mode, setMode] = useState<RangeMode>('p10')
+  const recommendedPreset = PRESETS.find((preset) => Math.abs(preset.pct * 100 - (recommendedPct ?? -1)) < 1e-9)
+  const [mode, setMode] = useState<RangeMode>(recommendedTicks ? 'ticks' : recommendedPreset?.id ?? (recommendedPct ? 'pct' : 'p10'))
   const [advOpen, setAdvOpen] = useState(false)
-  const [pctStr, setPctStr] = useState('10')
+  const [pctStr, setPctStr] = useState(recommendedPct ? String(recommendedPct) : '10')
   const [priceLo, setPriceLo] = useState('')
   const [priceHi, setPriceHi] = useState('')
-  const [custom, setCustom] = useState<{ lower: string; upper: string }>({ lower: '', upper: '' })
+  const [custom, setCustom] = useState<{ lower: string; upper: string }>({
+    lower: recommendedTicks ? String(recommendedTicks.lower) : '',
+    upper: recommendedTicks ? String(recommendedTicks.upper) : '',
+  })
   const [a0, setA0] = useState('')
   const [a1, setA1] = useState('')
+  const [priceFlipped, setPriceFlipped] = useState(false)
   const [busy, setBusy] = useState(false)
   const bal = useBalances(user, [pool.token0, pool.token1])
+
+  useEffect(() => {
+    if (!recommendedTicks) return
+    setCustom({ lower: String(recommendedTicks.lower), upper: String(recommendedTicks.upper) })
+    setMode('ticks')
+    setAdvOpen(true)
+  }, [recommendedTicks?.lower, recommendedTicks?.upper])
 
   const ticks = useMemo(() => {
     const s = pool.tickSpacing
@@ -943,8 +992,9 @@ export function AddCl({
       stat,
       upUsd,
       wethUsd,
+      volumeWindow,
     })
-  }, [ticks, a0, a1, pool, t0.decimals, t1.decimals, stat, upUsd, wethUsd])
+  }, [ticks, a0, a1, pool, t0.decimals, t1.decimals, stat, upUsd, wethUsd, volumeWindow])
 
   const mint = async () => {
     if (!user || !ticks) return
@@ -1013,6 +1063,7 @@ export function AddCl({
 
   return (
     <div className="expander">
+      {recommendedPct && <div className={`rec-applied mono-sm ${recommendationStatus === 'observed' ? 'amber' : 'green'}`}>{t(recommendationStatus === 'observed' ? 'pools.recObservedApplied' : 'pools.recApplied', { pct: recommendedPct, capital: fmtUsd(recommendedCapitalUsd ?? 0) })}</div>}
       <div className="form-row">
         <span className="lbl">{t('add.range')}</span>
         {PRESETS.map((p) => (
@@ -1091,16 +1142,21 @@ export function AddCl({
       </div>
       )}
       {ticks && (
-        <RangeBar
-          tickLower={ticks.lower}
-          tickUpper={ticks.upper}
-          tick={pool.tick}
-          sqrtPriceX96={pool.sqrtPriceX96}
-          dec0={t0.decimals}
-          dec1={t1.decimals}
-          sym0={t0.symbol}
-          sym1={t1.symbol}
-        />
+        <>
+          <RangeBar
+            tickLower={ticks.lower}
+            tickUpper={ticks.upper}
+            tick={pool.tick}
+            sqrtPriceX96={pool.sqrtPriceX96}
+            dec0={t0.decimals}
+            dec1={t1.decimals}
+            sym0={t0.symbol}
+            sym1={t1.symbol}
+            flipped={priceFlipped}
+            onFlippedChange={setPriceFlipped}
+          />
+          <LiquidityDistributionChart pool={pool} tickLower={ticks.lower} tickUpper={ticks.upper} token0={t0} token1={t1} flipped={priceFlipped} />
+        </>
       )}
       <FundSwitch fund={fund} onFund={setFund} />
       {fund === 'zap' ? (
@@ -1112,6 +1168,7 @@ export function AddCl({
             stat={stat}
             upUsd={upUsd}
             wethUsd={wethUsd}
+            volumeWindow={volumeWindow}
           />
         ) : (
           <div className="dim mono-sm">{t('add.setRangeFirst')}</div>
@@ -1138,7 +1195,7 @@ export function AddCl({
             disabled={below}
             note={below ? t('add.belowNote') : undefined}
           />
-          <SimLine sim={sim} emitless={pool.protocol === 'univ3'} />
+          <SimLine sim={sim} emitless={pool.protocol === 'univ3'} volumeWindow={volumeWindow} />
           <div className="form-row">
             <Btn busy={busy} onClick={mint} disabled={!user || !ticks}>
               {t('add.mint')}

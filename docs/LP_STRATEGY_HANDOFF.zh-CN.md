@@ -113,6 +113,8 @@ max(positionValue × max(20, ceil(100 / narrowBandPct)),
 - 条件：`always`、`fee_break_even`、`manual_confirm`
 - 手续费：换成 quote、复投、原币持有
 - 执行：仅通知、钱包确认、executor 全自动
+
+自适应区间默认启用。仓位在目标存活时间（默认 120 分钟）前快速触边时，只有策略整体亏损且上一轮手续费未覆盖 Gas 与执行成本，下一仓位才按平方根寿命比例扩大，累计不超过 4 倍。扩大后的仓位存活满 360 分钟后，executor 检查最近 120 分钟的持久价格样本；仅当样本覆盖完整、全程未越出当前区间、峰谷波动不超过 250 bps、策略已回本且未领取手续费达到上一轮成本的 1.25 倍时，才以 `recoveryDecay`（默认 0.5）逐级收窄。每次收窄都会重建仓位并重新开始计时，避免宽窄状态抖动。
 - 保护项：最低净 APR、每日最多重开、连续下破限制、风险币占比、价格冲击、滑点、计划时效
 - 低交易模式开关
 
@@ -176,6 +178,17 @@ flowchart LR
 7. 再次验证 NFT owner 与 gauge 中的 tokenId。
 
 Dashboard 的 `earned` 读取允许降级：若 gauge 暂时以 `NA` revert，LP 本体仍可估值，奖励估值显示暂不可用，不应让整个策略页失效。
+
+### 3.6.1 提取已留存利润
+
+策略页可将当前全部 `heldProfit` 结算为 USDG、WETH 或原生 ETH：
+
+1. 只读取 allocation component 中的 `heldProfit`；`principal` 与 `heldFee` 不参与提取。
+2. USDG/WETH 目标使用新鲜可执行报价、策略滑点上限、精确授权和回执余额差额；ETH 目标先统一为 WETH，再只解包属于本策略的精确数量。
+3. 每个已确认兑换都会立即把策略归属从源币迁移到结算币；最终到账后再从 allocation 中释放，因此下一次预检不会出现账面资产仍被策略占用的问题。
+4. 提取记录持久化目标币实际到账、USDG/WETH 核算价值、Gas 和交易哈希。界面同时显示当前留存、累计已提取、按到账币种累计和逐次历史。
+5. 累计盈亏按 `当前策略资产 + 历史已提取价值 - 起点本金 - Gas` 继续计算；提取只是改变托管位置，不重置或吞掉历史利润。
+6. 同一钱包的签名操作继续由 wallet lock 串行。若广播后进程中断，恢复器按交易哈希和 Transfer 日志补记已确认兑换；未确认的剩余部分继续作为留存利润，不会动用本金补足。
 
 ### 3.7 低交易模式
 
@@ -281,12 +294,28 @@ localStorage key: lp-terminal:executor-admin-token:v1
 - `planned`：已生成 job，等待 runner
 - `executing`：正在执行
 - `recovery`：执行中断，等待安全恢复
+- `recovery_quarantined`：单策略连续发生确定性恢复错误，已熔断隔离；其它策略继续运行
 - `paused_guard`：保护条件暂停，但仍由监控器检查
 - `awaiting_manual`：高级手工条件状态
 - `dry_run_ready`：旧 dry-run 流程结果
 - `archived`：已删除/归档，不再列出
 
 正常产品路径不应要求用户点击“恢复”。[executor/supervisor.ts](../executor/supervisor.ts) 会自动扫描 Recovery job；退避从 5 秒开始，指数增长，最高 5 分钟。
+
+恢复调度按签名钱包分组：不同钱包并行，同钱包只在存在 `sending/sent`
+未决交易时临时串行。已经确认的故障任务不会阻止同钱包其它策略生成或执行
+新 job。恢复次数、连续错误、下次重试和熔断时间持久化在 `jobs`；同一确定性
+错误连续 3 次后只隔离该策略并进入 `recovery_quarantined`，进程重启不会清零。
+RPC、报价和 pending 等瞬态错误继续指数退避，不触发确定性熔断。
+
+每次签名前会把实际执行报价、`minOut` 和路由身份写入 `swap_plan`。恢复检查
+会把链上已确认/回滚/明确未广播的交易事实回写本地 transaction 状态，不能用
+旧规划报价否定一笔已经按新报价成功执行的交易。
+
+管理员可在恢复卡片上立即重试或删除自动化。删除不会发送链上交易；只要所有
+已提交交易已有明确结果，即使 swap/mint 后无法继续恢复，也允许归档为
+`recovery_interrupted`，避免自动化记录永久不可删除。`pending/manual_review` 仍禁止
+直接删除，因为此时链上结果尚不明确。
 
 ### 5.2 恢复分类
 
@@ -317,12 +346,14 @@ localStorage key: lp-terminal:executor-admin-token:v1
 
 ## 6. 盈亏和资产核算
 
-### 6.1 当前公式
+### 6.1 双口径公式
 
-累计盈亏不是“累计手续费”。当前净值法为：
+累计盈亏不是“累计手续费”。界面可在两种独立口径间一键切换：
 
 ```text
-累计盈亏 = 当前策略资产 - 核算本金 - 累计 Gas
+报价币盈亏 = 当前策略资产（quote）- 核算本金（quote）- 累计 Gas（quote）
+
+稳定币盈亏 = 当前策略资产（USDG 当前价值）- 策略起点资产（USDG 起点价值）- 累计 Gas（USDG 当前价值）
 
 累计盈亏
 = 净手续费
@@ -330,6 +361,8 @@ localStorage key: lp-terminal:executor-admin-token:v1
  - 换仓执行成本
  + 市价与 LP 库存变化
 ```
+
+稳定币口径不是把“报价币盈亏”按今天价格简单折算。策略启动时会同时固化 quote 数量和 6 位精度的 USDG 价值；当前资产再按当前 WETH/USDG 链上锚定价格计量。因此起点 0.05 WETH = 100 USDG、当前 0.04 WETH = 120 USDG 时，报价币口径为负，稳定币口径为 +20 USDG（再扣 Gas）。旧 WETH 策略若尚未固化 USDG 起点，会读取基准区块之前最后一笔官方 WETH/USDG 池 Swap，回填当时有效的 slot0 价格；不会用今天价格冒充历史价格。
 
 其中当前策略资产包括：
 
@@ -362,7 +395,7 @@ localStorage key: lp-terminal:executor-admin-token:v1
 ### 6.3 价格和不完整估值
 
 - 策略内部以 quote token（当前主要为 WETH）核算
-- UI 再按实时 WETH/稳定币参考价显示 USDG 等稳定币等值
+- UI 可显示原报价币盈亏，或按“起点 USDG 价值 vs 当前 USDG 价值”独立计算稳定币盈亏
 - 这不是稳定币实际余额，而是实时折算值
 - `earned` 或奖励报价失败时，奖励部分标记不可用，避免把未知值当成 0 计算盈亏
 - `planned/executing/recovery` 时显示 `execution_in_progress`，执行中的中间余额不能被误认为最终净值
@@ -479,6 +512,8 @@ API 不提供任意 calldata 发送接口，也不提供私钥导出接口。
 |---|---|
 | 前端当前软链 | `/var/www/lp-terminal/current` |
 | 前端 releases | `/var/www/lp-terminal/releases/` |
+| indexer 当前软链 | `/opt/lp-terminal-indexer/app` |
+| indexer releases | `/opt/lp-terminal-indexer/releases/` |
 | executor 当前软链 | `/opt/lp-terminal-executor/app` |
 | executor releases | `/opt/lp-terminal-executor/releases/` |
 | executor DB | `/opt/lp-terminal-executor/data/state.db` |
@@ -553,7 +588,25 @@ RPC='' npm run build
 
 不要在升级时启动本地 executor。不要修改旧 release；软链保留回滚能力。
 
-### 10.5 再次迁移服务器
+### 10.5 Release 保留策略
+
+每次生产部署完成、软链切换成功且 health/smoke 检查通过后，前端、indexer、executor 的 release 目录都必须只保留按 release 名称内 UTC 时间戳排序的最近 3 个（新上线版本计入 3 个）。这是固定的生产空间策略，不允许无限累积历史 release。
+
+先在服务器上预览，再明确执行：
+
+```bash
+# 从仓库根目录把脚本传给生产机；第一次不传 --apply，只输出保留/删除清单
+ssh -i ../LightsailDefaultKey-ap-northeast-1.pem admin@52.197.16.0 \
+  'sudo bash -s' < deploy/prune-releases.sh
+
+# 核对清单无误后执行
+ssh -i ../LightsailDefaultKey-ap-northeast-1.pem admin@52.197.16.0 \
+  'sudo bash -s -- --apply' < deploy/prune-releases.sh
+```
+
+脚本会保护当前 `current`/`app` 软链目标，并在被保留 release 仍通过顶层软链依赖旧 release（例如复用旧 `node_modules`）时拒绝删除。遇到这种情况必须先在被保留 release 内重新安装或实体化依赖，不能绕过检查。清理不得触及 `data/`、`backups/`、`vaults/` 或 `/etc/lp-terminal-executor/`。完成后检查三个软链、服务 health、`df -h /` 和 `df -i /`。
+
+### 10.6 再次迁移服务器
 
 要让当前钱包和策略无缝继续，必须迁移以下一致集合：
 
@@ -569,7 +622,7 @@ RPC='' npm run build
 
 迁移时如果存在 `pending` 或 `manual_review` job，先等待交易明确或完成事实核对，不要在新机直接重置 nonce/状态。
 
-### 10.6 备份和回滚
+### 10.7 备份和回滚
 
 最安全的一致备份流程会短暂停止 executor：
 

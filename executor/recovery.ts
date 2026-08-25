@@ -1,6 +1,6 @@
 import { keccak256, type Hex, type TransactionReceipt } from 'viem'
 import { clPmAbi } from '../src/abi'
-import { confirmedTransactionsAtNonce, jobSteps, jobTransactions, recoveryJobById } from './store'
+import { confirmedTransactionsAtNonce, jobSteps, jobTransactions, reconcileJobTransaction, recoveryJobById } from './store'
 import { publicClient } from './chain'
 import { receiptLiquidityFlows } from './receipts'
 
@@ -110,15 +110,24 @@ async function transactionFact(row: Record<string, unknown>, owner: `0x${string}
   return { ...base, state: 'ambiguous' }
 }
 
-export async function inspectRecovery(jobId: string) {
+export async function inspectRecovery(jobId: string, options?: { reconcile?: boolean }) {
   const job = recoveryJobById(jobId)
   if (!job) throw new Error('E_RECOVERY_JOB')
-  const rows = jobTransactions(jobId)
-  const steps = jobSteps(jobId)
-  const transactions: RecoveryTxFact[] = []
-  for (const row of rows) transactions.push(await transactionFact(row, job.config.owner))
+  const { transactions, steps } = await reconcileRecoveryTransactions(jobId, options)
   const confirmedSteps = steps.filter((step) => step.state === 'confirmed').map((step) => Number(step.step_index))
   const disposition = classifyRecovery(transactions, confirmedSteps)
+  if ((job.plan as unknown as { kind?: string }).kind === 'profit_withdrawal') {
+    const profitDisposition = transactions.some((tx) => tx.state === 'ambiguous')
+      ? 'manual_review'
+      : transactions.some((tx) => tx.state === 'pending') ? 'wait_pending' : 'commit_ready'
+    return {
+      jobId,
+      strategyId: job.config.id,
+      kind: 'profit_withdrawal' as const,
+      disposition: profitDisposition,
+      transactions: transactions.map((tx) => ({ ...tx, nonce: tx.nonce?.toString(), blockNumber: tx.blockNumber?.toString() })),
+    }
+  }
 
   let mintedTokenId: string | undefined
   const mintFact = transactions.find((tx) => tx.stepIndex === 8 && tx.state === 'confirmed' && tx.hash)
@@ -147,4 +156,23 @@ export async function inspectRecovery(jobId: string) {
     oldPosition: activePosition,
     mintedTokenId,
   }
+}
+
+export async function reconcileRecoveryTransactions(jobId: string, options?: { reconcile?: boolean }) {
+  const job = recoveryJobById(jobId)
+  if (!job) throw new Error('E_RECOVERY_JOB')
+  const rows = jobTransactions(jobId)
+  const steps = jobSteps(jobId)
+  const transactions: RecoveryTxFact[] = []
+  for (const row of rows) transactions.push(await transactionFact(row, job.config.owner))
+  if (options?.reconcile) {
+    for (const tx of transactions) {
+      if (tx.state === 'confirmed') reconcileJobTransaction({ jobId, stepIndex: tx.stepIndex, txIndex: tx.txIndex, state: 'confirmed', blockNumber: tx.blockNumber })
+      if (tx.state === 'reverted' || tx.state === 'absent') reconcileJobTransaction({
+        jobId, stepIndex: tx.stepIndex, txIndex: tx.txIndex, state: 'failed', blockNumber: tx.blockNumber,
+        errorCode: tx.state === 'reverted' ? 'E_TX_REVERTED' : 'E_TX_ABSENT',
+      })
+    }
+  }
+  return { transactions, steps }
 }

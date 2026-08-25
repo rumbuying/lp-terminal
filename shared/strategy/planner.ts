@@ -2,6 +2,7 @@ import { keccak256, stringToHex } from 'viem'
 import { getSqrtRatioAtTick, minAmountsForLiquidity, tickToPrice } from '../../src/lib/clmath'
 import { STRATEGY_ERROR, StrategyError } from './errors'
 import { fixedTickRange, quoteRangeToTicks, rangeSide } from './range'
+import { scaledRangePcts } from './adaptive-range'
 import type { StrategyConfig, StrategyExecutionPlan, StrategyPlanStep, StrategyPositionSnapshot, TriggerSide } from './types'
 import { ADDR } from '../../src/config/addresses'
 
@@ -50,6 +51,7 @@ export function makeRebalancePlan(args: {
   snapshot: StrategyPositionSnapshot
   now?: number
   triggerSide?: TriggerSide
+  rangeScale?: number
 }): StrategyExecutionPlan {
   const now = args.now ?? Math.floor(Date.now() / 1000)
   const { config, snapshot } = args
@@ -58,15 +60,26 @@ export function makeRebalancePlan(args: {
     throw new StrategyError(STRATEGY_ERROR.PLAN_STALE, 'snapshot is older than maximum plan age')
 
   const side = args.triggerSide ?? rangeSide(snapshot.tick, snapshot.tickLower, snapshot.tickUpper)
+  const scheduledContraction = side === 'adaptive_contraction'
   if (side === 'in') throw new StrategyError(STRATEGY_ERROR.CONFIG, 'cannot rebalance an in-range position')
-  const policy = side === 'lower' ? config.boundary.lower : config.boundary.upper
+  if (scheduledContraction && rangeSide(snapshot.tick, snapshot.tickLower, snapshot.tickUpper) !== 'in')
+    throw new StrategyError(STRATEGY_ERROR.CONFIG, 'adaptive contraction requires an in-range position')
+  const policy = side === 'lower'
+    ? config.boundary.lower
+    : side === 'upper'
+      ? config.boundary.upper
+      : scheduledContraction
+        ? { condition: 'always' as const, action: 'recenter' as const }
+        : config.boundary.upper
   if (policy.action === 'pause')
     throw new StrategyError(STRATEGY_ERROR.CONFIG, `boundary action ${policy.action} has no rebuild plan`)
   if (policy.condition === 'manual_confirm' && !args.triggerSide)
     throw new StrategyError(STRATEGY_ERROR.CONFIG, 'boundary requires an explicit manual trigger')
 
-  const lowerPct = policy.action === 'skew_recenter' ? config.range.defensiveLowerPct ?? config.range.lowerPct : config.range.lowerPct
-  const upperPct = policy.action === 'skew_recenter' ? config.range.defensiveUpperPct ?? config.range.upperPct : config.range.upperPct
+  const rangeScale = config.range.mode === 'fixed_ticks' ? 1 : Math.max(1, args.rangeScale ?? 1)
+  const baseLowerPct = policy.action === 'skew_recenter' ? config.range.defensiveLowerPct ?? config.range.lowerPct : config.range.lowerPct
+  const baseUpperPct = policy.action === 'skew_recenter' ? config.range.defensiveUpperPct ?? config.range.upperPct : config.range.upperPct
+  const { lowerPct, upperPct } = scaledRangePcts(baseLowerPct, baseUpperPct, rangeScale)
 
   const nextRange = config.range.mode === 'fixed_ticks'
     ? fixedTickRange(config.range.tickLower, config.range.tickUpper, snapshot.tickSpacing)
@@ -115,7 +128,7 @@ export function makeRebalancePlan(args: {
     { index: 15, kind: 'approve_nft', intent: { spender: config.staking.gauge!, mintedTokenId: !config.execution.lowTransactionMode, approvalForAll: config.execution.lowTransactionMode } },
     { index: 16, kind: 'stake', intent: { gauge: config.staking.gauge!, mintedTokenId: true } },
   )
-  const payload = { strategyId: config.id, strategyRevision: config.revision, createdAt: now, action: policy.action, snapshot, nextRange, steps }
+  const payload = { strategyId: config.id, strategyRevision: config.revision, createdAt: now, action: policy.action, snapshot, nextRange, rangeScale, steps }
   const hash = keccak256(stringToHex(stable(payload)))
   return {
     version: 1,
@@ -129,6 +142,7 @@ export function makeRebalancePlan(args: {
     action: policy.action,
     snapshot,
     nextRange,
+    rangeScale,
     steps,
     safeguards: {
       maxSlippageBps: config.safeguards.maxSlippageBps,
@@ -161,7 +175,8 @@ export function makeFeeCollectionPlan(args: { config: StrategyConfig; snapshot: 
     { index: 11, kind: 'commit', intent: { appendLedger: true, preserveTokenId: true } },
   ]
   const nextRange = { tickLower: args.snapshot.tickLower, tickUpper: args.snapshot.tickUpper }
-  const payload = { strategyId: args.config.id, strategyRevision: args.config.revision, createdAt: now, action: 'collect_fees', snapshot: args.snapshot, nextRange, steps }
+  const rangeScale = 1
+  const payload = { strategyId: args.config.id, strategyRevision: args.config.revision, createdAt: now, action: 'collect_fees', snapshot: args.snapshot, nextRange, rangeScale, steps }
   const hash = keccak256(stringToHex(stable(payload)))
   return {
     version: 1,
@@ -175,6 +190,7 @@ export function makeFeeCollectionPlan(args: { config: StrategyConfig; snapshot: 
     action: 'collect_fees',
     snapshot: args.snapshot,
     nextRange,
+    rangeScale,
     steps,
     safeguards: { maxSlippageBps: args.config.safeguards.maxSlippageBps, maxPlanAgeSeconds: args.config.safeguards.maxPlanAgeSeconds, dryRun: args.config.execution.dryRun },
   }

@@ -4,11 +4,12 @@ import { ADDR } from '../src/config/addresses'
 import { getAmountsForLiquidity, getSqrtRatioAtTick } from '../src/lib/clmath'
 import { publicClient, readCollectableFees, readPerformanceSnapshot } from './chain'
 import { quoteRewardToQuote } from './reward'
-import { quoteKyber, quoteWithNativeFallback } from './kyber'
+import { quoteWithNativeFallback } from './kyber'
 import { convertPoolAmount, quoteTurnover } from './risk'
 import { reconstructOriginalMintCostBasis, type OriginalMintCostBasis } from './cost-basis'
-import { db, getJobContext, setJobContext, strategyAllocations, strategyBaseline, type StrategyBaseline } from './store'
-import { allocateProRata, executionShortfall } from '../shared/strategy/accounting'
+import { db, getJobContext, setJobContext, setStrategyBaselineUsdgIfAbsent, strategyAllocationComponents, strategyAllocations, strategyBaseline, type StrategyBaseline } from './store'
+import { allocateProRata, distributionAdjustedPnl, executionShortfall } from '../shared/strategy/accounting'
+import { historicalQuoteValueInUsdg, quoteValueInUsdg } from './stable-valuation'
 
 type CycleRow = {
   id: string
@@ -28,6 +29,7 @@ type LedgerRow = {
   kind: string
   token: string | null
   amount: string | null
+  quote_value: string | null
   tx_hash: string | null
   meta_json: string
 }
@@ -61,7 +63,7 @@ const MINT_BASIS_RETRY_MS = 15 * 60_000
 function rowsForStrategy(strategyId: string) {
   const cycles = db.prepare(`SELECT c.id,substr(c.id,7) AS job_id,c.old_token_id,c.new_token_id,c.started_at,c.completed_at,c.trigger_side,c.status,c.tx_hashes_json,j.plan_json
     FROM cycles c JOIN jobs j ON j.id=substr(c.id,7) WHERE c.strategy_id=? AND c.status='completed' ORDER BY c.completed_at,c.id`).all(strategyId) as unknown as CycleRow[]
-  const ledger = db.prepare(`SELECT cycle_id,kind,token,amount,tx_hash,meta_json FROM ledger_entries WHERE strategy_id=? ORDER BY ts,id`).all(strategyId) as unknown as LedgerRow[]
+  const ledger = db.prepare(`SELECT cycle_id,kind,token,amount,quote_value,tx_hash,meta_json FROM ledger_entries WHERE strategy_id=? ORDER BY ts,id`).all(strategyId) as unknown as LedgerRow[]
   return { cycles, ledger }
 }
 
@@ -283,6 +285,34 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       baselineValue += quoteTurnover(BigInt(raw), token as Address, config, firstPrice.snapshot, firstPrice.sqrtPriceX96)
   }
 
+  const profitWithdrawals = ledger.filter((row) => row.kind === 'profit_withdrawal' && row.amount).flatMap((row) => {
+    try {
+      const meta = JSON.parse(row.meta_json) as Record<string, unknown>
+      const target = meta.target
+      if (target !== 'USDG' && target !== 'WETH' && target !== 'ETH') return []
+      const txHashes = Array.isArray(meta.txHashes) ? meta.txHashes.filter((value): value is string => typeof value === 'string') : []
+      return [{
+        id: String(meta.id ?? row.tx_hash ?? `${target}-${row.amount}`),
+        target,
+        amountRaw: row.amount!,
+        decimals: Number(meta.decimals ?? (target === 'USDG' ? 6 : 18)),
+        quoteValueRaw: row.quote_value ?? '0',
+        usdgValueRaw: typeof meta.usdgValueRaw === 'string' ? meta.usdgValueRaw : '0',
+        gasWei: typeof meta.gasWei === 'string' ? meta.gasWei : '0',
+        gasQuoteRaw: typeof meta.gasQuoteRaw === 'string' ? meta.gasQuoteRaw : '0',
+        gasUsdgRaw: typeof meta.gasUsdgRaw === 'string' ? meta.gasUsdgRaw : '0',
+        withdrawnAt: Number(meta.withdrawnAt ?? 0),
+        txHashes,
+      }]
+    } catch { return [] }
+  })
+  // Distribution marks are frozen when funds leave strategy custody so later
+  // token-price movement cannot rewrite already-realized performance.
+  const withdrawnProfitQuote = sum(profitWithdrawals.map((row) => BigInt(row.quoteValueRaw)))
+  const withdrawnProfitUsdg = sum(profitWithdrawals.map((row) => BigInt(row.usdgValueRaw)))
+  const withdrawalGasQuote = sum(profitWithdrawals.map((row) => BigInt(row.gasQuoteRaw)))
+  const withdrawalGasUsdg = sum(profitWithdrawals.map((row) => BigInt(row.gasUsdgRaw)))
+
   const feeByToken = new Map<string, { address: Address; gross: bigint; protocol: bigint; decimals: number }>()
   const referenceSnapshot = firstPrice?.snapshot
   for (const row of ledger.filter((entry) => entry.kind === 'fee_gross' || entry.kind === 'protocol_fee' || isRewardOutput(entry))) {
@@ -302,7 +332,7 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
   const openingGasWei = !startBaseline && mintBasis ? BigInt(mintBasis.openingGasQuoteRaw) : 0n
   const gasValuation = await valueGasInQuote(cycles, ledger, config, openingGasWei)
   const openingGasCostQuote = gasValuation.opening
-  let gasCostQuote = openingGasCostQuote
+  let gasCostQuote = openingGasCostQuote + withdrawalGasQuote
   let executionCostQuote = 0n
   const cycleDetails = cycles.map((cycle) => {
     const cycleRows = ledger.filter((row) => row.cycle_id === cycle.id)
@@ -333,12 +363,14 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       gasCostQuoteRaw: gas.toString(),
       executionCostQuoteRaw: execution.quote.toString(),
       maxExecutionImpactBps: execution.maxImpactBps,
+      rangeScale: (JSON.parse(cycle.plan_json) as StrategyExecutionPlan).rangeScale ?? 1,
       riskDirection: riskDirection(cycle.trigger_side, config, price.snapshot),
       txHashes,
     }
   }).reverse()
 
   let currentValue = 0n
+  let profitReserveQuote = 0n
   let currentUncollectedFees = 0n
   let currentUnclaimedReward = 0n
   let currentUnclaimedRewardQuote = 0n
@@ -356,6 +388,7 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
   let liveError: string | undefined
   try {
     const allocations = strategyAllocations(config.id)
+    const allocationComponents = strategyAllocationComponents(config.id)
     if (config.activeTokenId) {
       const snapshot = await readPerformanceSnapshot(config)
       const fees = config.staking?.enabled
@@ -372,6 +405,8 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       const total0 = principal.amount0 + fees.amount0 + (allocations[low(snapshot.token0)] ?? 0n)
       const total1 = principal.amount1 + fees.amount1 + (allocations[low(snapshot.token1)] ?? 0n)
       currentValue = quoteTurnover(total0, snapshot.token0, config, snapshot, pool.sqrtPriceX96) + quoteTurnover(total1, snapshot.token1, config, snapshot, pool.sqrtPriceX96)
+      profitReserveQuote = quoteTurnover(allocationComponents[low(snapshot.token0)]?.heldProfit ?? 0n, snapshot.token0, config, snapshot, pool.sqrtPriceX96)
+        + quoteTurnover(allocationComponents[low(snapshot.token1)]?.heldProfit ?? 0n, snapshot.token1, config, snapshot, pool.sqrtPriceX96)
       currentUncollectedFees = quoteTurnover(fees.amount0, snapshot.token0, config, snapshot, pool.sqrtPriceX96) + quoteTurnover(fees.amount1, snapshot.token1, config, snapshot, pool.sqrtPriceX96)
       rewardReadAvailable = !snapshot.rewardReadError
       if (snapshot.rewardReadError) rewardValuationError = snapshot.rewardReadError
@@ -388,6 +423,7 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       currentPosition = { tokenId: snapshot.tokenId, tick: pool.tick, tickLower: snapshot.tickLower, tickUpper: snapshot.tickUpper }
     } else if (referenceSnapshot) {
       currentValue = sum(Object.entries(allocations).map(([token, raw]) => quoteTurnover(raw, token as Address, config, referenceSnapshot, firstPrice!.sqrtPriceX96)))
+      profitReserveQuote = sum(Object.entries(allocationComponents).map(([token, component]) => quoteTurnover(component.heldProfit, token as Address, config, referenceSnapshot, firstPrice!.sqrtPriceX96)))
     }
   } catch (error) {
     liveError = error instanceof Error ? error.message.slice(0, 160) : 'live valuation unavailable'
@@ -405,7 +441,37 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
   const riskSymbol = await tokenSymbol(config.riskToken)
   const valuationIncomplete = Boolean(liveError || rewardValuationError)
   const hasBaseline = Boolean(startBaseline || first)
-  const pnl = hasBaseline && !valuationIncomplete ? currentValue - baselineValue - gasCostQuote : undefined
+  const pnl = hasBaseline && !valuationIncomplete ? distributionAdjustedPnl({ currentValue, withdrawnValue: withdrawnProfitQuote, baselineValue, gasCost: gasCostQuote }) : undefined
+  let baselineValueUsdg: bigint | undefined
+  let currentValueUsdg: bigint | undefined
+  let gasCostUsdg: bigint | undefined
+  let stableValuationError: string | undefined
+  let stableBaselineSource: 'recorded_at_start' | 'historical_weth_usdg' | undefined
+  if (hasBaseline && !valuationIncomplete) {
+    try {
+      if (startBaseline?.valueUsdgRaw !== undefined) {
+        baselineValueUsdg = BigInt(startBaseline.valueUsdgRaw)
+        stableBaselineSource = 'recorded_at_start'
+      } else {
+        const baselineBlockNumber = startBaseline?.blockNumber ?? mintBasis?.blockNumber ?? firstPrice?.blockNumber
+        if (!baselineBlockNumber) throw new Error('stable baseline block unavailable')
+        baselineValueUsdg = await historicalQuoteValueInUsdg(baselineValue, config.quoteToken, BigInt(baselineBlockNumber))
+        stableBaselineSource = 'historical_weth_usdg'
+        if (startBaseline) setStrategyBaselineUsdgIfAbsent(config.id, baselineValueUsdg.toString())
+      }
+      const [liveUsdg, cycleGasUsdg] = await Promise.all([
+        quoteValueInUsdg(currentValue, config.quoteToken),
+        quoteValueInUsdg(gasCostQuote - withdrawalGasQuote, config.quoteToken),
+      ])
+      currentValueUsdg = liveUsdg
+      gasCostUsdg = cycleGasUsdg + withdrawalGasUsdg
+    } catch (error) {
+      stableValuationError = error instanceof Error ? error.message.slice(0, 160) : 'stable valuation unavailable'
+    }
+  }
+  const pnlUsdg = baselineValueUsdg !== undefined && currentValueUsdg !== undefined && gasCostUsdg !== undefined
+    ? distributionAdjustedPnl({ currentValue: currentValueUsdg, withdrawnValue: withdrawnProfitUsdg, baselineValue: baselineValueUsdg, gasCost: gasCostUsdg })
+    : undefined
   const netFeesQuote = grossFeesQuote - protocolFeesQuote - incomeTaxQuote
   // Reconciliation: P/L = net income after tax - gas - execution cost + market/LP residual.
   // The residual includes token-price movement, concentrated-liquidity inventory
@@ -426,7 +492,8 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
     ...(estimatedFeeAccounting ? ['protocol_fee_reconstructed'] : []),
     ...(liveError ? ['live_valuation_unavailable'] : []),
     ...(rewardValuationError ? ['reward_valuation_unavailable'] : []),
-    ...(['planned', 'executing', 'recovery'].includes(state) ? ['execution_in_progress'] : []),
+    ...(stableValuationError ? ['stable_valuation_unavailable'] : []),
+    ...(['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(state) ? ['execution_in_progress'] : []),
   ]
 
   return {
@@ -434,6 +501,7 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
     calculatedAt: Math.floor(Date.now() / 1000),
     state,
     quote: { address: config.quoteToken, symbol: quoteSymbol, decimals: quoteDecimals },
+    stable: { address: ADDR.USDG, symbol: 'USDG', decimals: 6, baselineSource: stableBaselineSource },
     risk: { address: config.riskToken, symbol: riskSymbol },
     summary: {
       reopens: cycles.filter((cycle) => cycle.new_token_id !== null).length,
@@ -446,12 +514,20 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       executionCostQuoteRaw: executionCostQuote.toString(),
       marketAndLpQuoteRaw: marketAndLpQuote?.toString() ?? null,
       currentValueQuoteRaw: liveError ? null : currentValue.toString(),
+      profitReserveQuoteRaw: liveError ? null : profitReserveQuote.toString(),
+      withdrawnProfitQuoteRaw: withdrawnProfitQuote.toString(),
+      withdrawnProfitUsdgRaw: withdrawnProfitUsdg.toString(),
       currentUncollectedFeesQuoteRaw: liveError ? null : currentUncollectedFees.toString(),
       currentUnclaimedRewardsQuoteRaw: rewardValuationError ? null : currentUnclaimedRewardQuote.toString(),
       currentUnclaimedTotalQuoteRaw: liveError || rewardValuationError ? null : (currentUncollectedFees + currentUnclaimedRewardQuote).toString(),
       baselineValueQuoteRaw: hasBaseline ? baselineValue.toString() : null,
       pnlQuoteRaw: pnl?.toString() ?? null,
       pnlPct: pnl === undefined ? null : pnlPct(pnl, baselineValue),
+      currentValueUsdgRaw: currentValueUsdg?.toString() ?? null,
+      baselineValueUsdgRaw: baselineValueUsdg?.toString() ?? null,
+      gasCostUsdgRaw: gasCostUsdg?.toString() ?? null,
+      pnlUsdgRaw: pnlUsdg?.toString() ?? null,
+      pnlUsdgPct: pnlUsdg === undefined || baselineValueUsdg === undefined ? null : pnlPct(pnlUsdg, baselineValueUsdg),
     },
     baseline: startBaseline ? {
       kind: 'strategy_start',
@@ -485,10 +561,12 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       quoteRaw: rewardValuationError ? null : currentUnclaimedRewardQuote.toString(),
     } : null,
     feeTokens,
+    profitWithdrawals: profitWithdrawals.reverse(),
     cycles: cycleDetails,
     warnings,
     error: liveError,
     rewardValuationError,
+    stableValuationError,
   }
 }
 
@@ -516,9 +594,11 @@ export async function observeStrategyBaseline(
     + quoteTurnover(total1, snapshot.token1, config, snapshot, sqrtPriceX96)
   const rewardOwed = config.staking?.enabled ? BigInt(snapshot.rewardOwed ?? '0') : 0n
   if (rewardOwed > 0n) value += (await quoteRewardToQuote(rewardOwed, config.quoteToken)).amountOut
+  const valueUsdgRaw = await quoteValueInUsdg(value, config.quoteToken).then(String).catch(() => undefined)
   return {
     strategyId: config.id,
     valueQuoteRaw: value.toString(),
+    valueUsdgRaw,
     quoteToken: config.quoteToken,
     observedAt: snapshot.observedAt,
     blockNumber: snapshot.blockNumber,
@@ -555,14 +635,17 @@ export async function archivedAccountingPerformance(config: StrategyConfig, arch
   return {
     strategyId: config.id, calculatedAt: archivedAt, state: 'archived',
     quote: { address: config.quoteToken, symbol: await tokenSymbol(config.quoteToken), decimals: quoteDecimals },
+    stable: { address: ADDR.USDG, symbol: 'USDG', decimals: 6 },
     risk: { address: config.riskToken, symbol: await tokenSymbol(config.riskToken) },
     summary: { reopens: cycles.filter((cycle) => cycle.new_token_id !== null).length, grossFeesQuoteRaw: grossFeesQuote.toString(),
       protocolFeesQuoteRaw: protocolFeesQuote.toString(), incomeTaxQuoteRaw: incomeTaxQuote.toString(), netFeesQuoteRaw: (grossFeesQuote - protocolFeesQuote - incomeTaxQuote).toString(), gasCostQuoteRaw: gasCostQuote.toString(),
       openingGasCostQuoteRaw: '0', executionCostQuoteRaw: executionCostQuote.toString(), marketAndLpQuoteRaw: null, currentValueQuoteRaw: null,
+      profitReserveQuoteRaw: null, withdrawnProfitQuoteRaw: '0', withdrawnProfitUsdgRaw: '0',
       currentUncollectedFeesQuoteRaw: null, currentUnclaimedRewardsQuoteRaw: null, currentUnclaimedTotalQuoteRaw: null,
-      baselineValueQuoteRaw: null, pnlQuoteRaw: null, pnlPct: null },
+      baselineValueQuoteRaw: null, pnlQuoteRaw: null, pnlPct: null,
+      currentValueUsdgRaw: null, baselineValueUsdgRaw: null, gasCostUsdgRaw: null, pnlUsdgRaw: null, pnlUsdgPct: null },
     baseline: null, currentPosition: { tokenId: config.activeTokenId, tick: null, tickLower: null, tickUpper: null },
-    unclaimedReward: null, feeTokens: [], cycles: cycleDetails, warnings: ['historical_final_valuation_unavailable', ...(gasValuation.error ? ['gas_quote_unavailable'] : [])],
+    unclaimedReward: null, feeTokens: [], profitWithdrawals: [], cycles: cycleDetails, warnings: ['historical_final_valuation_unavailable', ...(gasValuation.error ? ['gas_quote_unavailable'] : [])],
   }
 }
 
@@ -583,4 +666,8 @@ export async function cachedStrategyPerformance(config: StrategyConfig, state: s
   })
   performanceCache.set(key, { pending, expiresAt: now + PERFORMANCE_CACHE_MS })
   return pending
+}
+
+export function invalidateStrategyPerformance(strategyId: string) {
+  for (const key of performanceCache.keys()) if (key.startsWith(`${strategyId}:`)) performanceCache.delete(key)
 }

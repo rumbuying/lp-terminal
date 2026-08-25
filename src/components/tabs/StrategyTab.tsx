@@ -1,22 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAccount } from 'wagmi'
-import { useQueries } from '@tanstack/react-query'
 import { formatUnits, type Address } from 'viem'
 import { originalStrategyDraft } from '../../../shared/strategy/schema'
 import { simulateStrategy } from '../../../shared/strategy/simulator'
 import { makeRebalancePlan } from '../../../shared/strategy/planner'
+import { scaledRangePcts } from '../../../shared/strategy/adaptive-range'
 import { strategyName } from '../../../shared/strategy/name'
 import type { StrategyConfig, StrategyExecutionPlan } from '../../../shared/strategy/types'
 import { ADDR, UNI } from '../../config/addresses'
 import { usePositions } from '../../hooks/usePositions'
 import { usePools } from '../../hooks/usePools'
 import { useExecutorWalletAuth } from '../../hooks/useExecutorWalletAuth'
-import { tokenUsdQueryOptions } from '../../hooks/useTokenUsd'
-import { loadStrategies, removeStrategy, upsertStrategy } from '../../lib/strategyStore'
+import { usePnlUnit } from '../../hooks/usePnlUnit'
+import { tokenUsdMapOf, useTokenPrices } from '../../hooks/useTokenPrices'
+import { loadStrategies, removeStrategy, syncStrategyArchiveState, upsertStrategy } from '../../lib/strategyStore'
 import { snapshotFromPosition } from '../../lib/strategyPlanner'
 import { strategyDisplayValue, strategyStableValue } from '../../lib/strategyValuation'
-import type { TokenInfo } from '../../types'
 import {
   executorHealth,
   executorPerformance,
@@ -26,11 +26,13 @@ import {
   deleteExecutorStrategy,
   importExecutorWallet,
   renameExecutorWallet,
+  resumeExecutorRecovery,
   executeExecutorStrategy,
   planExecutorStrategy,
   saveExecutorStrategy,
   setExecutorEmergencyPause,
   startSimpleExecutorStrategy,
+  withdrawExecutorProfit,
   type ExecutorStrategy,
   type ExecutorPerformance,
   type ExecutorPreflight,
@@ -39,9 +41,10 @@ import {
 } from '../../lib/executorClient'
 import { Badge, Btn, NumInput } from '../ui'
 import { StrategyEditor } from '../strategy/StrategyEditor'
+import { PnlUnitToggle } from '../PnlUnitToggle'
 
 const EXECUTOR_ADMIN_TOKEN_KEY = 'lp-terminal:executor-admin-token:v1'
-const ACTIVE_EXECUTOR_STATES = new Set(['planned', 'executing', 'monitoring', 'guard_wait', 'recovery', 'paused_guard', 'awaiting_manual'])
+const ACTIVE_EXECUTOR_STATES = new Set(['planned', 'executing', 'monitoring', 'guard_wait', 'recovery', 'recovery_quarantined', 'paused_guard', 'awaiting_manual'])
 
 const savedExecutorAdminToken = () => {
   if (typeof window === 'undefined') return ''
@@ -53,8 +56,13 @@ const number = (s: string, fallback: number) => {
   return Number.isFinite(n) ? n : fallback
 }
 
+const compactNumber = (value: number, digits = 2) => new Intl.NumberFormat(undefined, {
+  maximumFractionDigits: digits,
+}).format(value)
+
 export function StrategyTab() {
   const { t } = useTranslation()
+  const [pnlUnit] = usePnlUnit()
   const { address: user } = useAccount()
   // Creating from a newly minted NFT is not latency-sensitive. Do not keep the
   // full UP33 catalog and every wallet position on the executor's fast cadence.
@@ -87,21 +95,22 @@ export function StrategyTab() {
   const [executorError, setExecutorError] = useState<string | null>(null)
   const [executorPreflight, setExecutorPreflight] = useState<ExecutorPreflight | null>(null)
   const [editingStrategyId, setEditingStrategyId] = useState<string | null>(null)
-  const performanceQuoteTokens = useMemo(() => {
-    const tokens = new Map<string, TokenInfo>()
+  const [profitTargets, setProfitTargets] = useState<Record<string, 'USDG' | 'WETH' | 'ETH'>>({})
+  const performanceQuoteAddresses = useMemo(() => {
+    // Most strategies retain WETH. Start its USD mark in parallel with the
+    // executor performance request instead of discovering it afterwards and
+    // turning the first render into two sequential network waits.
+    const addresses = new Map<string, Address>([[ADDR.WETH.toLowerCase(), ADDR.WETH]])
     for (const performance of executorPerformanceList) {
       if (!performance.quote) continue
       const address = performance.quote.address.toLowerCase()
-      tokens.set(address, { address: performance.quote.address as Address, symbol: performance.quote.symbol, decimals: performance.quote.decimals })
+      if (address !== ADDR.USDG.toLowerCase()) addresses.set(address, performance.quote.address as Address)
     }
-    return [...tokens.values()]
+    return [...addresses.values()]
   }, [executorPerformanceList])
-  const performanceQuotePrices = useQueries({ queries: performanceQuoteTokens.map(tokenUsdQueryOptions) })
-  const quoteUsdByAddress = new Map(performanceQuoteTokens.flatMap((token, index) => {
-    const price = performanceQuotePrices[index]?.data
-    return typeof price === 'number' && Number.isFinite(price) && price > 0 ? [[token.address.toLowerCase(), price] as const] : []
-  }))
-  const quotePriceResult = (address: string) => performanceQuotePrices[performanceQuoteTokens.findIndex((token) => token.address.toLowerCase() === address.toLowerCase())]
+  const performanceQuotePrices = useTokenPrices(performanceQuoteAddresses)
+  const quoteUsdByAddress = new Map(Object.entries(tokenUsdMapOf(performanceQuotePrices.data)))
+  const quotePriceResult = (address: string) => performanceQuotePrices.data?.[address.toLowerCase()]
 
   const sim = useMemo(
     () =>
@@ -147,6 +156,10 @@ export function StrategyTab() {
     ])
     setExecutorWalletList(walletData.wallets)
     setExecutorStrategyList(strategyData.strategies)
+    setItems(syncStrategyArchiveState(
+      strategyData.strategies.map((strategy) => strategy.config.id),
+      strategyData.archivedStrategyIds ?? [],
+    ))
     setRecoveryJobs(recoveryData.jobs)
     setExecutorPerformanceList(performanceData.strategies)
     setSelectedWalletId((current) => current || walletData.wallets[0]?.id || '')
@@ -183,6 +196,11 @@ export function StrategyTab() {
     if (saved) void connectExecutor(saved, 'admin')
   }, [])
   useEffect(() => {
+    const syncFromAnotherTab = () => setItems(loadStrategies())
+    window.addEventListener('storage', syncFromAnotherTab)
+    return () => window.removeEventListener('storage', syncFromAnotherTab)
+  }, [])
+  useEffect(() => {
     if (authRole === 'admin' || !walletAuth.token) return
     void connectExecutor(walletAuth.token, 'wallet')
   }, [authRole, walletAuth.token, user])
@@ -203,6 +221,10 @@ export function StrategyTab() {
       ]).then(([walletData, strategyData, recoveryData, health]) => {
         setExecutorWalletList(walletData.wallets)
         setExecutorStrategyList(strategyData.strategies)
+        setItems(syncStrategyArchiveState(
+          strategyData.strategies.map((strategy) => strategy.config.id),
+          strategyData.archivedStrategyIds ?? [],
+        ))
         setRecoveryJobs(recoveryData.jobs)
         setExecutorPaused(health.paused)
       }).catch(() => undefined)
@@ -329,6 +351,25 @@ export function StrategyTab() {
       setExecutorBusy(false)
     }
   }
+  const withdrawProfit = async (strategy: StrategyConfig, performance: ExecutorPerformance) => {
+    const target = profitTargets[strategy.id] ?? 'WETH'
+    const available = performance.summary?.profitReserveQuoteRaw
+    if (!available || BigInt(available) <= 0n) return setExecutorError(t('strategy.profitWithdrawNone'))
+    if (!window.confirm(t('strategy.profitWithdrawConfirm', { amount: quoteAmount(available, performance), target }))) return
+    setExecutorBusy(true)
+    setExecutorError(null)
+    try {
+      const { withdrawal } = await withdrawExecutorProfit(adminToken, strategy.id, target)
+      await refreshExecutor()
+      setExecutorError(t('strategy.profitWithdrawSuccess', {
+        amount: tokenAmount(withdrawal.amountRaw, withdrawal.decimals, withdrawal.target),
+      }))
+    } catch (error) {
+      setExecutorError(error instanceof Error ? error.message : t('strategy.profitWithdrawFailed'))
+    } finally {
+      setExecutorBusy(false)
+    }
+  }
   const addOriginal = (p: (typeof eligible)[number]) => {
     if (!user) return
     const token0IsWeth = p.pool.token0.toLowerCase() === ADDR.WETH.toLowerCase()
@@ -404,6 +445,18 @@ export function StrategyTab() {
       setExecutorBusy(false)
     }
   }
+  const retryRecovery = async (job: RecoveryJob) => {
+    setExecutorBusy(true)
+    setExecutorError(null)
+    try {
+      await resumeExecutorRecovery(adminToken, job.id)
+      await refreshExecutor()
+    } catch (error) {
+      setExecutorError(error instanceof Error ? error.message : t('strategy.simpleDeleteFailed'))
+    } finally {
+      setExecutorBusy(false)
+    }
+  }
   const saveEditedStrategy = (strategy: StrategyConfig) => {
     setItems(upsertStrategy(strategy))
     setEditingStrategyId(null)
@@ -453,6 +506,11 @@ export function StrategyTab() {
       tone: 'amber' as const,
       title: t('strategy.simpleNeedsAttention'),
       detail: `${job?.errorCode ? `${job.errorCode} · ` : ''}${t('strategy.simpleNeedsAttentionDetail')}`,
+    }
+    if (remote.state === 'recovery_quarantined') return {
+      tone: 'red' as const,
+      title: t('strategy.simpleRecoveryQuarantined'),
+      detail: `${job?.recoveryLastError ? `${job.recoveryLastError} · ` : ''}${t('strategy.simpleRecoveryQuarantinedDetail')}`,
     }
     if (remote.state === 'guard_wait' || remote.state === 'paused_guard') return {
       tone: 'amber' as const,
@@ -519,19 +577,49 @@ export function StrategyTab() {
     return `${sign}${new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(abs)} USDG`
   }
 
+  const usdgAmount = (raw: string | null | undefined, signed = false) => {
+    if (raw == null) return '—'
+    const value = Number(formatUnits(BigInt(raw), 6))
+    const abs = Math.abs(value)
+    const digits = abs >= 100 ? 2 : abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6
+    const sign = value < 0 ? '−' : signed && value > 0 ? '+' : ''
+    return `${sign}${new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(abs)} USDG`
+  }
+
+  const performancePnl = (performance: ExecutorPerformance) => {
+    const summary = performance.summary
+    if (!summary) return { raw: null, text: '—', pct: null }
+    return pnlUnit === 'stable'
+      ? { raw: summary.pnlUsdgRaw, text: usdgAmount(summary.pnlUsdgRaw, true), pct: summary.pnlUsdgPct }
+      : { raw: summary.pnlQuoteRaw, text: quoteAmount(summary.pnlQuoteRaw, performance, true), pct: summary.pnlPct }
+  }
+
   const runningStrategies = executorStrategyList
     .filter((remote) => !!user && remote.config.owner.toLowerCase() === user.toLowerCase() && ACTIVE_EXECUTOR_STATES.has(remote.state) && !remote.config.execution.dryRun)
     .map((remote) => ({
       remote,
       performance: executorPerformanceList.find((row) => row.strategyId === remote.config.id),
     }))
-  const dashboardPnlValues = runningStrategies
-    .map(({ performance }) => performance?.summary ? stableValue(performance.summary.pnlQuoteRaw, performance) : null)
-    .filter((value): value is number => value != null)
+  const dashboardPnlRows = runningStrategies.flatMap(({ performance }) => performance?.summary && performance.quote
+    ? [{ performance, metric: performancePnl(performance) }]
+    : [])
   const dashboardAssetValues = runningStrategies
     .map(({ performance }) => performance?.summary ? stableValue(performance.summary.currentValueQuoteRaw, performance) : null)
     .filter((value): value is number => value != null)
-  const dashboardPnl = dashboardPnlValues.length ? dashboardPnlValues.reduce((sum, value) => sum + value, 0) : null
+  const dashboardPnlKnown = dashboardPnlRows.filter((row) => row.metric.raw != null)
+  const dashboardPnl = pnlUnit === 'stable'
+    ? (dashboardPnlKnown.length ? dashboardPnlKnown.reduce((sum, row) => sum + Number(formatUnits(BigInt(row.metric.raw!), 6)), 0) : null)
+    : null
+  const dashboardQuoteAddress = new Set(dashboardPnlKnown.map((row) => row.performance.quote!.address.toLowerCase()))
+  const dashboardQuoteRaw = pnlUnit === 'quote' && dashboardPnlKnown.length && dashboardQuoteAddress.size === 1
+    ? dashboardPnlKnown.reduce((sum, row) => sum + BigInt(row.metric.raw!), 0n).toString()
+    : null
+  const dashboardPnlText = pnlUnit === 'stable'
+    ? stableTotal(dashboardPnl, true)
+    : dashboardQuoteRaw === null ? '—' : quoteAmount(dashboardQuoteRaw, dashboardPnlKnown[0].performance, true)
+  const dashboardPnlPositive = pnlUnit === 'stable'
+    ? dashboardPnl == null ? null : dashboardPnl >= 0
+    : dashboardQuoteRaw === null ? null : BigInt(dashboardQuoteRaw) >= 0n
   const dashboardAssets = dashboardAssetValues.length ? dashboardAssetValues.reduce((sum, value) => sum + value, 0) : null
   const canManage = executorOnline && authRole === 'admin'
 
@@ -549,9 +637,10 @@ export function StrategyTab() {
             <h2 id="strategy-overview-title">{t('strategy.overviewTitle')}</h2>
           </div>
           <div className="strategy-overview-totals" aria-label={t('strategy.overviewTotals')}>
+            <PnlUnitToggle />
             <div>
               <span>{t('strategy.overviewTotalPnl')}</span>
-              <strong className={dashboardPnl == null ? 'dim' : dashboardPnl >= 0 ? 'green' : 'red'}>{stableTotal(dashboardPnl, true)}</strong>
+              <strong className={dashboardPnlPositive == null ? 'dim' : dashboardPnlPositive ? 'green' : 'red'}>{dashboardPnlText}</strong>
             </div>
             <div>
               <span>{t('strategy.overviewAssets')}</span>
@@ -570,7 +659,8 @@ export function StrategyTab() {
           <div className="strategy-overview-grid">
             {runningStrategies.map(({ remote, performance }) => {
               const status = strategyStatus(remote)
-              const pnlRaw = performance?.summary?.pnlQuoteRaw
+              const pnlMetric = performance ? performancePnl(performance) : { raw: null, text: '—', pct: null }
+              const pnlRaw = pnlMetric.raw
               const pnlPositive = pnlRaw != null && BigInt(pnlRaw) >= 0n
               return (
                 <article className="strategy-overview-card" key={remote.config.id}>
@@ -581,10 +671,10 @@ export function StrategyTab() {
                   <div className="strategy-overview-pnl">
                     <span>{t('strategy.perfPnl')}</span>
                     <strong className={pnlRaw == null ? 'dim' : pnlPositive ? 'green' : 'red'}>
-                      {performance?.summary ? `≈ ${stableAmount(pnlRaw, performance, true)}` : '—'}
+                      {performance?.summary ? pnlMetric.text : '—'}
                     </strong>
                     <small>{performance?.summary
-                      ? `${quoteAmount(pnlRaw, performance, true)} · ${performance.summary.pnlPct == null ? t('strategy.perfCalculating') : `${performance.summary.pnlPct >= 0 ? '+' : ''}${performance.summary.pnlPct.toFixed(2)}%`}`
+                      ? `${pnlUnit === 'stable' ? quoteAmount(performance.summary.pnlQuoteRaw, performance, true) : usdgAmount(performance.summary.pnlUsdgRaw, true)} · ${pnlMetric.pct == null ? t('strategy.perfCalculating') : `${pnlMetric.pct >= 0 ? '+' : ''}${pnlMetric.pct.toFixed(2)}%`}`
                       : t('strategy.perfUnavailable')}</small>
                   </div>
                   <div className="strategy-overview-meta">
@@ -599,7 +689,7 @@ export function StrategyTab() {
         )}
         <div className="strategy-overview-foot mono-sm">
           <span>{t('strategy.overviewRefresh')}</span>
-          {dashboardPnlValues.length < runningStrategies.length && runningStrategies.length > 0 ? <span className="amber">{t('strategy.overviewPartial', { n: runningStrategies.length - dashboardPnlValues.length })}</span> : null}
+          {dashboardPnlKnown.length < runningStrategies.length && runningStrategies.length > 0 ? <span className="amber">{t('strategy.overviewPartial', { n: runningStrategies.length - dashboardPnlKnown.length })}</span> : null}
         </div>
       </section>
 
@@ -689,7 +779,21 @@ export function StrategyTab() {
         const job = remote?.latestJob
         const performance = executorPerformanceList.find((row) => row.strategyId === strategy.id)
         const performanceQuotePrice = performance?.quote ? quotePriceResult(performance.quote.address) : undefined
-        const running = remote && ['planned', 'executing', 'monitoring', 'guard_wait', 'recovery', 'paused_guard', 'awaiting_manual'].includes(remote.state) && !remote.config.execution.dryRun
+        const running = remote && ['planned', 'executing', 'monitoring', 'guard_wait', 'recovery', 'recovery_quarantined', 'paused_guard', 'awaiting_manual'].includes(remote.state) && !remote.config.execution.dryRun
+        const currentTokenId = performance?.currentPosition?.tokenId ?? strategy.activeTokenId
+        const currentRangeCycle = performance?.cycles?.find((cycle) => cycle.newTokenId === currentTokenId)
+        const currentRangeScale = currentRangeCycle?.rangeScale ?? 1
+        const effectiveRange = scaledRangePcts(strategy.range.lowerPct, strategy.range.upperPct, currentRangeScale)
+        const rangeExpanded = currentRangeScale > 1.000001
+        const cardPnl = performance ? performancePnl(performance) : { raw: null, text: '—', pct: null }
+        const withdrawalTotals = [...(performance?.profitWithdrawals ?? [])].reduce((totals, withdrawal) => {
+          totals[withdrawal.target] = (totals[withdrawal.target] ?? 0n) + BigInt(withdrawal.amountRaw)
+          return totals
+        }, {} as Record<'USDG' | 'WETH' | 'ETH', bigint>)
+        const profitWithdrawalBlocked = !remote
+          || ['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(remote.state)
+          || !performance?.summary?.profitReserveQuoteRaw
+          || BigInt(performance.summary.profitReserveQuoteRaw) <= 0n
         return (
           <div className="card" key={strategy.id}>
             <div className="card-head">
@@ -697,6 +801,7 @@ export function StrategyTab() {
               <Badge tone={status.tone}>{status.title}</Badge>
               {strategy.staking?.enabled && <Badge tone="green">{t('strategy.autoStaking')}</Badge>}
               {strategy.execution.lowTransactionMode && <Badge tone="amber">{t('strategy.lowTxBadge')}</Badge>}
+              {rangeExpanded && <Badge tone="amber">{t('strategy.rangeExpandedBadge', { scale: compactNumber(currentRangeScale) })}</Badge>}
               {walletForOwner(strategy.owner) ? <Badge tone="dim">{walletForOwner(strategy.owner)!.label}</Badge> : <Badge tone="red">{t('strategy.accountMissing')}</Badge>}
               <div className="card-actions">
                 {!running && !['recovery', 'paused_guard'].includes(remote?.state ?? '') && (
@@ -704,7 +809,7 @@ export function StrategyTab() {
                     {t('strategy.simpleStart')}
                   </Btn>
                 )}
-                {!['planned', 'executing', 'recovery'].includes(remote?.state ?? '') && (
+                {!['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(remote?.state ?? '') && (
                   <Btn onClick={() => setLowTransactionMode(strategy, !strategy.execution.lowTransactionMode)} busy={executorBusy} disabled={!canManage}>
                     {strategy.execution.lowTransactionMode ? t('strategy.lowTxDisable') : t('strategy.lowTxEnable')}
                   </Btn>
@@ -714,7 +819,8 @@ export function StrategyTab() {
             </div>
             <div className="kv mono-sm">
               <span>{t('strategy.tokenId')} {strategy.activeTokenId ?? '—'}</span>
-              <span>{t('strategy.range')} −{strategy.range.lowerPct}% / +{strategy.range.upperPct}%</span>
+              <span>{t('strategy.rangeBase', { lower: compactNumber(strategy.range.lowerPct), upper: compactNumber(strategy.range.upperPct) })}</span>
+              {rangeExpanded && <span className="strategy-range-expanded">{t('strategy.rangeEffective', { lower: compactNumber(effectiveRange.lowerPct), upper: compactNumber(effectiveRange.upperPct) })}</span>}
               {!remote && (
                 <label>
                   {t('strategy.simpleBand')}{' '}
@@ -740,10 +846,10 @@ export function StrategyTab() {
                   </div>
                   <div className="performance-metric">
                     <span>{t('strategy.perfPnl')}</span>
-                    <strong className={performance.summary.pnlQuoteRaw && BigInt(performance.summary.pnlQuoteRaw) >= 0n ? 'green' : 'red'}>
-                      ≈ {stableAmount(performance.summary.pnlQuoteRaw, performance, true)}
+                    <strong className={cardPnl.raw == null ? 'dim' : BigInt(cardPnl.raw) >= 0n ? 'green' : 'red'}>
+                      {cardPnl.text}
                     </strong>
-                    <small>{quoteAmount(performance.summary.pnlQuoteRaw, performance, true)} · {performance.summary.pnlPct == null ? t('strategy.perfCalculating') : `${performance.summary.pnlPct >= 0 ? '+' : ''}${performance.summary.pnlPct.toFixed(2)}%`}</small>
+                    <small>{pnlUnit === 'stable' ? quoteAmount(performance.summary.pnlQuoteRaw, performance, true) : usdgAmount(performance.summary.pnlUsdgRaw, true)} · {cardPnl.pct == null ? t('strategy.perfCalculating') : `${cardPnl.pct >= 0 ? '+' : ''}${cardPnl.pct.toFixed(2)}%`}</small>
                   </div>
                   <div className="performance-metric">
                     <span>{t('strategy.perfAssets')}</span>
@@ -778,6 +884,8 @@ export function StrategyTab() {
                 <div className="performance-foot mono-sm">
                   <span>{t('strategy.perfGas')} ≈ {stableAmount(performance.summary.gasCostQuoteRaw, performance)} ({quoteAmount(performance.summary.gasCostQuoteRaw, performance)})</span>
                   <span>{t('strategy.perfBaseline')} ≈ {stableAmount(performance.summary.baselineValueQuoteRaw, performance)} ({quoteAmount(performance.summary.baselineValueQuoteRaw, performance)})</span>
+                  <span>{t('strategy.perfProfitReserve')} ≈ {stableAmount(performance.summary.profitReserveQuoteRaw, performance)} ({quoteAmount(performance.summary.profitReserveQuoteRaw, performance)})</span>
+                  <span>{t('strategy.perfProfitWithdrawn')} ≈ {usdgAmount(performance.summary.withdrawnProfitUsdgRaw)} ({quoteAmount(performance.summary.withdrawnProfitQuoteRaw, performance)})</span>
                   <span>{t('strategy.perfUncollectedLp')} ≈ {stableAmount(performance.summary.currentUncollectedFeesQuoteRaw, performance)} ({quoteAmount(performance.summary.currentUncollectedFeesQuoteRaw, performance)})</span>
                   {performance.unclaimedReward ? (
                     <span>{t('strategy.perfUnclaimedReward')} {tokenAmount(performance.unclaimedReward.raw, performance.unclaimedReward.decimals, performance.unclaimedReward.symbol)} · ≈ {stableAmount(performance.unclaimedReward.quoteRaw, performance)} ({quoteAmount(performance.unclaimedReward.quoteRaw, performance)})</span>
@@ -786,15 +894,55 @@ export function StrategyTab() {
                     <span>{t('strategy.perfFeeBreakdown')} {performance.feeTokens.map((token) => tokenAmount(token.grossRaw, token.decimals, token.symbol)).join(' + ')}</span>
                   ) : null}
                 </div>
+                <div className="profit-withdrawal-panel">
+                  <div>
+                    <strong>{t('strategy.profitWithdrawTitle')}</strong>
+                    <span className="dim mono-sm">{t('strategy.profitWithdrawHint')}</span>
+                    {Object.entries(withdrawalTotals).length > 0 ? <span className="mono-sm">
+                      {t('strategy.profitWithdrawSettled')} {Object.entries(withdrawalTotals).map(([target, raw]) => tokenAmount(raw.toString(), target === 'USDG' ? 6 : 18, target)).join(' + ')}
+                    </span> : null}
+                  </div>
+                  <div className="profit-withdrawal-actions">
+                    <select
+                      className="input"
+                      aria-label={t('strategy.profitWithdrawTarget')}
+                      value={profitTargets[strategy.id] ?? 'WETH'}
+                      onChange={(event) => setProfitTargets((current) => ({ ...current, [strategy.id]: event.target.value as 'USDG' | 'WETH' | 'ETH' }))}
+                      disabled={!canManage || executorBusy}
+                    >
+                      <option value="USDG">USDG</option>
+                      <option value="WETH">WETH</option>
+                      <option value="ETH">ETH</option>
+                    </select>
+                    <Btn
+                      onClick={() => withdrawProfit(strategy, performance)}
+                      busy={executorBusy}
+                      disabled={!canManage || executorPaused || profitWithdrawalBlocked}
+                    >
+                      {t('strategy.profitWithdrawAll')}
+                    </Btn>
+                  </div>
+                </div>
+                {performance.profitWithdrawals?.length ? <details className="profit-withdrawal-history">
+                  <summary>{t('strategy.profitWithdrawHistory', { n: performance.profitWithdrawals.length })}</summary>
+                  {performance.profitWithdrawals.map((withdrawal) => <div className="profit-withdrawal-row mono-sm" key={withdrawal.id}>
+                    <span>{withdrawal.withdrawnAt ? new Date(withdrawal.withdrawnAt * 1000).toLocaleString() : '—'}</span>
+                    <strong>{tokenAmount(withdrawal.amountRaw, withdrawal.decimals, withdrawal.target)}</strong>
+                    <span>≈ {usdgAmount(withdrawal.usdgValueRaw)}</span>
+                    <span>{withdrawal.txHashes.at(-1) ? <a href={`https://robinhoodchain.blockscout.com/tx/${withdrawal.txHashes.at(-1)}`} target="_blank" rel="noreferrer">↗</a> : t('strategy.profitWithdrawNoTx')}</span>
+                  </div>)}
+                </details> : null}
                 {performance.quote.address.toLowerCase() !== ADDR.USDG.toLowerCase() && (
                   <div className="dim mono-sm">
-                    {performanceQuotePrice?.data
-                      ? t('strategy.perfStableRate', { symbol: performance.quote.symbol, price: new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(performanceQuotePrice.data), time: new Date(performanceQuotePrice.dataUpdatedAt).toLocaleTimeString() })
+                    {performanceQuotePrice?.priceUsd
+                      ? t('strategy.perfStableRate', { symbol: performance.quote.symbol, price: new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(performanceQuotePrice.priceUsd), time: new Date((performanceQuotePrice.updatedAt ?? Math.floor(performanceQuotePrices.dataUpdatedAt / 1000)) * 1000).toLocaleTimeString() })
                       : t('strategy.perfStableLoading', { symbol: performance.quote.symbol })}
                   </div>
                 )}
                 {performance.error && <div className="amber mono-sm">{t('strategy.perfLiveError', { message: performance.error })}</div>}
                 {performance.rewardValuationError && <div className="amber mono-sm">{t('strategy.perfRewardValuationError', { message: performance.rewardValuationError })}</div>}
+                {performance.stableValuationError && <div className="amber mono-sm">{t('strategy.perfStablePnlUnavailable')}</div>}
+                {performance.stable?.baselineSource && <div className="dim mono-sm">{t(performance.stable.baselineSource === 'recorded_at_start' ? 'strategy.perfStableBasisRecorded' : 'strategy.perfStableBasisHistorical')}</div>}
                 {performance.warnings?.includes('gas_quote_unavailable') && <div className="amber mono-sm">{t('strategy.perfGasQuoteUnavailable', { symbol: performance.quote?.symbol ?? '' })}</div>}
                 {performance.warnings?.includes('gas_quote_current_price') && <div className="dim mono-sm">{t('strategy.perfGasCurrentQuoteNote', { symbol: performance.quote?.symbol ?? '' })}</div>}
                 {performance.baseline && <div className="dim mono-sm">
@@ -807,21 +955,36 @@ export function StrategyTab() {
                   <details className="performance-history">
                     <summary>{t('strategy.perfHistory', { n: performance.cycles.length })}</summary>
                     <div className="performance-cycle-head mono-sm">
-                      <span>{t('strategy.perfTime')}</span><span>{t('strategy.perfPosition')}</span><span>{t('strategy.perfNetFees')}</span><span>{t('strategy.perfExecutionCost')}</span><span>{t('strategy.perfGas')}</span>
+                      <span>{t('strategy.perfTime')}</span><span>{t('strategy.perfPositionRange')}</span><span>{t('strategy.perfNetFees')}</span><span>{t('strategy.perfExecutionCost')}</span><span>{t('strategy.perfGas')}</span>
                     </div>
-                    {performance.cycles.map((cycle) => (
-                      <div className="performance-cycle mono-sm" key={cycle.id}>
+                    {performance.cycles.map((cycle, index) => {
+                      const previousCycle = performance.cycles?.[index + 1]
+                      const positionAgeMinutes = previousCycle?.completedAt == null
+                        ? null
+                        : Math.max(0, (cycle.startedAt - previousCycle.completedAt) / 60)
+                      const expanded = cycle.rangeScale > 1.000001
+                      const widenedQuickly = positionAgeMinutes != null && positionAgeMinutes < strategy.adaptiveRange.targetMinutes
+                      return <div className="performance-cycle mono-sm" key={cycle.id}>
                         <span>{cycle.completedAt ? new Date(cycle.completedAt * 1000).toLocaleString() : '—'}</span>
-                        <span>#{cycle.oldTokenId ?? '—'} → #{cycle.newTokenId ?? '—'} · {cycle.riskDirection === 'up'
-                          ? t('strategy.perfRiskUp', { symbol: performance.risk?.symbol ?? '' })
-                          : cycle.riskDirection === 'down'
-                            ? t('strategy.perfRiskDown', { symbol: performance.risk?.symbol ?? '' })
-                            : cycle.triggerSide === 'lower' ? t('strategy.perfLower') : t('strategy.perfUpper')}</span>
+                        <span>
+                          #{cycle.oldTokenId ?? '—'} → #{cycle.newTokenId ?? '—'} · {cycle.riskDirection === 'up'
+                            ? t('strategy.perfRiskUp', { symbol: performance.risk?.symbol ?? '' })
+                            : cycle.riskDirection === 'down'
+                              ? t('strategy.perfRiskDown', { symbol: performance.risk?.symbol ?? '' })
+                              : cycle.triggerSide === 'adaptive_contraction'
+                                ? t('strategy.perfAdaptiveContraction')
+                                : cycle.triggerSide === 'lower' ? t('strategy.perfLower') : t('strategy.perfUpper')}
+                          {expanded && <small className="strategy-range-cycle-note">{widenedQuickly
+                            ? t('strategy.perfRangeExpanded', { minutes: compactNumber(positionAgeMinutes!), scale: compactNumber(cycle.rangeScale) })
+                            : positionAgeMinutes == null
+                              ? t('strategy.perfRangeScale', { scale: compactNumber(cycle.rangeScale) })
+                              : t('strategy.perfRangeRecovered', { minutes: compactNumber(positionAgeMinutes), scale: compactNumber(cycle.rangeScale) })}</small>}
+                        </span>
                         <span className="green">+≈ {stableAmount(cycle.netFeesQuoteRaw, performance)} <span className="dim">({quoteAmount(cycle.netFeesQuoteRaw, performance)})</span></span>
                         <span className="red">≈ {stableAmount((-BigInt(cycle.executionCostQuoteRaw)).toString(), performance, true)}{cycle.maxExecutionImpactBps == null ? null : <span className="dim"> ({executionImpact(cycle.maxExecutionImpactBps)})</span>}</span>
                         <span>≈ {stableAmount(cycle.gasCostQuoteRaw, performance)} <span className="dim">({quoteAmount(cycle.gasCostQuoteRaw, performance)})</span> {cycle.txHashes[0] ? <a href={`https://robinhoodchain.blockscout.com/tx/${cycle.txHashes[0]}`} target="_blank" rel="noreferrer">↗</a> : null}</span>
                       </div>
-                    ))}
+                    })}
                   </details>
                 ) : null}
               </div>
@@ -848,15 +1011,29 @@ export function StrategyTab() {
       {executorOnline && connectedRecoveryJobs.length > 0 && (
         <>
           <div className="section-title">{t('strategy.recoveryTitle')}</div>
-          {connectedRecoveryJobs.map((job) => (
-            <div className="card" key={job.id}>
+          {connectedRecoveryJobs.map((job) => {
+            const strategy = executorStrategyList.find((item) => item.config.id === job.strategyId)
+            const quarantined = job.recoveryQuarantinedAt !== undefined
+            return <div className="card" key={job.id}>
               <div className="card-head">
                 <span className="card-title">{t('strategy.simpleInterrupted')}</span>
-                <Badge tone="amber">{job.state}</Badge>
+                <Badge tone={quarantined ? 'red' : 'amber'}>{quarantined ? t('strategy.simpleRecoveryQuarantined') : job.state}</Badge>
               </div>
-              <div className="dim mono-sm">{job.strategyId} · {job.transactions.length} tx · {t('strategy.simpleNeedsAttentionDetail')}</div>
+              <div className="dim mono-sm">
+                {job.strategyId} · {job.transactions.length} tx · {t('strategy.simpleRecoveryAttempts', { n: job.recoveryAttempts })}
+                {job.recoveryLastError ? ` · ${job.recoveryLastError}` : ''}
+              </div>
+              <div className="dim mono-sm" style={{ marginTop: 6 }}>
+                {quarantined ? t('strategy.simpleRecoveryQuarantinedDetail') : t('strategy.simpleNeedsAttentionDetail')}
+              </div>
+              {canManage && (
+                <div className="form-row" style={{ marginTop: 10 }}>
+                  <Btn onClick={() => retryRecovery(job)} busy={executorBusy}>{t('strategy.simpleResume')}</Btn>
+                  {strategy && <Btn tone="danger" onClick={() => remove(strategy.config)} busy={executorBusy}>{t('strategy.delete')}</Btn>}
+                </div>
+              )}
             </div>
-          ))}
+          })}
         </>
       )}
 

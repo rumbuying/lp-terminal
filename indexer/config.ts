@@ -35,6 +35,8 @@ export const TUNE = {
   fullSweepMs: envMs('ACTIVE_SWEEP_MS', 14_400_000), // ACTIVE pools (≥$100 TVL or <48h old), every 4h
   censusMs: envMs('CENSUS_MS', 86_400_000), // full-catalog dust census (~114k pools and growing), daily
   statsMs: envMs('STATS_MS', 300_000), // GeckoTerminal enrichment cycle (external HTTP, off the RPC queue)
+  analyticsMs: envMs('ANALYTICS_MS', 60_000), // top CL candidate tick history
+  analyticsN: Number(process.env.ANALYTICS_POOL_LIMIT || 50),
   // --- frontpage tier: the pools the POOLS tab actually shows, swept fast ---
   frontpageMs: envMs('FRONTPAGE_MS', 15_000), // sweep cadence for the on-screen top-N
   frontpageN: envMs('FRONTPAGE_N', 64), // how many top-TVL pools count as "on the homepage"

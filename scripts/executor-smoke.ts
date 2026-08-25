@@ -307,6 +307,55 @@ try {
   assert.doesNotThrow(() => store.assertWalletAllocationUpdate('wallet_test', autoConfig.id, { [autoConfig.riskToken.toLowerCase()]: 6n }, { [autoConfig.riskToken.toLowerCase()]: 6n }))
   store.db.prepare('INSERT INTO allocations(strategy_id,token,amount,updated_at) VALUES(?,?,?,?)').run(autoConfig.id, autoConfig.quoteToken.toLowerCase(), '99', now)
   assert.doesNotThrow(() => store.assertWalletAllocationUpdate('wallet_test', autoConfig.id, { [autoConfig.riskToken.toLowerCase()]: 6n }, { [autoConfig.riskToken.toLowerCase()]: 6n }))
+  const profitConfig = { ...autoConfig, id: `${autoConfig.id}-profit`, name: 'profit withdrawal accounting' }
+  store.upsertStrategy(profitConfig)
+  store.db.prepare('INSERT INTO allocations(strategy_id,token,amount,updated_at) VALUES(?,?,?,?)').run(profitConfig.id, autoConfig.riskToken.toLowerCase(), '100', now)
+  store.db.prepare('INSERT INTO allocation_components(strategy_id,token,principal_amount,held_fee_amount,held_profit_amount,updated_at) VALUES(?,?,?,?,?,?)').run(
+    profitConfig.id, autoConfig.riskToken.toLowerCase(), '20', '30', '50', now,
+  )
+  store.commitProfitAllocationMutation({
+    strategyId: profitConfig.id,
+    walletId: 'wallet_test',
+    expected: { [autoConfig.riskToken.toLowerCase()]: { principal: 20n, heldFee: 30n, heldProfit: 50n }, [autoConfig.quoteToken.toLowerCase()]: { principal: 0n, heldFee: 0n, heldProfit: 0n } },
+    next: { [autoConfig.riskToken.toLowerCase()]: { principal: 20n, heldFee: 30n, heldProfit: 0n }, [autoConfig.quoteToken.toLowerCase()]: { principal: 0n, heldFee: 0n, heldProfit: 45n } },
+    balances: { [autoConfig.riskToken.toLowerCase()]: 1_000n, [autoConfig.quoteToken.toLowerCase()]: 1_000n },
+  })
+  assert.deepEqual(store.strategyAllocationComponents(profitConfig.id), {
+    [autoConfig.riskToken.toLowerCase()]: { principal: 20n, heldFee: 30n, heldProfit: 0n },
+    [autoConfig.quoteToken.toLowerCase()]: { principal: 0n, heldFee: 0n, heldProfit: 45n },
+  })
+  assert.throws(() => store.commitProfitAllocationMutation({
+    strategyId: profitConfig.id,
+    walletId: 'wallet_test',
+    expected: { [autoConfig.quoteToken.toLowerCase()]: { principal: 0n, heldFee: 0n, heldProfit: 44n } },
+    next: { [autoConfig.quoteToken.toLowerCase()]: { principal: 0n, heldFee: 0n, heldProfit: 0n } },
+    balances: { [autoConfig.quoteToken.toLowerCase()]: 1_000n },
+  }), /E_ALLOCATION_CHANGED/)
+  store.commitProfitAllocationMutation({
+    strategyId: profitConfig.id,
+    walletId: 'wallet_test',
+    expected: { [autoConfig.quoteToken.toLowerCase()]: { principal: 0n, heldFee: 0n, heldProfit: 45n } },
+    next: { [autoConfig.quoteToken.toLowerCase()]: { principal: 0n, heldFee: 0n, heldProfit: 0n } },
+    balances: { [autoConfig.quoteToken.toLowerCase()]: 1_000n },
+    ledger: [{ id: 'profit-withdrawal-fixture', strategyId: profitConfig.id, ts: now, kind: 'profit_withdrawal', token: autoConfig.quoteToken, amount: '45', quoteValue: '45', meta: { target: 'WETH', decimals: 18, usdgValueRaw: '90' } }],
+  })
+  assert.equal(store.strategyAllocationComponents(profitConfig.id)[autoConfig.riskToken.toLowerCase()].principal, 20n)
+  assert.equal(store.strategyAllocationComponents(profitConfig.id)[autoConfig.riskToken.toLowerCase()].heldFee, 30n)
+  assert.equal(store.strategyAllocationComponents(profitConfig.id)[autoConfig.quoteToken.toLowerCase()].heldProfit, 0n)
+  assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM ledger_entries WHERE strategy_id=? AND kind='profit_withdrawal'").get(profitConfig.id) as { n: number }).n, 1)
+  const withdrawalJobId = 'profit-withdrawal-recovery-fixture'
+  assert.equal(store.createProfitWithdrawalJob({
+    id: withdrawalJobId,
+    strategyId: profitConfig.id,
+    target: 'WETH',
+    steps: [{ index: 1, kind: 'profit_swap' }, { index: 11, kind: 'profit_withdrawal_commit' }],
+  }), true)
+  store.markStep({ jobId: withdrawalJobId, index: 1, state: 'confirmed' })
+  assert.equal(store.failProfitWithdrawalJob(withdrawalJobId, 'E_FIXTURE'), 'recovery')
+  assert.equal(store.strategyById(profitConfig.id)?.state, 'recovery')
+  store.abandonProfitWithdrawalJob(withdrawalJobId)
+  assert.equal(store.strategyById(profitConfig.id)?.state, 'monitoring')
+  assert.equal((store.db.prepare('SELECT state FROM jobs WHERE id=?').get(withdrawalJobId) as { state: string }).state, 'failed')
   let releaseFirst!: () => void
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
   const lockOrder: string[] = []
@@ -325,6 +374,7 @@ try {
     oldTokenId: '9',
     newTokenId: '10',
     triggerSide: 'upper',
+    rangeScale: 1,
     allocations: { [autoConfig.riskToken.toLowerCase()]: 5n },
     ledger: [],
     txHashes: [],
@@ -347,15 +397,26 @@ try {
   assert.equal(store.recoveryJobById(interruptedPlan.id)?.id, interruptedPlan.id)
   assert.equal(store.walletHasUnfinishedMutation('wallet_test'), false)
   store.db.prepare(`INSERT INTO job_transactions(job_id,step_index,tx_index,state,nonce,tx_hash,tx_to,calldata_hash,confirmed_at)
-    VALUES(?,?,?,?,?,?,?,?,?)`).run(interruptedPlan.id, 1, 0, 'confirmed', '1', `0x${'22'.repeat(32)}`, autoConfig.positionManager, `0x${'33'.repeat(32)}`, now)
+    VALUES(?,?,?,?,?,?,?,?,?)`).run(interruptedPlan.id, 1, 0, 'sent', '1', `0x${'22'.repeat(32)}`, autoConfig.positionManager, `0x${'33'.repeat(32)}`, now)
   assert.equal(store.walletHasUnfinishedMutation('wallet_test'), true)
-  const blockedConfig = { ...autoConfig, id: `${autoConfig.id}-blocked`, name: 'Blocked by wallet recovery' }
+  const blockedConfig = { ...autoConfig, id: `${autoConfig.id}-blocked`, name: 'Temporarily blocked by uncertain wallet transaction' }
   store.upsertStrategy(blockedConfig)
   const blockedPlan = makeRebalancePlan({ config: blockedConfig, snapshot: { ...outSnapshot, pool: blockedConfig.pool }, now })
   assert.equal(store.createPlannedJob(blockedPlan), false)
-  store.abandonRecoveryJob(interruptedPlan.id)
+  store.db.prepare(`UPDATE job_transactions SET state='confirmed' WHERE job_id=? AND step_index=1 AND tx_index=0`).run(interruptedPlan.id)
   assert.equal(store.walletHasUnfinishedMutation('wallet_test'), false)
   assert.equal(store.createPlannedJob(blockedPlan), true)
+  assert.equal(store.scheduleRecoveryRetry(interruptedPlan.id, 'E_DETERMINISTIC_FIXTURE', true).quarantined, false)
+  assert.equal(store.scheduleRecoveryRetry(interruptedPlan.id, 'E_DETERMINISTIC_FIXTURE', true).quarantined, false)
+  const isolated = store.scheduleRecoveryRetry(interruptedPlan.id, 'E_DETERMINISTIC_FIXTURE', true)
+  assert.equal(isolated.quarantined, true)
+  assert.equal(store.strategyById(interruptedConfig.id)?.state, 'recovery_quarantined')
+  assert.equal(store.recoveryAttemptReady(interruptedPlan.id), false)
+  store.reactivateRecoveryJob(interruptedPlan.id)
+  assert.equal(store.strategyById(interruptedConfig.id)?.state, 'recovery')
+  assert.equal(store.recoveryAttemptReady(interruptedPlan.id), true)
+  store.clearRecoverySchedule(interruptedPlan.id)
+  store.abandonRecoveryJob(interruptedPlan.id)
   assert.equal((store.db.prepare('SELECT state FROM jobs WHERE id=?').get(interruptedPlan.id) as { state: string }).state, 'failed')
   assert.equal(classifyRecovery([]), 'restart_safe')
   assert.equal(classifyRecovery([{ stepIndex: 1, txIndex: 0, state: 'confirmed' }]), 'resume_collect')

@@ -7,6 +7,8 @@ dist
 *.local
 .DS_Store
 indexer/data
+# Local executor state, including encrypted wallet metadata and strategy runs.
+executor/data
 .local-executor
 indexer-dist
 tsconfig.tsbuildinfo
@@ -29,3 +31,5 @@ graphify-out/
 !docs/up33-contract-map.md
 # Authoritative implementation/operations handoff for the unattended LP executor.
 !docs/LP_STRATEGY_HANDOFF.zh-CN.md
+# Reviewed implementation plan for the LP strategy recommendation system.
+!docs/LP_AUTO_RECOMMENDATION_IMPLEMENTATION.zh-CN.md

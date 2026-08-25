@@ -15,7 +15,7 @@ import {
   minAmountsForLiquidity,
   previewDeposit,
 } from '../../lib/clmath'
-import { fmtApr } from '../../lib/apr'
+import { fmtApr, type TokenUsdMap } from '../../lib/apr'
 import { fmtAmount, fmtNum, fmtUsd, shortAddr } from '../../lib/format'
 import { limitFillFrac, limitSideFor, limitTagOf, untagLimit } from '../../lib/limit'
 import { compareClPositionDisplay, clPosMetrics, v2PosMetrics, type ClMetrics, type Earning } from '../../lib/posmetrics'
@@ -26,9 +26,9 @@ import { txlog } from '../../lib/txlog'
 import { tokenOf, usePools } from '../../hooks/usePools'
 import { useBalances } from '../../hooks/useBalances'
 import { usePositions } from '../../hooks/usePositions'
-import { usePoolStats } from '../../hooks/usePoolStats'
+import { useHeldPoolStats } from '../../hooks/usePoolStats'
 import { useUniPoolStats } from '../../hooks/useUniPoolStats'
-import { useUpPrice } from '../../hooks/useUpPrice'
+import { tokenUsdMapOf, useTokenPrices } from '../../hooks/useTokenPrices'
 import { useLiveSlot0, type LiveSlot0 } from '../../hooks/useLiveSlot0'
 import type { Address } from 'viem'
 import type { ClPosition, Pool, PoolsData, TokenInfo, V2Position } from '../../types'
@@ -36,6 +36,7 @@ import { DexScreenerLink } from '../DexScreenerLink'
 import { Flash } from '../Flash'
 import { PairAddrs } from '../PairAddrs'
 import { ProtoBadge } from '../ProtoBadge'
+import { LiquidityDistributionChart } from '../LiquidityDistributionChart'
 import { RangeBar } from '../RangeBar'
 import { ZapPanel } from '../ZapPanel'
 import { FundSwitch } from './PoolsTab'
@@ -48,9 +49,37 @@ export function PositionsTab() {
   const { address: user } = useAccount()
   const pools = usePools()
   const positions = usePositions(user)
-  const stats = usePoolStats() // up33 pool 24h stats + the WETH/USD anchor
-  const upPrice = useUpPrice()
   const [claimBusy, setClaimBusy] = useState(false)
+
+  // Price only assets represented in this wallet. WETH and UP are requested
+  // independently from pool stats so their anchors can resolve immediately.
+  const heldTokenAddresses = useMemo(() => {
+    const byAddress = new Map<string, Address>([
+      [ADDR.WETH.toLowerCase(), ADDR.WETH],
+      [ADDR.UP.toLowerCase(), ADDR.UP],
+    ])
+    for (const position of [...(positions.data?.cl ?? []), ...(positions.data?.v2 ?? [])]) {
+      byAddress.set(position.pool.token0.toLowerCase(), position.pool.token0)
+      byAddress.set(position.pool.token1.toLowerCase(), position.pool.token1)
+    }
+    return [...byAddress.values()]
+  }, [positions.data])
+  const priceMarks = useTokenPrices(heldTokenAddresses)
+  const tokenUsd = useMemo<TokenUsdMap>(() => {
+    const prices = tokenUsdMapOf(priceMarks.data)
+    prices[ADDR.USDG.toLowerCase()] = 1
+    return prices
+  }, [priceMarks.data])
+
+  // The positions screen needs stats only for UP33 pools actually held by the
+  // connected wallet, not the protocol's full catalog.
+  const heldUpPools = useMemo(() => {
+    const byAddress = new Map<string, Pool>()
+    for (const position of [...(positions.data?.cl ?? []), ...(positions.data?.v2 ?? [])])
+      if (position.pool.protocol === 'up33') byAddress.set(position.pool.address.toLowerCase(), position.pool)
+    return [...byAddress.values()]
+  }, [positions.data])
+  const stats = useHeldPoolStats(heldUpPools)
 
   // indexer stats for the specific uniswap pools the user is LPing (v3 + v2)
   const uniAddrs = useMemo(
@@ -103,8 +132,8 @@ export function PositionsTab() {
 
   const data = positions.data!
   const pendingUp = data.cl.reduce((a, x) => a + x.earned, 0n) + data.v2.reduce((a, x) => a + x.earned, 0n)
-  const upUsd = upPrice.data
-  const wethUsd = stats.data?.wethUsd
+  const upUsd = tokenUsd[ADDR.UP.toLowerCase()] ?? undefined
+  const wethUsd = tokenUsd[ADDR.WETH.toLowerCase()] ?? undefined
 
   // portfolio roll-up: value / uncollected fees / UP accrual rate. Uses the
   // 15s positions snapshot (cards refine with the fast feed where they have it)
@@ -136,6 +165,7 @@ export function PositionsTab() {
       stat: statOf(p.pool),
       upUsd,
       wethUsd,
+      tokenUsd,
     })
     clM.set(p, m)
     if (m.valueUsd === null) unpriced++
@@ -151,7 +181,15 @@ export function PositionsTab() {
       v2Val.set(p, null)
       continue
     }
-    const m = v2PosMetrics({ pos: p, dec0: t0.decimals, dec1: t1.decimals, stat: statOf(p.pool), upUsd, wethUsd })
+    const m = v2PosMetrics({
+      pos: p,
+      dec0: t0.decimals,
+      dec1: t1.decimals,
+      stat: statOf(p.pool),
+      upUsd,
+      wethUsd,
+      tokenUsd,
+    })
     v2Val.set(p, m.valueUsd)
     if (m.valueUsd === null) unpriced++
     else lpValue += m.valueUsd + (m.feesUsd ?? 0)
@@ -359,6 +397,7 @@ export function PositionsTab() {
             stat={statOf(g[0].pool)}
             upUsd={upUsd}
             wethUsd={wethUsd}
+            tokenUsd={tokenUsd}
           />
         ) : (
           <ClPoolGroup
@@ -372,6 +411,7 @@ export function PositionsTab() {
             statOf={statOf}
             upUsd={upUsd}
             wethUsd={wethUsd}
+            tokenUsd={tokenUsd}
           />
         ),
       )}
@@ -391,6 +431,7 @@ export function PositionsTab() {
           stat={statOf(p.pool)}
           upUsd={upUsd}
           wethUsd={wethUsd}
+          tokenUsd={tokenUsd}
         />
       ))}
     </div>
@@ -408,6 +449,7 @@ export function ClCard({
   stat,
   upUsd,
   wethUsd,
+  tokenUsd,
   nested,
 }: {
   pos: ClPosition
@@ -418,6 +460,7 @@ export function ClCard({
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  tokenUsd?: TokenUsdMap
   /** rendered inside a ClPoolGroup: the pair title / protocol / pool-type
       badges live in the group head, so drop them from the card head here */
   nested?: boolean
@@ -428,6 +471,7 @@ export function ClCard({
   const [busy, setBusy] = useState(false)
   const [panel, setPanel] = useState<null | 'inc' | 'dec'>(null)
   const [armed, setArmed] = useState(false)
+  const [priceFlipped, setPriceFlipped] = useState(false)
 
   // all NPM write entrypoints are signature-identical across protocols —
   // only the manager address differs
@@ -456,6 +500,7 @@ export function ClCard({
     stat,
     upUsd,
     wethUsd,
+    tokenUsd,
   })
 
   const run = async (fn: () => Promise<unknown>) => {
@@ -727,8 +772,22 @@ export function ClCard({
         dec1={t1.decimals}
         sym0={t0.symbol}
         sym1={t1.symbol}
+        flipped={priceFlipped}
+        onFlippedChange={setPriceFlipped}
         order={limitTag ? { fillFrac: limitFill, sellSym: limitTag.sellSym, buySym: limitTag.buySym } : undefined}
       />
+
+      {pos.liquidity > 0n && (
+        <LiquidityDistributionChart
+          pool={{ ...pos.pool, tick: curTick, sqrtPriceX96: curSqrtP }}
+          tickLower={pos.tickLower}
+          tickUpper={pos.tickUpper}
+          token0={t0}
+          token1={t1}
+          flipped={priceFlipped}
+          compact
+        />
+      )}
 
       {limitTag && !pos.staked && pos.liquidity > 0n && (
         <div className="form-row">
@@ -883,6 +942,7 @@ export function ClPoolGroup(props: {
   statOf: (pool: Pool) => PoolStat | undefined
   upUsd?: number
   wethUsd?: number | null
+  tokenUsd?: TokenUsdMap
 }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(true)
@@ -967,6 +1027,7 @@ export function ClPoolGroup(props: {
               stat={props.statOf(p.pool)}
               upUsd={props.upUsd}
               wethUsd={props.wethUsd}
+              tokenUsd={props.tokenUsd}
               nested
             />
           ))}
@@ -1184,6 +1245,7 @@ export function V2Card({
   stat,
   upUsd,
   wethUsd,
+  tokenUsd,
 }: {
   pos: V2Position
   data: PoolsData
@@ -1193,13 +1255,14 @@ export function V2Card({
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  tokenUsd?: TokenUsdMap
 }) {
   const { t } = useTranslation()
   const t0 = xtokens[pos.pool.token0.toLowerCase()] ?? tokenOf(data, pos.pool.token0)
   const t1 = xtokens[pos.pool.token1.toLowerCase()] ?? tokenOf(data, pos.pool.token1)
   const [busy, setBusy] = useState(false)
   const [removeOpen, setRemoveOpen] = useState(false)
-  const m = v2PosMetrics({ pos, dec0: t0.decimals, dec1: t1.decimals, stat, upUsd, wethUsd })
+  const m = v2PosMetrics({ pos, dec0: t0.decimals, dec1: t1.decimals, stat, upUsd, wethUsd, tokenUsd })
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true)

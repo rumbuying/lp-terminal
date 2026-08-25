@@ -33,7 +33,12 @@ CREATE TABLE IF NOT EXISTS jobs (
   plan_json TEXT NOT NULL,
   state TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  recovery_attempts INTEGER NOT NULL DEFAULT 0,
+  recovery_error_streak INTEGER NOT NULL DEFAULT 0,
+  recovery_last_error TEXT,
+  recovery_next_at INTEGER,
+  recovery_quarantined_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_job_per_strategy ON jobs(strategy_id) WHERE state IN ('planned','running','recovery');
 CREATE TABLE IF NOT EXISTS job_steps (
@@ -81,6 +86,7 @@ CREATE TABLE IF NOT EXISTS allocation_components (
   token TEXT NOT NULL,
   principal_amount TEXT NOT NULL,
   held_fee_amount TEXT NOT NULL,
+  held_profit_amount TEXT NOT NULL DEFAULT '0',
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(strategy_id, token)
 );
@@ -106,6 +112,7 @@ CREATE TABLE IF NOT EXISTS cycles (
   started_at INTEGER NOT NULL,
   completed_at INTEGER,
   trigger_side TEXT,
+  range_scale REAL NOT NULL DEFAULT 1,
   status TEXT NOT NULL,
   tx_hashes_json TEXT NOT NULL DEFAULT '[]'
 );
@@ -165,6 +172,7 @@ CREATE TABLE IF NOT EXISTS executor_flags (
 CREATE TABLE IF NOT EXISTS strategy_baselines (
   strategy_id TEXT PRIMARY KEY,
   value_quote_raw TEXT NOT NULL,
+  value_usdg_raw TEXT,
   quote_token TEXT NOT NULL,
   observed_at INTEGER NOT NULL,
   block_number TEXT NOT NULL,
@@ -189,6 +197,8 @@ CREATE TABLE IF NOT EXISTS strategy_daily_snapshots (
   quote_decimals INTEGER NOT NULL,
   opening_pnl_raw TEXT,
   closing_pnl_raw TEXT,
+  opening_pnl_usdg_raw TEXT,
+  closing_pnl_usdg_raw TEXT,
   opening_fees_raw TEXT NOT NULL,
   closing_fees_raw TEXT NOT NULL,
   opening_gas_raw TEXT NOT NULL,
@@ -206,6 +216,14 @@ CREATE TABLE IF NOT EXISTS strategy_daily_snapshots (
 const walletColumns = db.prepare('PRAGMA table_info(wallets)').all() as { name: string }[]
 if (!walletColumns.some((column) => column.name === 'label'))
   db.exec("ALTER TABLE wallets ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+const baselineColumns = db.prepare('PRAGMA table_info(strategy_baselines)').all() as { name: string }[]
+if (!baselineColumns.some((column) => column.name === 'value_usdg_raw'))
+  db.exec('ALTER TABLE strategy_baselines ADD COLUMN value_usdg_raw TEXT')
+const dailySnapshotColumns = db.prepare('PRAGMA table_info(strategy_daily_snapshots)').all() as { name: string }[]
+if (!dailySnapshotColumns.some((column) => column.name === 'opening_pnl_usdg_raw'))
+  db.exec('ALTER TABLE strategy_daily_snapshots ADD COLUMN opening_pnl_usdg_raw TEXT')
+if (!dailySnapshotColumns.some((column) => column.name === 'closing_pnl_usdg_raw'))
+  db.exec('ALTER TABLE strategy_daily_snapshots ADD COLUMN closing_pnl_usdg_raw TEXT')
 const monitorColumns = db.prepare('PRAGMA table_info(monitor_state)').all() as { name: string }[]
 if (!monitorColumns.some((column) => column.name === 'guard_reason'))
   db.exec('ALTER TABLE monitor_state ADD COLUMN guard_reason TEXT')
@@ -215,6 +233,23 @@ if (!monitorColumns.some((column) => column.name === 'burst_wait_until'))
   db.exec('ALTER TABLE monitor_state ADD COLUMN burst_wait_until INTEGER')
 if (!monitorColumns.some((column) => column.name === 'burst_reset_at'))
   db.exec('ALTER TABLE monitor_state ADD COLUMN burst_reset_at INTEGER')
+const allocationComponentColumns = db.prepare('PRAGMA table_info(allocation_components)').all() as { name: string }[]
+if (!allocationComponentColumns.some((column) => column.name === 'held_profit_amount'))
+  db.exec("ALTER TABLE allocation_components ADD COLUMN held_profit_amount TEXT NOT NULL DEFAULT '0'")
+const cycleColumns = db.prepare('PRAGMA table_info(cycles)').all() as { name: string }[]
+if (!cycleColumns.some((column) => column.name === 'range_scale'))
+  db.exec('ALTER TABLE cycles ADD COLUMN range_scale REAL NOT NULL DEFAULT 1')
+const jobColumns = db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]
+if (!jobColumns.some((column) => column.name === 'recovery_attempts'))
+  db.exec('ALTER TABLE jobs ADD COLUMN recovery_attempts INTEGER NOT NULL DEFAULT 0')
+if (!jobColumns.some((column) => column.name === 'recovery_error_streak'))
+  db.exec('ALTER TABLE jobs ADD COLUMN recovery_error_streak INTEGER NOT NULL DEFAULT 0')
+if (!jobColumns.some((column) => column.name === 'recovery_last_error'))
+  db.exec('ALTER TABLE jobs ADD COLUMN recovery_last_error TEXT')
+if (!jobColumns.some((column) => column.name === 'recovery_next_at'))
+  db.exec('ALTER TABLE jobs ADD COLUMN recovery_next_at INTEGER')
+if (!jobColumns.some((column) => column.name === 'recovery_quarantined_at'))
+  db.exec('ALTER TABLE jobs ADD COLUMN recovery_quarantined_at INTEGER')
 db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
 
 const ts = () => Math.floor(Date.now() / 1000)
@@ -277,6 +312,7 @@ export function upsertStrategy(config: StrategyConfig) {
 export type StrategyBaseline = {
   strategyId: string
   valueQuoteRaw: string
+  valueUsdgRaw?: string
   quoteToken: string
   observedAt: number
   blockNumber: string
@@ -287,11 +323,12 @@ export type StrategyBaseline = {
 
 /** Immutable P/L origin. Rebalances update the NFT, never this row. */
 export function strategyBaseline(strategyId: string): StrategyBaseline | undefined {
-  const row = db.prepare(`SELECT strategy_id,value_quote_raw,quote_token,observed_at,block_number,token_id,tick,source
+  const row = db.prepare(`SELECT strategy_id,value_quote_raw,value_usdg_raw,quote_token,observed_at,block_number,token_id,tick,source
     FROM strategy_baselines WHERE strategy_id=?`).get(strategyId) as Record<string, unknown> | undefined
   return row && {
     strategyId: String(row.strategy_id),
     valueQuoteRaw: String(row.value_quote_raw),
+    valueUsdgRaw: row.value_usdg_raw === null ? undefined : String(row.value_usdg_raw),
     quoteToken: String(row.quote_token),
     observedAt: Number(row.observed_at),
     blockNumber: String(row.block_number),
@@ -302,10 +339,11 @@ export function strategyBaseline(strategyId: string): StrategyBaseline | undefin
 }
 
 export function setStrategyBaselineIfAbsent(baseline: StrategyBaseline): boolean {
-  const result = db.prepare(`INSERT OR IGNORE INTO strategy_baselines(strategy_id,value_quote_raw,quote_token,observed_at,block_number,token_id,tick,source)
-    VALUES(?,?,?,?,?,?,?,?)`).run(
+  const result = db.prepare(`INSERT OR IGNORE INTO strategy_baselines(strategy_id,value_quote_raw,value_usdg_raw,quote_token,observed_at,block_number,token_id,tick,source)
+    VALUES(?,?,?,?,?,?,?,?,?)`).run(
     baseline.strategyId,
     baseline.valueQuoteRaw,
+    baseline.valueUsdgRaw ?? null,
     baseline.quoteToken.toLowerCase(),
     baseline.observedAt,
     baseline.blockNumber,
@@ -315,6 +353,7 @@ export function setStrategyBaselineIfAbsent(baseline: StrategyBaseline): boolean
   )
   if (Number(result.changes) > 0) audit('executor', 'strategy_baseline_recorded', 'strategy', baseline.strategyId, {
     valueQuoteRaw: baseline.valueQuoteRaw,
+    valueUsdgRaw: baseline.valueUsdgRaw ?? null,
     quoteToken: baseline.quoteToken,
     blockNumber: baseline.blockNumber,
     tokenId: baseline.tokenId,
@@ -323,25 +362,55 @@ export function setStrategyBaselineIfAbsent(baseline: StrategyBaseline): boolean
   return Number(result.changes) > 0
 }
 
+/** Backfill a legacy baseline once its historical USDG mark is proven. */
+export function setStrategyBaselineUsdgIfAbsent(strategyId: string, valueUsdgRaw: string): boolean {
+  const result = db.prepare('UPDATE strategy_baselines SET value_usdg_raw=? WHERE strategy_id=? AND value_usdg_raw IS NULL').run(valueUsdgRaw, strategyId)
+  if (Number(result.changes) > 0) audit('accounting', 'strategy_baseline_usdg_backfilled', 'strategy', strategyId, { valueUsdgRaw })
+  return Number(result.changes) > 0
+}
+
+/** Rebase only when the strategy's accounting quote token itself changes. */
+export function replaceStrategyBaselineQuote(baseline: StrategyBaseline) {
+  const previous = strategyBaseline(baseline.strategyId)
+  if (!previous || previous.quoteToken.toLowerCase() === baseline.quoteToken.toLowerCase()) return false
+  db.prepare(`UPDATE strategy_baselines SET value_quote_raw=?,value_usdg_raw=?,quote_token=?,observed_at=?,block_number=?,token_id=?,tick=?,source=? WHERE strategy_id=?`).run(
+    baseline.valueQuoteRaw,
+    baseline.valueUsdgRaw ?? null,
+    baseline.quoteToken.toLowerCase(),
+    baseline.observedAt,
+    baseline.blockNumber,
+    baseline.tokenId,
+    baseline.tick,
+    baseline.source,
+    baseline.strategyId,
+  )
+  audit('accounting', 'strategy_baseline_quote_rebased', 'strategy', baseline.strategyId, {
+    previousQuoteToken: previous.quoteToken,
+    quoteToken: baseline.quoteToken,
+    valueQuoteRaw: baseline.valueQuoteRaw,
+  })
+  return true
+}
+
 export type StrategyDailyPoint = {
   strategyId: string; observedAt: number; day: number
   quoteToken: string; quoteSymbol: string; quoteDecimals: number
-  pnlRaw: string | null; feesRaw: string; gasRaw: string; executionRaw: string; assetsRaw: string | null; reopens: number
+  pnlRaw: string | null; pnlUsdgRaw: string | null; feesRaw: string; gasRaw: string; executionRaw: string; assetsRaw: string | null; reopens: number
 }
 
 /** First value is immutable for the day; latest value advances monotonically in time. */
 export function recordStrategyDailyPoint(point: StrategyDailyPoint) {
   db.prepare(`INSERT INTO strategy_daily_snapshots(strategy_id,shanghai_day,first_observed_at,last_observed_at,quote_token,quote_symbol,quote_decimals,
-    opening_pnl_raw,closing_pnl_raw,opening_fees_raw,closing_fees_raw,opening_gas_raw,closing_gas_raw,opening_execution_raw,closing_execution_raw,
+    opening_pnl_raw,closing_pnl_raw,opening_pnl_usdg_raw,closing_pnl_usdg_raw,opening_fees_raw,closing_fees_raw,opening_gas_raw,closing_gas_raw,opening_execution_raw,closing_execution_raw,
     opening_assets_raw,closing_assets_raw,opening_reopens,closing_reopens)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(strategy_id,shanghai_day) DO UPDATE SET
-      last_observed_at=excluded.last_observed_at,closing_pnl_raw=excluded.closing_pnl_raw,closing_fees_raw=excluded.closing_fees_raw,
+      last_observed_at=excluded.last_observed_at,closing_pnl_raw=excluded.closing_pnl_raw,closing_pnl_usdg_raw=excluded.closing_pnl_usdg_raw,closing_fees_raw=excluded.closing_fees_raw,
       closing_gas_raw=excluded.closing_gas_raw,closing_execution_raw=excluded.closing_execution_raw,closing_assets_raw=excluded.closing_assets_raw,
       closing_reopens=excluded.closing_reopens
     WHERE excluded.last_observed_at>=strategy_daily_snapshots.last_observed_at`).run(
     point.strategyId, point.day, point.observedAt, point.observedAt, point.quoteToken.toLowerCase(), point.quoteSymbol, point.quoteDecimals,
-    point.pnlRaw, point.pnlRaw, point.feesRaw, point.feesRaw, point.gasRaw, point.gasRaw, point.executionRaw, point.executionRaw,
+    point.pnlRaw, point.pnlRaw, point.pnlUsdgRaw, point.pnlUsdgRaw, point.feesRaw, point.feesRaw, point.gasRaw, point.gasRaw, point.executionRaw, point.executionRaw,
     point.assetsRaw, point.assetsRaw, point.reopens, point.reopens,
   )
 }
@@ -379,10 +448,11 @@ export function activeJobForStrategy(strategyId: string): { id: string; state: s
   return db.prepare(`SELECT id,state FROM jobs WHERE strategy_id=? AND state IN ('planned','running','recovery') ORDER BY created_at DESC,id DESC LIMIT 1`).get(strategyId) as { id: string; state: string } | undefined
 }
 
+/** Only an uncertain in-flight transaction may temporarily serialize a wallet. */
 export function walletHasUnfinishedMutation(walletId: string): boolean {
   const row = db.prepare(`SELECT 1 FROM jobs j JOIN strategies s ON s.id=j.strategy_id
     WHERE s.wallet_id=? AND j.state='recovery'
-      AND EXISTS (SELECT 1 FROM job_transactions t WHERE t.job_id=j.id AND t.state='confirmed')
+      AND EXISTS (SELECT 1 FROM job_transactions t WHERE t.job_id=j.id AND t.state IN ('sending','sent'))
     LIMIT 1`).get(walletId)
   return row !== undefined
 }
@@ -441,7 +511,7 @@ export function createPlannedJob(plan: StrategyExecutionPlan): boolean {
       if (!strategy?.wallet_id) throw new Error('E_WALLET')
       const recovery = db.prepare(`SELECT 1 FROM jobs j JOIN strategies s ON s.id=j.strategy_id
         WHERE s.wallet_id=? AND j.state='recovery'
-          AND EXISTS (SELECT 1 FROM job_transactions t WHERE t.job_id=j.id AND t.state='confirmed')
+          AND EXISTS (SELECT 1 FROM job_transactions t WHERE t.job_id=j.id AND t.state IN ('sending','sent'))
         LIMIT 1`).get(strategy.wallet_id)
       if (recovery) throw new Error('E_WALLET_RECOVERY')
       db.prepare('INSERT INTO jobs(id,strategy_id,plan_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(
@@ -463,6 +533,87 @@ export function createPlannedJob(plan: StrategyExecutionPlan): boolean {
   } catch (error: any) {
     const message = String(error?.message)
     if (message.includes('UNIQUE constraint failed') || message.includes('E_WALLET_RECOVERY')) return false
+    throw error
+  }
+}
+
+export type ProfitWithdrawalTarget = 'USDG' | 'WETH' | 'ETH'
+
+/** Create a synchronous signer job that is invisible to the rebalance runner. */
+export function createProfitWithdrawalJob(args: {
+  id: string
+  strategyId: string
+  target: ProfitWithdrawalTarget
+  steps: { index: number; kind: string }[]
+}): boolean {
+  try {
+    const now = ts()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const strategy = db.prepare('SELECT wallet_id FROM strategies WHERE id=?').get(args.strategyId) as { wallet_id: string | null } | undefined
+      if (!strategy?.wallet_id) throw new Error('E_WALLET')
+      const recovery = db.prepare(`SELECT 1 FROM jobs j JOIN strategies s ON s.id=j.strategy_id
+        WHERE s.wallet_id=? AND j.state='recovery'
+          AND EXISTS (SELECT 1 FROM job_transactions t WHERE t.job_id=j.id AND t.state IN ('sending','sent'))
+        LIMIT 1`).get(strategy.wallet_id)
+      if (recovery) throw new Error('E_WALLET_RECOVERY')
+      db.prepare('INSERT INTO jobs(id,strategy_id,plan_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(
+        args.id, args.strategyId, JSON.stringify({ kind: 'profit_withdrawal', strategyId: args.strategyId, target: args.target }), 'running', now, now,
+      )
+      const insert = db.prepare('INSERT INTO job_steps(job_id,step_index,kind,state) VALUES(?,?,?,?)')
+      for (const step of args.steps) insert.run(args.id, step.index, step.kind, 'pending')
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+    return true
+  } catch (error: any) {
+    const message = String(error?.message)
+    if (message.includes('UNIQUE constraint failed') || message.includes('E_WALLET_RECOVERY')) return false
+    throw error
+  }
+}
+
+export function completeProfitWithdrawalJob(jobId: string, result: Record<string, unknown>) {
+  const now = ts()
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare(`UPDATE job_steps SET state='confirmed',confirmed_at=?,result_json=?,error_code=NULL WHERE job_id=? AND step_index=11`).run(now, JSON.stringify(result), jobId)
+    const row = db.prepare(`SELECT strategy_id FROM jobs WHERE id=? AND state IN ('running','recovery')`).get(jobId) as { strategy_id: string } | undefined
+    if (!row) throw new Error('E_PROFIT_WITHDRAWAL_JOB')
+    db.prepare(`UPDATE jobs SET state='completed',updated_at=?,recovery_last_error=NULL,recovery_next_at=NULL,recovery_quarantined_at=NULL WHERE id=?`).run(now, jobId)
+    db.prepare(`UPDATE strategies SET state='monitoring',updated_at=? WHERE id=? AND state IN ('executing','recovery','recovery_quarantined')`).run(now, row.strategy_id)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+/** A pending/unknown broadcast remains a recovery lock; proven failures don't. */
+export function failProfitWithdrawalJob(jobId: string, code: string) {
+  const unfinished = db.prepare(`SELECT 1 FROM job_transactions WHERE job_id=? AND state IN ('sending','sent') LIMIT 1`).get(jobId)
+  const confirmedMutation = db.prepare(`SELECT 1 FROM job_steps WHERE job_id=? AND kind IN ('profit_swap','profit_unwrap') AND state='confirmed' LIMIT 1`).get(jobId)
+  const state = unfinished || confirmedMutation ? 'recovery' : 'failed'
+  const now = ts()
+  db.prepare(`UPDATE jobs SET state=?,updated_at=?,recovery_last_error=? WHERE id=?`).run(state, now, code, jobId)
+  db.prepare(`UPDATE job_steps SET state='failed',error_code=? WHERE job_id=? AND state='pending'`).run(code, jobId)
+  if (state === 'recovery') db.prepare(`UPDATE strategies SET state='recovery',updated_at=? WHERE id=(SELECT strategy_id FROM jobs WHERE id=?)`).run(now, jobId)
+  return state as 'recovery' | 'failed'
+}
+
+export function abandonProfitWithdrawalJob(jobId: string, code = 'E_PROFIT_WITHDRAWAL_RETRY') {
+  const now = ts()
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const row = db.prepare(`SELECT strategy_id FROM jobs WHERE id=? AND state IN ('running','recovery')`).get(jobId) as { strategy_id: string } | undefined
+    if (!row) throw new Error('E_PROFIT_WITHDRAWAL_JOB')
+    db.prepare(`UPDATE jobs SET state='failed',updated_at=?,recovery_last_error=?,recovery_next_at=NULL,recovery_quarantined_at=NULL WHERE id=?`).run(now, code, jobId)
+    db.prepare(`UPDATE strategies SET state='monitoring',updated_at=? WHERE id=? AND state IN ('executing','recovery','recovery_quarantined')`).run(now, row.strategy_id)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
     throw error
   }
 }
@@ -548,7 +699,10 @@ export function strategyAllocations(strategyId: string): Record<string, bigint> 
   return Object.fromEntries(rows.map((row) => [row.token, BigInt(row.amount)]))
 }
 
-export type AllocationComponent = { principal: bigint; heldFee: bigint }
+export type AllocationComponent = { principal: bigint; heldFee: bigint; heldProfit: bigint }
+
+const sameAllocationComponent = (a: AllocationComponent | undefined, b: AllocationComponent | undefined) =>
+  Boolean(a && b && a.principal === b.principal && a.heldFee === b.heldFee && a.heldProfit === b.heldProfit)
 
 /**
  * Split idle strategy assets into principal that should be redeployed and
@@ -557,22 +711,22 @@ export type AllocationComponent = { principal: bigint; heldFee: bigint }
  */
 export function strategyAllocationComponents(strategyId: string): Record<string, AllocationComponent> {
   const totals = strategyAllocations(strategyId)
-  const rows = db.prepare('SELECT token,principal_amount,held_fee_amount FROM allocation_components WHERE strategy_id=?').all(strategyId) as {
-    token: string; principal_amount: string; held_fee_amount: string
+  const rows = db.prepare('SELECT token,principal_amount,held_fee_amount,held_profit_amount FROM allocation_components WHERE strategy_id=?').all(strategyId) as {
+    token: string; principal_amount: string; held_fee_amount: string; held_profit_amount: string
   }[]
-  const stored = Object.fromEntries(rows.map((row) => [row.token.toLowerCase(), { principal: BigInt(row.principal_amount), heldFee: BigInt(row.held_fee_amount) }]))
+  const stored = Object.fromEntries(rows.map((row) => [row.token.toLowerCase(), { principal: BigInt(row.principal_amount), heldFee: BigInt(row.held_fee_amount), heldProfit: BigInt(row.held_profit_amount) }]))
   return Object.fromEntries(Object.entries(totals).map(([token, total]) => {
     const component = stored[token]
-    return [token, component && component.principal >= 0n && component.heldFee >= 0n && component.principal + component.heldFee === total
+    return [token, component && component.principal >= 0n && component.heldFee >= 0n && component.heldProfit >= 0n && component.principal + component.heldFee + component.heldProfit === total
       ? component
-      : { principal: 0n, heldFee: total }]
+      : { principal: 0n, heldFee: total, heldProfit: 0n }]
   }))
 }
 
 /** Reclassify already-realized idle income for deployment on the next cycle. */
 export function compoundHeldAllocations(strategyId: string) {
-  const rows = db.prepare('SELECT token,principal_amount,held_fee_amount FROM allocation_components WHERE strategy_id=?').all(strategyId) as {
-    token: string; principal_amount: string; held_fee_amount: string
+  const rows = db.prepare('SELECT token,principal_amount,held_fee_amount,held_profit_amount FROM allocation_components WHERE strategy_id=?').all(strategyId) as {
+    token: string; principal_amount: string; held_fee_amount: string; held_profit_amount: string
   }[]
   const now = ts()
   db.exec('BEGIN IMMEDIATE')
@@ -590,11 +744,11 @@ export function compoundHeldAllocations(strategyId: string) {
 }
 
 function setAllocationComponents(strategyId: string, components: Record<string, AllocationComponent>, now: number) {
-  const set = db.prepare(`INSERT INTO allocation_components(strategy_id,token,principal_amount,held_fee_amount,updated_at) VALUES(?,?,?,?,?)
-    ON CONFLICT(strategy_id,token) DO UPDATE SET principal_amount=excluded.principal_amount,held_fee_amount=excluded.held_fee_amount,updated_at=excluded.updated_at`)
+  const set = db.prepare(`INSERT INTO allocation_components(strategy_id,token,principal_amount,held_fee_amount,held_profit_amount,updated_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(strategy_id,token) DO UPDATE SET principal_amount=excluded.principal_amount,held_fee_amount=excluded.held_fee_amount,held_profit_amount=excluded.held_profit_amount,updated_at=excluded.updated_at`)
   for (const [token, component] of Object.entries(components)) {
-    if (component.principal < 0n || component.heldFee < 0n) throw new Error('E_ALLOCATION_MISMATCH')
-    set.run(strategyId, token.toLowerCase(), component.principal.toString(), component.heldFee.toString(), now)
+    if (component.principal < 0n || component.heldFee < 0n || component.heldProfit < 0n) throw new Error('E_ALLOCATION_MISMATCH')
+    set.run(strategyId, token.toLowerCase(), component.principal.toString(), component.heldFee.toString(), component.heldProfit.toString(), now)
   }
 }
 
@@ -641,6 +795,67 @@ export function assertWalletAllocationUpdate(
     const token = rawToken.toLowerCase()
     const total = totals[token] ?? 0n
     if (total < 0n || total > (balances[token] ?? 0n)) throw new Error('E_ALLOCATION_MISMATCH')
+  }
+}
+
+/**
+ * Atomically move/release wallet-custodied strategy assets after a confirmed
+ * profit-withdrawal transaction. The optimistic component check prevents a
+ * stale API request from consuming principal, fees, or a newer harvest.
+ */
+export function commitProfitAllocationMutation(args: {
+  strategyId: string
+  walletId: string
+  expected: Record<string, AllocationComponent>
+  next: Record<string, AllocationComponent>
+  balances: Record<string, bigint>
+  ledger?: LedgerEntry[]
+}) {
+  const now = ts()
+  const current = strategyAllocationComponents(args.strategyId)
+  for (const [rawToken, expected] of Object.entries(args.expected)) {
+    const token = rawToken.toLowerCase()
+    const actual = current[token] ?? { principal: 0n, heldFee: 0n, heldProfit: 0n }
+    if (!sameAllocationComponent(actual, expected)) throw new Error('E_ALLOCATION_CHANGED')
+  }
+  const nextTotals = Object.fromEntries(Object.entries(args.next).map(([rawToken, component]) => {
+    if (component.principal < 0n || component.heldFee < 0n || component.heldProfit < 0n) throw new Error('E_ALLOCATION_MISMATCH')
+    return [rawToken.toLowerCase(), component.principal + component.heldFee + component.heldProfit]
+  }))
+  assertWalletAllocationUpdate(args.walletId, args.strategyId, args.balances, nextTotals)
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    // Recheck under the write transaction so an accounting mutation can never
+    // race between the optimistic read and the durable update.
+    const totals = strategyAllocations(args.strategyId)
+    const rows = db.prepare('SELECT token,principal_amount,held_fee_amount,held_profit_amount FROM allocation_components WHERE strategy_id=?').all(args.strategyId) as {
+      token: string; principal_amount: string; held_fee_amount: string; held_profit_amount: string
+    }[]
+    const stored = Object.fromEntries(rows.map((row) => [row.token.toLowerCase(), {
+      principal: BigInt(row.principal_amount), heldFee: BigInt(row.held_fee_amount), heldProfit: BigInt(row.held_profit_amount),
+    }]))
+    for (const [rawToken, expected] of Object.entries(args.expected)) {
+      const token = rawToken.toLowerCase()
+      const total = totals[token] ?? 0n
+      const actual = stored[token] && stored[token].principal + stored[token].heldFee + stored[token].heldProfit === total
+        ? stored[token]
+        : { principal: 0n, heldFee: total, heldProfit: 0n }
+      if (!sameAllocationComponent(actual, expected)) throw new Error('E_ALLOCATION_CHANGED')
+    }
+    const setAllocation = db.prepare(`INSERT INTO allocations(strategy_id,token,amount,updated_at) VALUES(?,?,?,?)
+      ON CONFLICT(strategy_id,token) DO UPDATE SET amount=excluded.amount,updated_at=excluded.updated_at`)
+    for (const [token, amount] of Object.entries(nextTotals)) setAllocation.run(args.strategyId, token, amount.toString(), now)
+    setAllocationComponents(args.strategyId, Object.fromEntries(Object.entries(args.next).map(([token, component]) => [token.toLowerCase(), component])), now)
+    if (args.ledger?.length) {
+      const insert = db.prepare(`INSERT OR IGNORE INTO ledger_entries(id,strategy_id,cycle_id,job_id,ts,block_number,tx_hash,kind,token,amount,quote_value,meta_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+      for (const entry of args.ledger) insert.run(entry.id, entry.strategyId, entry.cycleId ?? null, entry.jobId ?? null, entry.ts, entry.blockNumber ?? null, entry.txHash ?? null, entry.kind, entry.token ?? null, entry.amount ?? null, entry.quoteValue ?? null, JSON.stringify({ ...(entry.meta ?? {}), estimated: entry.estimated === true }))
+    }
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
   }
 }
 
@@ -831,6 +1046,11 @@ export function latestCompletedCycleAt(strategyId: string): number | undefined {
   return row.completed_at ?? undefined
 }
 
+export function latestCompletedCycleRange(strategyId: string): { completedAt: number; rangeScale: number } | undefined {
+  const row = db.prepare(`SELECT completed_at,range_scale FROM cycles WHERE strategy_id=? AND status='completed' AND new_token_id IS NOT NULL ORDER BY completed_at DESC,id DESC LIMIT 1`).get(strategyId) as { completed_at: number; range_scale: number } | undefined
+  return row && { completedAt: row.completed_at, rangeScale: Number(row.range_scale) || 1 }
+}
+
 export function latestFeeCollectionAt(strategyId: string): number | undefined {
   const row = db.prepare(`SELECT MAX(ts) AS collected_at FROM ledger_entries WHERE strategy_id=? AND kind='fee_gross'`).get(strategyId) as { collected_at: number | null }
   return row.collected_at ?? undefined
@@ -842,6 +1062,7 @@ export function commitRebalance(args: {
   oldTokenId: string
   newTokenId: string
   triggerSide: string
+  rangeScale?: number
   allocations: Record<string, bigint>
   allocationComponents?: Record<string, AllocationComponent>
   ledger: LedgerEntry[]
@@ -863,13 +1084,13 @@ export function commitRebalance(args: {
     for (const [token, value] of Object.entries(args.allocations)) setAllocation.run(args.config.id, token.toLowerCase(), value.toString(), now)
     if (args.allocationComponents) {
       for (const [token, component] of Object.entries(args.allocationComponents))
-        if (component.principal + component.heldFee !== (args.allocations[token.toLowerCase()] ?? args.allocations[token])) throw new Error('E_ALLOCATION_MISMATCH')
+        if (component.principal + component.heldFee + component.heldProfit !== (args.allocations[token.toLowerCase()] ?? args.allocations[token])) throw new Error('E_ALLOCATION_MISMATCH')
       setAllocationComponents(args.config.id, args.allocationComponents, now)
     }
     const job = db.prepare('SELECT created_at FROM jobs WHERE id=?').get(args.jobId) as { created_at: number } | undefined
     if (!job) throw new Error('E_JOB_MISSING')
-    db.prepare('INSERT INTO cycles(id,strategy_id,old_token_id,new_token_id,started_at,completed_at,trigger_side,status,tx_hashes_json) VALUES(?,?,?,?,?,?,?,?,?)').run(
-      `cycle-${args.jobId}`, args.config.id, args.oldTokenId, args.newTokenId, job.created_at, now, args.triggerSide, 'completed', JSON.stringify(args.txHashes),
+    db.prepare('INSERT INTO cycles(id,strategy_id,old_token_id,new_token_id,started_at,completed_at,trigger_side,range_scale,status,tx_hashes_json) VALUES(?,?,?,?,?,?,?,?,?,?)').run(
+      `cycle-${args.jobId}`, args.config.id, args.oldTokenId, args.newTokenId, job.created_at, now, args.triggerSide, args.rangeScale ?? 1, 'completed', JSON.stringify(args.txHashes),
     )
     const insertLedger = db.prepare(`INSERT OR IGNORE INTO ledger_entries(id,strategy_id,cycle_id,job_id,ts,block_number,tx_hash,kind,token,amount,quote_value,meta_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
     for (const entry of args.ledger) insertLedger.run(entry.id, entry.strategyId, entry.cycleId ?? `cycle-${args.jobId}`, args.jobId, entry.ts, entry.blockNumber ?? null, entry.txHash ?? null, entry.kind, entry.token ?? null, entry.amount ?? null, entry.quoteValue ?? null, JSON.stringify({ ...(entry.meta ?? {}), estimated: entry.estimated === true }))
@@ -942,7 +1163,7 @@ export function commitFeeCollection(args: {
     for (const [token, value] of Object.entries(args.allocations)) setAllocation.run(args.config.id, token.toLowerCase(), value.toString(), now)
     if (args.allocationComponents) {
       for (const [token, component] of Object.entries(args.allocationComponents))
-        if (component.principal + component.heldFee !== (args.allocations[token.toLowerCase()] ?? args.allocations[token])) throw new Error('E_ALLOCATION_MISMATCH')
+        if (component.principal + component.heldFee + component.heldProfit !== (args.allocations[token.toLowerCase()] ?? args.allocations[token])) throw new Error('E_ALLOCATION_MISMATCH')
       setAllocationComponents(args.config.id, args.allocationComponents, now)
     }
     const insertLedger = db.prepare(`INSERT OR IGNORE INTO ledger_entries(id,strategy_id,cycle_id,job_id,ts,block_number,tx_hash,kind,token,amount,quote_value,meta_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
@@ -958,9 +1179,65 @@ export function commitFeeCollection(args: {
   }
 }
 export function jobsForRecovery() {
-  return db.prepare(`SELECT j.id,j.strategy_id,j.plan_json,j.state,j.created_at,j.updated_at FROM jobs j WHERE j.state='recovery' ORDER BY j.updated_at DESC`).all() as {
-    id: string; strategy_id: string; plan_json: string; state: string; created_at: number; updated_at: number
+  return db.prepare(`SELECT j.id,j.strategy_id,j.plan_json,j.state,j.created_at,j.updated_at,j.recovery_attempts,j.recovery_error_streak,
+      j.recovery_last_error,j.recovery_next_at,j.recovery_quarantined_at,s.wallet_id
+    FROM jobs j JOIN strategies s ON s.id=j.strategy_id WHERE j.state='recovery'
+    ORDER BY COALESCE(j.recovery_next_at,0),j.updated_at,j.created_at`).all() as {
+    id: string; strategy_id: string; plan_json: string; state: string; created_at: number; updated_at: number; wallet_id: string | null
+    recovery_attempts: number; recovery_error_streak: number; recovery_last_error: string | null
+    recovery_next_at: number | null; recovery_quarantined_at: number | null
   }[]
+}
+
+export function recoveryAttemptReady(jobId: string, now = ts()): boolean {
+  const row = db.prepare('SELECT recovery_next_at,recovery_quarantined_at FROM jobs WHERE id=? AND state=\'recovery\'').get(jobId) as {
+    recovery_next_at: number | null; recovery_quarantined_at: number | null
+  } | undefined
+  return Boolean(row && row.recovery_quarantined_at === null && (row.recovery_next_at ?? 0) <= now)
+}
+
+export function clearRecoverySchedule(jobId: string) {
+  db.prepare(`UPDATE jobs SET recovery_attempts=0,recovery_error_streak=0,recovery_last_error=NULL,recovery_next_at=NULL,recovery_quarantined_at=NULL
+    WHERE id=?`).run(jobId)
+}
+
+export function scheduleRecoveryRetry(jobId: string, code: string, quarantineEligible: boolean) {
+  const now = ts()
+  const row = db.prepare(`SELECT strategy_id,recovery_attempts,recovery_error_streak,recovery_last_error FROM jobs WHERE id=? AND state='recovery'`).get(jobId) as {
+    strategy_id: string; recovery_attempts: number; recovery_error_streak: number; recovery_last_error: string | null
+  } | undefined
+  if (!row) throw new Error('E_RECOVERY_JOB')
+  const attempts = Number(row.recovery_attempts) + 1
+  const streak = row.recovery_last_error === code ? Number(row.recovery_error_streak) + 1 : 1
+  const delaySeconds = Math.min(300, 5 * (2 ** Math.min(attempts - 1, 6)))
+  const quarantined = quarantineEligible && streak >= 3
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare(`UPDATE jobs SET recovery_attempts=?,recovery_error_streak=?,recovery_last_error=?,recovery_next_at=?,recovery_quarantined_at=?,updated_at=? WHERE id=?`).run(
+      attempts, streak, code, now + delaySeconds, quarantined ? now : null, now, jobId,
+    )
+    if (quarantined) db.prepare(`UPDATE strategies SET state='recovery_quarantined',updated_at=? WHERE id=?`).run(now, row.strategy_id)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return { attempts, streak, delayMs: delaySeconds * 1_000, quarantined }
+}
+
+/** Allow one operator-requested attempt without discarding any chain facts. */
+export function reactivateRecoveryJob(jobId: string) {
+  const row = db.prepare(`SELECT strategy_id FROM jobs WHERE id=? AND state='recovery'`).get(jobId) as { strategy_id: string } | undefined
+  if (!row) throw new Error('E_RECOVERY_JOB')
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare(`UPDATE jobs SET recovery_next_at=NULL,recovery_quarantined_at=NULL WHERE id=?`).run(jobId)
+    db.prepare(`UPDATE strategies SET state='recovery',updated_at=? WHERE id=?`).run(ts(), row.strategy_id)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
 }
 export function recoveryJobById(id: string): RunnableJob | undefined {
   const row = db.prepare(`SELECT j.id,j.plan_json,s.config_json,s.wallet_id FROM jobs j JOIN strategies s ON s.id=j.strategy_id WHERE j.id=? AND j.state IN ('recovery','failed')`).get(id) as { id: string; plan_json: string; config_json: string; wallet_id: string | null } | undefined
@@ -1008,6 +1285,16 @@ export function jobSteps(jobId: string) {
 export function jobTransactions(jobId: string) {
   return db.prepare('SELECT * FROM job_transactions WHERE job_id=? ORDER BY step_index,tx_index').all(jobId) as Record<string, unknown>[]
 }
+
+export function reconcileJobTransaction(args: { jobId: string; stepIndex: number; txIndex: number; state: 'confirmed' | 'failed'; blockNumber?: bigint; errorCode?: string }) {
+  const now = ts()
+  db.prepare(`UPDATE job_transactions SET state=?,confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END,
+    block_number=COALESCE(?,block_number),error_code=CASE WHEN ?='failed' THEN ? ELSE NULL END
+    WHERE job_id=? AND step_index=? AND tx_index=?`).run(
+    args.state, args.state, now, args.blockNumber?.toString() ?? null, args.state, args.errorCode ?? null,
+    args.jobId, args.stepIndex, args.txIndex,
+  )
+}
 export type LatestJobSummary = {
   id: string
   state: string
@@ -1020,12 +1307,19 @@ export type LatestJobSummary = {
   errorCode?: string
   result?: Record<string, unknown>
   dryRun: boolean
+  recoveryAttempts: number
+  recoveryErrorStreak: number
+  recoveryLastError?: string
+  recoveryNextAt?: number
+  recoveryQuarantinedAt?: number
 }
 
 /** Compact user-facing progress/result derived only from durable job facts. */
 export function latestJobSummary(strategyId: string): LatestJobSummary | undefined {
-  const row = db.prepare(`SELECT id,state,created_at,updated_at FROM jobs WHERE strategy_id=? ORDER BY created_at DESC,id DESC LIMIT 1`).get(strategyId) as {
-    id: string; state: string; created_at: number; updated_at: number
+  const row = db.prepare(`SELECT id,state,created_at,updated_at,recovery_attempts,recovery_error_streak,recovery_last_error,recovery_next_at,recovery_quarantined_at
+    FROM jobs WHERE strategy_id=? ORDER BY created_at DESC,id DESC LIMIT 1`).get(strategyId) as {
+    id: string; state: string; created_at: number; updated_at: number; recovery_attempts: number; recovery_error_streak: number
+    recovery_last_error: string | null; recovery_next_at: number | null; recovery_quarantined_at: number | null
   } | undefined
   if (!row) return undefined
   const steps = db.prepare(`SELECT step_index,state,result_json,error_code FROM job_steps WHERE job_id=? ORDER BY step_index`).all(row.id) as {
@@ -1054,6 +1348,11 @@ export function latestJobSummary(strategyId: string): LatestJobSummary | undefin
     errorCode,
     result,
     dryRun: row.state === 'completed' && transactions.length === 0 && confirmedSteps === 1,
+    recoveryAttempts: Number(row.recovery_attempts),
+    recoveryErrorStreak: Number(row.recovery_error_streak),
+    recoveryLastError: row.recovery_last_error ?? undefined,
+    recoveryNextAt: row.recovery_next_at ?? undefined,
+    recoveryQuarantinedAt: row.recovery_quarantined_at ?? undefined,
   }
 }
 export const audit = (actor: string, action: string, targetType?: string, targetId?: string, detail: Record<string, unknown> = {}) =>

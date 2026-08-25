@@ -12,10 +12,12 @@ import { log, now, PORT, sleep, TUNE } from './config'
 import { safeError, usingPrivateRpc } from './rpc'
 import { backfillV3, syncV2, tailV3 } from './catalog'
 import { computeTvlFor, ensureTokenMeta, reprice, sweepState } from './state'
-import { gtCycle } from './stats'
+import { statsCycle } from './stats'
 import { logtail } from './logtail'
-import { activeAddrs, allPoolAddrs, db, frontpageAddrs, hotAddrs, kvGet, kvSet, poolCounts, poolsHitAgeMs } from './store'
+import { activeAddrs, allPoolAddrs, analyticsAddrs, captureTickSamples, db, frontpageAddrs, hotAddrs, kvGet, kvSet, poolCounts, poolsHitAgeMs, protocolPoolAddrs, pruneAnalytics } from './store'
 import { startApi } from './api'
+import { syncUp33Cl } from './up33'
+import { pc } from './rpc'
 
 let refreshQueue = Promise.resolve()
 
@@ -52,6 +54,7 @@ const timed = async <T,>(fn: () => Promise<T>): Promise<[T, number]> => {
 }
 
 async function initialRefresh(): Promise<void> {
+  const warmRestart = kvGet('ready') === '1'
   const [addedV3, msV3] = await timed(backfillV3)
   if (addedV3 > 0 || !kvGet('v3_boot_logged')) {
     log(`[catalog] univ3 backfill done: +${addedV3} pools (${(msV3 / 1000).toFixed(0)}s)`)
@@ -59,19 +62,38 @@ async function initialRefresh(): Promise<void> {
   }
   const [freshV2, msV2] = await timed(syncV2)
   if (freshV2.length) log(`[catalog] univ2 sync: +${freshV2.length} pairs (${(msV2 / 1000).toFixed(0)}s)`)
+  const freshUp33 = await syncUp33Cl()
   log('[catalog]', poolCounts().map((c) => `${c.proto}=${c.n}`).join(' '))
 
   const [metaN, msMeta] = await timed(ensureTokenMeta)
   if (metaN) log(`[tokens] metadata fetched for ${metaN} tokens (${(msMeta / 1000).toFixed(0)}s)`)
 
-  const all = allPoolAddrs()
-  const [swept, msSweep] = await timed(() => sweepState(all))
-  log(`[sweep] full ${swept}/${all.length} pools (${(msSweep / 1000).toFixed(0)}s)`)
-  if (all.length && !swept) throw new Error('initial state sweep updated no pools')
+  // A populated production database already has last-good state for the full
+  // catalog. Re-reading 400k+ pools after every process restart delays the API
+  // for many minutes and adds no safety; refresh every UP33 CL pool plus the
+  // bounded front-page/recommendation set. Long-tail active pools keep their
+  // regular scheduled sweep after boot.
+  // A genuinely cold database still performs the one required full census.
+  const sweepTargets = warmRestart
+    ? [...new Set([
+        ...protocolPoolAddrs('up33cl'),
+        ...frontpageAddrs(TUNE.frontpageN),
+        ...analyticsAddrs(TUNE.analyticsN),
+        ...freshUp33,
+      ])]
+    : allPoolAddrs()
+  const [swept, msSweep] = await timed(() => sweepState(sweepTargets))
+  log(`[sweep] ${warmRestart ? 'warm' : 'full'} ${swept}/${sweepTargets.length} pools (${(msSweep / 1000).toFixed(0)}s)`)
+  if (sweepTargets.length && !swept) throw new Error('initial state sweep updated no pools')
 
-  await gtCycle().catch((e) => log('[stats] gt cycle failed:', safeError(e)))
-  const pr = reprice()
-  log(`[price] ${pr.priced} tokens priced · tvl on ${pr.tvlPools} pools`)
+  await statsCycle().catch((e) => log('[stats] initial cycle failed:', safeError(e)))
+  if (warmRestart) {
+    computeTvlFor(sweepTargets)
+    log(`[price] warm TVL refreshed for ${sweepTargets.length} pools`)
+  } else {
+    const pr = reprice()
+    log(`[price] ${pr.priced} tokens priced · tvl on ${pr.tvlPools} pools`)
+  }
 
   kvSet('ready', '1')
   kvSet('snapshot_asof', String(now()))
@@ -92,7 +114,7 @@ function startLoops(): void {
     computeTvlFor(top)
   })
   loop('tail', TUNE.tailMs, async () => {
-    const fresh = [...(await tailV3()), ...(await syncV2())]
+    const fresh = [...(await tailV3()), ...(await syncV2()), ...(await syncUp33Cl())]
     if (fresh.length) {
       log(`[tail] ${fresh.length} new pools`)
       await ensureTokenMeta()
@@ -105,17 +127,25 @@ function startLoops(): void {
     await sweepState(hot)
     computeTvlFor(hot)
   })
+  loop('analytics', TUNE.analyticsMs, async () => {
+    const addrs = analyticsAddrs(TUNE.analyticsN)
+    if (!addrs.length) return
+    await sweepState(addrs)
+    computeTvlFor(addrs)
+    captureTickSamples(addrs, String(await pc.getBlockNumber()))
+    pruneAnalytics()
+  })
   loop('active', TUNE.fullSweepMs, async () => {
     const addrs = activeAddrs()
     const [swept, ms] = await timed(() => sweepState(addrs))
-    const p = reprice()
-    log(`[sweep] active ${swept}/${addrs.length} pools (${(ms / 1000).toFixed(0)}s) · ${p.priced} tokens priced · tvl on ${p.tvlPools}`)
+    computeTvlFor(addrs)
+    log(`[sweep] active ${swept}/${addrs.length} pools (${(ms / 1000).toFixed(0)}s)`)
   })
   loop('census', TUNE.censusMs, async () => {
     const addrs = allPoolAddrs()
     const [swept, ms] = await timed(() => sweepState(addrs))
-    const p = reprice()
-    log(`[sweep] census ${swept}/${addrs.length} pools (${(ms / 1000).toFixed(0)}s) · tvl on ${p.tvlPools}`)
+    computeTvlFor(addrs)
+    log(`[sweep] census ${swept}/${addrs.length} pools (${(ms / 1000).toFixed(0)}s)`)
     if (addrs.length && !swept) throw new Error('census state sweep updated no pools')
     kvSet('snapshot_asof', String(now()))
   })
@@ -123,8 +153,12 @@ function startLoops(): void {
     'stats',
     TUNE.statsMs,
     async () => {
-      await gtCycle()
-      reprice()
+      await statsCycle()
+      computeTvlFor([...new Set([
+        ...protocolPoolAddrs('up33cl'),
+        ...frontpageAddrs(TUNE.frontpageN),
+        ...analyticsAddrs(TUNE.analyticsN),
+      ])])
     },
     false, // off the RPC queue — paced GT HTTP must not block the frontpage sweep
   )

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto'
 import { parseStrategyConfig } from '../shared/strategy/schema'
 import { EXECUTOR } from './config'
-import { addWallet, audit, compoundHeldAllocations, createPlannedJob, executorPaused, jobSteps, jobTransactions, jobsForRecovery, latestJobSummary, listArchivedStrategies, listStrategies, listWallets, setExecutorPaused, setStrategyBaselineIfAbsent, setStrategyState, strategyById, updateWalletLabel, walletByAddress, walletById, upsertStrategy } from './store'
+import { addWallet, audit, clearRecoverySchedule, compoundHeldAllocations, createPlannedJob, executorPaused, jobSteps, jobTransactions, jobsForRecovery, latestJobSummary, listArchivedStrategies, listStrategies, listWallets, reactivateRecoveryJob, scheduleRecoveryRetry, setExecutorPaused, setStrategyBaselineIfAbsent, setStrategyState, strategyById, updateWalletLabel, walletByAddress, walletById, upsertStrategy } from './store'
 import { importPrivateKey, privateKeyAddress, tokenMatches, unlockPrivateKey } from './vault'
 import { inspectRecovery } from './recovery'
 import { executeRecovery, stopAndArchiveStrategy } from './recovery-runner'
@@ -13,6 +13,10 @@ import { archivedAccountingPerformance, cachedStrategyPerformance, observeStrate
 import { rpcMetrics } from './rpc-metrics'
 import { calendarRows, captureDailyPerformance } from './calendar'
 import { issueWalletChallenge, verifyWalletChallenge, walletSession, WalletAuthError } from './wallet-auth'
+import { recommendations } from './recommendation'
+import type { RecommendationMode, RecommendationRisk } from '../shared/recommendation/types'
+import { isTransientRecoveryFailure } from './recovery-policy'
+import { withdrawRetainedProfit } from './profit-withdrawal'
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 const importAttempts = new Map<string, number[]>()
@@ -139,6 +143,18 @@ export function startApi() {
         json(res, 200, rpcMetrics())
         return
       }
+      if (req.method === 'GET' && url.pathname === '/v1/recommendations') {
+        const capitalUsd = Number(url.searchParams.get('capitalUsd') ?? 1_000)
+        const mode = (url.searchParams.get('mode') ?? 'fees') as RecommendationMode
+        const risk = (url.searchParams.get('risk') ?? 'balanced') as RecommendationRisk
+        const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 3, 1), 10)
+        if (!Number.isFinite(capitalUsd) || capitalUsd < 10 || capitalUsd > 1_000_000)
+          return json(res, 400, { error: 'capitalUsd must be between 10 and 1000000' })
+        if (!['fees', 'rewards'].includes(mode)) return json(res, 400, { error: 'invalid recommendation mode' })
+        if (!['conservative', 'balanced', 'aggressive'].includes(risk)) return json(res, 400, { error: 'invalid recommendation risk' })
+        json(res, 200, await recommendations({ capitalUsd, mode, risk, limit }))
+        return
+      }
       if (req.method === 'POST' && url.pathname === '/v1/wallets/import') {
         if (!requireAdmin(auth, res)) return
         if (!allowPrivateKeyImport(req)) return json(res, 429, { error: 'wallet import rate limit exceeded' })
@@ -174,7 +190,14 @@ export function startApi() {
         return
       }
       if (req.method === 'GET' && url.pathname === '/v1/strategies') {
-        json(res, 200, { strategies: listStrategies().filter((row) => ownedBy(auth, row.config.owner)).map((row) => ({ ...row, latestJob: latestJobSummary(row.config.id) })) })
+        const strategies = listStrategies().filter((row) => ownedBy(auth, row.config.owner))
+        const archivedStrategyIds = listArchivedStrategies()
+          .filter((row) => ownedBy(auth, row.config.owner))
+          .map((row) => row.config.id)
+        json(res, 200, {
+          strategies: strategies.map((row) => ({ ...row, latestJob: latestJobSummary(row.config.id) })),
+          archivedStrategyIds,
+        })
         return
       }
       if (req.method === 'GET' && url.pathname === '/v1/performance') {
@@ -221,6 +244,11 @@ export function startApi() {
           state: job.state,
           createdAt: job.created_at,
           updatedAt: job.updated_at,
+          recoveryAttempts: job.recovery_attempts,
+          recoveryErrorStreak: job.recovery_error_streak,
+          recoveryLastError: job.recovery_last_error ?? undefined,
+          recoveryNextAt: job.recovery_next_at ?? undefined,
+          recoveryQuarantinedAt: job.recovery_quarantined_at ?? undefined,
           plan: JSON.parse(job.plan_json),
           steps: jobSteps(job.id),
           transactions: jobTransactions(job.id),
@@ -231,7 +259,7 @@ export function startApi() {
       if (req.method === 'POST' && /^\/v1\/jobs\/[^/]+\/recover$/.test(url.pathname)) {
         if (!requireAdmin(auth, res)) return
         const id = decodeURIComponent(url.pathname.slice('/v1/jobs/'.length, -'/recover'.length))
-        const inspection = await inspectRecovery(id)
+        const inspection = await inspectRecovery(id, { reconcile: true })
         audit('api', 'recovery_inspected', 'job', id, { disposition: inspection.disposition })
         json(res, 200, { recovery: inspection })
         return
@@ -239,8 +267,19 @@ export function startApi() {
       if (req.method === 'POST' && /^\/v1\/jobs\/[^/]+\/resume$/.test(url.pathname)) {
         if (!requireAdmin(auth, res)) return
         const id = decodeURIComponent(url.pathname.slice('/v1/jobs/'.length, -'/resume'.length))
-        const result = await executeRecovery(id)
-        json(res, 200, { recovery: result })
+        reactivateRecoveryJob(id)
+        try {
+          const result = await executeRecovery(id)
+          clearRecoverySchedule(id)
+          json(res, 200, { recovery: result })
+        } catch (error) {
+          const code = error instanceof Error ? error.message.slice(0, 120) : 'E_RECOVERY'
+          const retry = scheduleRecoveryRetry(id, code, !isTransientRecoveryFailure(error))
+          audit('api', retry.quarantined ? 'manual_recovery_quarantined' : 'manual_recovery_failed', 'job', id, {
+            code, attempts: retry.attempts, streak: retry.streak, delayMs: retry.delayMs,
+          })
+          throw error
+        }
         return
       }
       if (req.method === 'POST' && /^\/v1\/strategies\/[^/]+\/plan$/.test(url.pathname)) {
@@ -248,7 +287,7 @@ export function startApi() {
         const id = decodeURIComponent(url.pathname.slice('/v1/strategies/'.length, -'/plan'.length))
         const row = strategyById(id)
         if (!row) return json(res, 404, { error: 'strategy not found' })
-        if (['planned', 'executing', 'recovery'].includes(row.state)) return json(res, 409, { error: 'strategy has an open execution job' })
+        if (['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(row.state)) return json(res, 409, { error: 'strategy has an open execution job' })
         const preflight = await preflightStrategy(row.config)
         json(res, 200, { plan: preflight.plan, preflight })
         return
@@ -282,6 +321,16 @@ export function startApi() {
         json(res, 200, { state: 'monitoring', preflight })
         return
       }
+      if (req.method === 'POST' && /^\/v1\/strategies\/[^/]+\/withdraw-profit$/.test(url.pathname)) {
+        if (!requireAdmin(auth, res)) return
+        const id = decodeURIComponent(url.pathname.slice('/v1/strategies/'.length, -'/withdraw-profit'.length))
+        const row = strategyById(id)
+        if (!row) return json(res, 404, { error: 'strategy not found' })
+        const body = await readJson(req)
+        if (body.target !== 'USDG' && body.target !== 'WETH' && body.target !== 'ETH') return json(res, 400, { error: 'target must be USDG, WETH, or ETH' })
+        json(res, 200, { withdrawal: await withdrawRetainedProfit(id, body.target) })
+        return
+      }
       if (req.method === 'DELETE' && /^\/v1\/strategies\/[^/]+$/.test(url.pathname)) {
         if (!requireAdmin(auth, res)) return
         const id = decodeURIComponent(url.pathname.slice('/v1/strategies/'.length))
@@ -308,7 +357,7 @@ export function startApi() {
         const config = parseStrategyConfig(body)
         if (config.id !== id) return json(res, 400, { error: 'strategy id mismatch' })
         const current = listStrategies().find((row) => row.config.id === id)
-        if (current && ['planned', 'executing', 'recovery'].includes(current.state)) return json(res, 409, { error: 'strategy has an open execution job' })
+        if (current && ['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(current.state)) return json(res, 409, { error: 'strategy has an open execution job' })
         if (current && config.revision !== current.config.revision + 1) return json(res, 409, { error: 'strategy revision conflict' })
         if (config.execution.walletId) {
           const wallet = walletById(config.execution.walletId)

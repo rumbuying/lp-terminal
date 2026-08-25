@@ -21,13 +21,14 @@ const low = (value: string) => value.toLowerCase()
  * state-changing transaction; post-decrease calls remain receipt-gated by the
  * runner because simulating them against pre-decrease state would be false.
  */
-export async function preflightStrategy(config: StrategyConfig) {
+export async function preflightStrategy(config: StrategyConfig, options: { rangeScale?: number } = {}) {
   const snapshot = await readStrategySnapshot(config)
   const pool = await readPoolState(config)
   const observedSide = rangeSide(snapshot.tick, snapshot.tickLower, snapshot.tickUpper)
   const triggerSide = observedSide === 'in' ? 'manual' : observedSide
-  const plan = makeRebalancePlan({ config, snapshot, triggerSide })
-  const range = freshRange(config, snapshot, pool.tick, triggerSide)
+  const rangeScale = options.rangeScale ?? 1
+  const plan = makeRebalancePlan({ config, snapshot, triggerSide, rangeScale })
+  const range = freshRange(config, snapshot, pool.tick, triggerSide, rangeScale)
   const trackedTokens = [...new Set([...walletAllocationTokens(config.execution.walletId!), low(snapshot.token0), low(snapshot.token1)])] as Address[]
   const [balances, collectableFees, gasPrice, nativeBalance, npmAllowance0, npmAllowance1, routerAllowance0, routerAllowance1, nativeAllowance0, nativeAllowance1, uniAllowance0, uniAllowance1] = await Promise.all([
     readTokenBalances(config.owner, trackedTokens),

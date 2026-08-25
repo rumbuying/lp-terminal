@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { formatUnits, parseUnits, type Address } from 'viem'
 import { ADDR, CHAIN_ID, NATIVE } from '../config/addresses'
 import { ENV } from '../config/env'
-import { simulateClAdd, simulateV2Add, fmtApr } from '../lib/apr'
+import { simulateClAdd, simulateV2Add, fmtApr, volumeWindowLabel, type VolumeWindow } from '../lib/apr'
 import { applySlippage } from '../lib/clmath'
 import { fmtAmount, fmtUsd } from '../lib/format'
 import { autoSlippage, retrySlippage, slippagePctToBps, slippageTone, SLIPPAGE_CHOICES, type AutoSlippage } from '../lib/swapGate'
@@ -50,6 +50,7 @@ export function ZapPanel(props: {
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  volumeWindow?: VolumeWindow
 }) {
   const { target, t0, t1 } = props
   const { t } = useTranslation()
@@ -187,6 +188,7 @@ export function ZapPanel(props: {
         stat: props.stat,
         upUsd: props.upUsd,
         wethUsd: props.wethUsd,
+        volumeWindow: props.volumeWindow,
       })
     return simulateV2Add({
       pool: target.pool,
@@ -196,8 +198,9 @@ export function ZapPanel(props: {
       dec1: t1.decimals,
       stat: props.stat,
       upUsd: props.upUsd,
+      volumeWindow: props.volumeWindow,
     })
-  }, [p, target, t0, t1, props.stat, props.upUsd, props.wethUsd])
+  }, [p, target, t0, t1, props.stat, props.upUsd, props.wethUsd, props.volumeWindow])
 
   // impact-vs-band honesty: a swap that eats a big slice of the band's width
   // will land the deposit off-ratio (dust) or out of band entirely
@@ -477,7 +480,7 @@ export function ZapPanel(props: {
                     {Number.isFinite(sim.feeApr) && (
                       <>
                         {' '}
-                        · {t('add.projFeeApr')}
+                        · {t('add.projFeeAprWindow', { window: volumeWindowLabel(props.volumeWindow ?? 'h24') })}
                         {pool.protocol === 'up33' ? <span className="dim"> {t('add.projIfUnstaked')}</span> : ''} ≈{' '}
                         {fmtApr(sim.feeApr)}
                       </>

@@ -492,11 +492,21 @@ try {
     return config
   }
 
-  const runScenario = async (suffix: string, tokenId: bigint, failure?: typeof failOnce, tick = 101, protocol: 'up33' | 'univ3' = 'univ3', repriceBeforeRecovery = false, disableAfter = true, initialOwed0 = 0n) => {
+  const runScenario = async (suffix: string, tokenId: bigint, failure?: typeof failOnce, tick = 101, protocol: 'up33' | 'univ3' = 'univ3', repriceBeforeRecovery = false, disableAfter = true, initialOwed0 = 0n, baselineValueQuoteRaw?: string) => {
     poolTick = tick
     lastEthCallError = undefined
     const config = createStrategy(suffix, tokenId, protocol)
     positions.get(tokenId)!.owed0 = initialOwed0
+    if (baselineValueQuoteRaw) store.setStrategyBaselineIfAbsent({
+      strategyId: config.id,
+      valueQuoteRaw: baselineValueQuoteRaw,
+      quoteToken: config.quoteToken,
+      observedAt: now,
+      blockNumber: blockNumber.toString(),
+      tokenId: tokenId.toString(),
+      tick,
+      source: 'strategy_start',
+    })
     failOnce = failure
     await monitorOnce({ ignoreSchedule: true })
     const plannedState = store.strategyById(config.id)?.state
@@ -529,6 +539,15 @@ try {
     const completed = store.db.prepare(`SELECT id FROM jobs WHERE strategy_id=? AND state='completed' ORDER BY created_at DESC LIMIT 1`).get(config.id) as { id: string }
     const steps = store.jobSteps(completed.id)
     assert.equal(steps.filter((step) => step.state === 'confirmed').length, 12)
+    const confirmedSwaps = store.jobTransactions(completed.id).filter((tx) => tx.state === 'confirmed' && Number(tx.step_index) === 5)
+    if (confirmedSwaps.length) {
+      const durablePlan = store.getJobContext<{ swaps: { txIndex: number; quotedOut: string; minOut?: string; route?: { minOut?: string } }[] }>(completed.id, 'swap_plan')!
+      for (const tx of confirmedSwaps) {
+        const record = durablePlan.swaps.find((item) => item.txIndex === Number(tx.tx_index))
+        assert.ok(record?.minOut, `missing executable minOut for ${completed.id}:${String(tx.tx_index)}`)
+        assert.equal(record?.route?.minOut, record?.minOut)
+      }
+    }
     const next = store.strategyById(config.id)!
     assert.notEqual(next.config.activeTokenId, tokenId.toString())
     assert.equal(allowance(token0, owner, config.positionManager), 0n)
@@ -547,12 +566,16 @@ try {
 
   await runScenario('success', 1n)
   await runScenario('lower-success', 12n, undefined, -101)
-  const carryConfig = await runScenario('principal-carry', 22n, undefined, 101, 'univ3', false, false, 100n)
+  const carryConfig = await runScenario('principal-carry', 22n, undefined, 101, 'univ3', false, false, 100n, '1000000000')
   const firstCarry = store.strategyAllocationComponents(carryConfig.id)
   assert.equal(firstCarry[low(token0)].principal, 1n)
   assert.equal(firstCarry[low(token1)].principal, 1n)
   assert.equal(firstCarry[low(token0)].heldFee, 0n)
   assert.equal(firstCarry[low(token1)].heldFee, 100n)
+  const losingCarryPerformance = await strategyPerformance(carryConfig, 'monitoring')
+  const losingCarryCycle = losingCarryPerformance.cycles[0]
+  assert.ok(BigInt(losingCarryPerformance.summary.pnlQuoteRaw!) < 0n)
+  assert.ok(BigInt(losingCarryCycle.netFeesQuoteRaw) < BigInt(losingCarryCycle.gasCostQuoteRaw) + BigInt(losingCarryCycle.executionCostQuoteRaw))
   poolTick = -1_000
   await monitorOnce({ ignoreSchedule: true })
   assert.equal(store.strategyById(carryConfig.id)?.state, 'planned')
@@ -563,8 +586,32 @@ try {
   assert.equal(secondCarry[low(token1)].principal, 1n)
   assert.equal(secondCarry[low(token0)].heldFee, 0n)
   assert.equal(secondCarry[low(token1)].heldFee, 100n)
+  const widenedCycle = store.db.prepare(`SELECT range_scale FROM cycles WHERE strategy_id=? ORDER BY completed_at DESC,id DESC LIMIT 1`).get(carryConfig.id) as { range_scale: number }
+  assert.equal(widenedCycle.range_scale, 4)
   store.upsertStrategy({ ...store.strategyById(carryConfig.id)!.config, enabled: false })
   poolTick = 101
+
+  const profitBase = createStrategy('profit-harvest', 28n)
+  const profitConfig = { ...profitBase, capitalProtection: { enabled: true, profitThresholdUsdg: '0.000001' } }
+  store.upsertStrategy(profitConfig)
+  store.setStrategyBaselineIfAbsent({
+    strategyId: profitConfig.id,
+    valueQuoteRaw: '4',
+    quoteToken: profitConfig.quoteToken,
+    observedAt: now,
+    blockNumber: '10000',
+    tokenId: '28',
+    tick: poolTick,
+    source: 'strategy_start',
+  })
+  await monitorOnce({ ignoreSchedule: true })
+  assert.equal(store.strategyById(profitConfig.id)?.state, 'planned')
+  await runOnce()
+  await waitForState(profitConfig.id, 'monitoring')
+  const profitParts = store.strategyAllocationComponents(profitConfig.id)
+  assert.ok((profitParts[low(token0)]?.heldProfit ?? 0n) + (profitParts[low(token1)]?.heldProfit ?? 0n) > 0n)
+  assert.equal((store.db.prepare(`SELECT COUNT(*) AS n FROM ledger_entries WHERE strategy_id=? AND kind='profit_harvest'`).get(profitConfig.id) as { n: number }).n, 2)
+  store.upsertStrategy({ ...store.strategyById(profitConfig.id)!.config, enabled: false })
 
   const runStakedScenario = async (suffix: string, tokenId: bigint, failure?: typeof failOnce | 'pause_after_multicall', expectedRecovery = 'resume_staking_exit', lowTransactionMode = false, rewardAmount = 500n) => {
     const base = createStrategy(suffix, tokenId, 'up33')
@@ -844,6 +891,20 @@ try {
   assert.equal((store.db.prepare('SELECT state FROM jobs WHERE id=?').get(stoppedJob.id) as { state: string }).state, 'cancelled')
   assert.equal(store.strategyAllocations(stopped.id)[low(token1)], 1_000n)
 
+  const stoppedAfterSwap = createStrategy('stop-after-swap', 38n)
+  failOnce = 'mint_before'
+  await monitorOnce({ ignoreSchedule: true })
+  await runOnce()
+  await waitForState(stoppedAfterSwap.id, 'recovery')
+  const stoppedAfterSwapJob = store.jobsForRecovery().find((row) => row.strategy_id === stoppedAfterSwap.id)!
+  assert.equal((await inspectRecovery(stoppedAfterSwapJob.id)).disposition, 'resume_from_wallet')
+  const nonceBeforeInterruptedStop = chainNonce
+  assert.deepEqual(await stopAndArchiveStrategy(stoppedAfterSwap.id), {
+    archived: true, chainTransactions: 0, assetLocation: 'recovery_interrupted',
+  })
+  assert.equal(chainNonce, nonceBeforeInterruptedStop)
+  assert.equal(store.strategyById(stoppedAfterSwap.id), undefined)
+
   const wrongRolesBase = createStrategy('wrong-weth-roles-recovery', 20n)
   const wrongRoles = { ...wrongRolesBase, riskToken: token1, quoteToken: token0 }
   store.upsertStrategy(wrongRoles)
@@ -941,9 +1002,9 @@ try {
   await runOnce()
   await waitForState(restart.id, 'recovery')
   const restartJob = store.jobsForRecovery().find((row) => row.strategy_id === restart.id)!
-  // The rejected transaction already has a durable local hash. Let a later
-  // executor job safely consume that nonce with different calldata; recovery
-  // must prove the known replacement and classify the original as absent.
+  // Reconcile the rejected durable hash before another strategy may reuse the
+  // wallet nonce. An uncertain sending/sent row is the only wallet-wide gate.
+  assert.equal((await inspectRecovery(restartJob.id, { reconcile: true })).disposition, 'restart_safe')
   await runScenario('known-nonce-replacement', 20n)
   assert.equal((await inspectRecovery(restartJob.id)).disposition, 'restart_safe')
   await executeRecovery(restartJob.id)

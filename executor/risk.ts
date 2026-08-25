@@ -2,17 +2,19 @@ import type { Address } from 'viem'
 import { fixedTickRange, quoteRangeToTicks } from '../shared/strategy/range'
 import type { StrategyConfig, StrategyPositionSnapshot, TriggerSide } from '../shared/strategy/types'
 import { tickToPrice } from '../src/lib/clmath'
+import { scaledRangePcts } from '../shared/strategy/adaptive-range'
 
 const Q192 = 1n << 192n
 const low = (value: string) => value.toLowerCase()
 
-export function freshRange(config: StrategyConfig, snapshot: StrategyPositionSnapshot, tick: number, side?: TriggerSide) {
+export function freshRange(config: StrategyConfig, snapshot: StrategyPositionSnapshot, tick: number, side?: TriggerSide, rangeScale = 1) {
   if (config.range.mode === 'fixed_ticks') return fixedTickRange(config.range.tickLower, config.range.tickUpper, snapshot.tickSpacing)
   const token0IsRisk = low(snapshot.token0) === low(config.riskToken)
   const token1Per0 = tickToPrice(tick, snapshot.token0Decimals, snapshot.token1Decimals)
   const policy = side === 'lower' ? config.boundary.lower : side === 'upper' ? config.boundary.upper : undefined
-  const lowerPct = policy?.action === 'skew_recenter' ? config.range.defensiveLowerPct ?? config.range.lowerPct : config.range.lowerPct
-  const upperPct = policy?.action === 'skew_recenter' ? config.range.defensiveUpperPct ?? config.range.upperPct : config.range.upperPct
+  const baseLowerPct = policy?.action === 'skew_recenter' ? config.range.defensiveLowerPct ?? config.range.lowerPct : config.range.lowerPct
+  const baseUpperPct = policy?.action === 'skew_recenter' ? config.range.defensiveUpperPct ?? config.range.upperPct : config.range.upperPct
+  const { lowerPct, upperPct } = scaledRangePcts(baseLowerPct, baseUpperPct, rangeScale)
   return quoteRangeToTicks({
     centerQuotePerRisk: token0IsRisk ? token1Per0 : 1 / token1Per0,
     lowerPct,

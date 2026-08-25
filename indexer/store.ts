@@ -15,11 +15,13 @@ PRAGMA synchronous = NORMAL;
 
 CREATE TABLE IF NOT EXISTS pools (
   address       TEXT PRIMARY KEY,          -- lowercase
-  proto         TEXT NOT NULL,             -- 'univ2' | 'univ3'
+  proto         TEXT NOT NULL,             -- 'univ2' | 'univ3' | 'up33cl'
   token0        TEXT NOT NULL,             -- lowercase
   token1        TEXT NOT NULL,
   fee_ppm       INTEGER NOT NULL,          -- univ2 fixed 3000 (0.30%)
+  unstaked_fee_ppm INTEGER NOT NULL DEFAULT 0,
   tick_spacing  INTEGER,                   -- univ3 only
+  gauge         TEXT,
   created_block INTEGER,                   -- univ3 only (from PoolCreated)
   pair_index    INTEGER,                   -- univ2 only (allPairs index)
   added_ts      INTEGER NOT NULL
@@ -43,6 +45,10 @@ CREATE TABLE IF NOT EXISTS pool_state (
   sqrt_price   TEXT,    -- univ3
   tick         INTEGER, -- univ3
   liquidity    TEXT,    -- univ3 in-range L
+  staked_liquidity TEXT NOT NULL DEFAULT '0', -- UP33 CL active staked L
+  reward_rate  TEXT NOT NULL DEFAULT '0',
+  period_finish INTEGER NOT NULL DEFAULT 0,
+  gauge_alive INTEGER NOT NULL DEFAULT 0,
   reserve0     TEXT NOT NULL DEFAULT '0', -- univ2: reserves; univ3: erc20 balances (TVL basis)
   reserve1     TEXT NOT NULL DEFAULT '0',
   total_supply TEXT,    -- univ2 LP supply
@@ -66,6 +72,31 @@ CREATE TABLE IF NOT EXISTS pool_stats (
 );
 
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS pool_market_snapshots (
+  pool TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  vol5m_usd REAL,
+  vol1h_usd REAL,
+  vol6h_usd REAL,
+  vol24h_usd REAL,
+  tvl_usd REAL,
+  tick INTEGER,
+  liquidity TEXT,
+  fee_ppm INTEGER NOT NULL,
+  PRIMARY KEY(pool, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_market_snapshots_ts ON pool_market_snapshots(ts);
+
+CREATE TABLE IF NOT EXISTS pool_tick_samples (
+  pool TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  tick INTEGER NOT NULL,
+  block_number TEXT NOT NULL,
+  PRIMARY KEY(pool, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_tick_samples_ts ON pool_tick_samples(ts);
 `)
 
 // Existing production databases predate the intraday windows. CREATE TABLE IF
@@ -77,6 +108,14 @@ const poolStatColumns = new Set(
 for (const column of ['vol5m_usd', 'vol1h_usd', 'vol6h_usd']) {
   if (!poolStatColumns.has(column)) db.exec(`ALTER TABLE pool_stats ADD COLUMN ${column} REAL`)
 }
+const poolColumns = new Set((db.prepare('PRAGMA table_info(pools)').all() as { name: string }[]).map((column) => column.name))
+if (!poolColumns.has('unstaked_fee_ppm')) db.exec('ALTER TABLE pools ADD COLUMN unstaked_fee_ppm INTEGER NOT NULL DEFAULT 0')
+if (!poolColumns.has('gauge')) db.exec('ALTER TABLE pools ADD COLUMN gauge TEXT')
+const stateColumns = new Set((db.prepare('PRAGMA table_info(pool_state)').all() as { name: string }[]).map((column) => column.name))
+if (!stateColumns.has('staked_liquidity')) db.exec("ALTER TABLE pool_state ADD COLUMN staked_liquidity TEXT NOT NULL DEFAULT '0'")
+if (!stateColumns.has('reward_rate')) db.exec("ALTER TABLE pool_state ADD COLUMN reward_rate TEXT NOT NULL DEFAULT '0'")
+if (!stateColumns.has('period_finish')) db.exec('ALTER TABLE pool_state ADD COLUMN period_finish INTEGER NOT NULL DEFAULT 0')
+if (!stateColumns.has('gauge_alive')) db.exec('ALTER TABLE pool_state ADD COLUMN gauge_alive INTEGER NOT NULL DEFAULT 0')
 
 // ---- kv ----
 const kvGetQ = db.prepare('SELECT v FROM kv WHERE k = ?')
@@ -91,11 +130,13 @@ const insPoolQ = db.prepare(`
 /** returns true when the pool is new */
 export function insertPool(p: {
   address: string
-  proto: 'univ2' | 'univ3'
+  proto: 'univ2' | 'univ3' | 'up33cl'
   token0: string
   token1: string
   feePpm: number
+  unstakedFeePpm?: number
   tickSpacing?: number
+  gauge?: string
   createdBlock?: number
   pairIndex?: number
 }): boolean {
@@ -110,21 +151,29 @@ export function insertPool(p: {
     p.pairIndex ?? null,
     now(),
   )
+  if (p.proto === 'up33cl') updatePoolStatic(p.address, p.feePpm, p.unstakedFeePpm ?? 0, p.tickSpacing ?? null, p.gauge)
   return Number(r.changes) > 0
 }
 
 export type PoolRow = {
   address: string
-  proto: 'univ2' | 'univ3'
+  proto: 'univ2' | 'univ3' | 'up33cl'
   token0: string
   token1: string
   fee_ppm: number
+  unstaked_fee_ppm: number
   tick_spacing: number | null
+  gauge: string | null
 }
-const poolsByAddrQ = db.prepare('SELECT address, proto, token0, token1, fee_ppm, tick_spacing FROM pools WHERE address = ?')
+const poolsByAddrQ = db.prepare('SELECT address, proto, token0, token1, fee_ppm, unstaked_fee_ppm, tick_spacing, gauge FROM pools WHERE address = ?')
 export const poolRow = (addr: string) => poolsByAddrQ.get(addr.toLowerCase()) as PoolRow | undefined
+const updatePoolStaticQ = db.prepare('UPDATE pools SET fee_ppm=?,unstaked_fee_ppm=?,tick_spacing=?,gauge=? WHERE address=?')
+export const updatePoolStatic = (addr: string, feePpm: number, unstakedFeePpm: number, tickSpacing: number | null, gauge?: string) =>
+  void updatePoolStaticQ.run(feePpm, unstakedFeePpm, tickSpacing, gauge?.toLowerCase() ?? null, addr.toLowerCase())
 export const allPoolAddrs = (): string[] =>
   (db.prepare('SELECT address FROM pools').all() as { address: string }[]).map((r) => r.address)
+export const protocolPoolAddrs = (proto: PoolRow['proto']): string[] =>
+  (db.prepare('SELECT address FROM pools WHERE proto=?').all(proto) as { address: string }[]).map((r) => r.address)
 export const poolCounts = () =>
   db.prepare(`SELECT proto, COUNT(*) AS n FROM pools GROUP BY proto`).all() as { proto: string; n: number }[]
 
@@ -182,20 +231,25 @@ export const missingMetaTokens = (): string[] =>
 
 // ---- pool_state ----
 const upStateQ = db.prepare(`
-  INSERT INTO pool_state (address, sqrt_price, tick, liquidity, reserve0, reserve1, total_supply, updated)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO pool_state (address, sqrt_price, tick, liquidity, staked_liquidity, reward_rate, period_finish, gauge_alive, reserve0, reserve1, total_supply, updated)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(address) DO UPDATE SET sqrt_price = excluded.sqrt_price, tick = excluded.tick,
-    liquidity = excluded.liquidity, reserve0 = excluded.reserve0, reserve1 = excluded.reserve1,
+    liquidity = excluded.liquidity, staked_liquidity=excluded.staked_liquidity, reward_rate=excluded.reward_rate,
+    period_finish=excluded.period_finish,gauge_alive=excluded.gauge_alive,reserve0 = excluded.reserve0, reserve1 = excluded.reserve1,
     total_supply = excluded.total_supply, updated = excluded.updated`)
 export const upsertState = (
   addr: string,
-  s: { sqrtPrice?: bigint; tick?: number; liquidity?: bigint; reserve0: bigint; reserve1: bigint; totalSupply?: bigint },
+  s: { sqrtPrice?: bigint; tick?: number; liquidity?: bigint; stakedLiquidity?: bigint; rewardRate?: bigint; periodFinish?: bigint; gaugeAlive?: boolean; reserve0: bigint; reserve1: bigint; totalSupply?: bigint },
 ) =>
   void upStateQ.run(
     addr.toLowerCase(),
     s.sqrtPrice !== undefined ? String(s.sqrtPrice) : null,
     s.tick ?? null,
     s.liquidity !== undefined ? String(s.liquidity) : null,
+    String(s.stakedLiquidity ?? 0n),
+    String(s.rewardRate ?? 0n),
+    Number(s.periodFinish ?? 0n),
+    s.gaugeAlive ? 1 : 0,
     String(s.reserve0),
     String(s.reserve1),
     s.totalSupply !== undefined ? String(s.totalSupply) : null,
@@ -219,8 +273,9 @@ export const upsertStats = (
   txns24h: number | null,
   liqUsd: number | null,
   source: string,
-) =>
-  void upStatsQ.run(
+) => {
+  const timestamp = now()
+  upStatsQ.run(
     addr.toLowerCase(),
     volumes.m5,
     volumes.h1,
@@ -229,8 +284,45 @@ export const upsertStats = (
     txns24h,
     liqUsd,
     source,
-    now(),
+    timestamp,
   )
+  const bucket = Math.floor(timestamp / 300) * 300
+  db.prepare(`INSERT INTO pool_market_snapshots(pool,ts,source,vol5m_usd,vol1h_usd,vol6h_usd,vol24h_usd,tvl_usd,tick,liquidity,fee_ppm)
+    SELECT p.address,?, ?,?,?,?, ?,COALESCE(s.tvl_usd,?),s.tick,s.liquidity,p.fee_ppm
+    FROM pools p LEFT JOIN pool_state s ON s.address=p.address WHERE p.address=?
+    ON CONFLICT(pool,ts) DO UPDATE SET source=excluded.source,vol5m_usd=excluded.vol5m_usd,vol1h_usd=excluded.vol1h_usd,
+      vol6h_usd=excluded.vol6h_usd,vol24h_usd=excluded.vol24h_usd,tvl_usd=excluded.tvl_usd,tick=excluded.tick,liquidity=excluded.liquidity,fee_ppm=excluded.fee_ppm`)
+    .run(bucket, source, volumes.m5, volumes.h1, volumes.h6, volumes.h24, liqUsd, addr.toLowerCase())
+}
+
+export const analyticsAddrs = (n: number): string[] => {
+  const feeRows = db.prepare(`SELECT p.address FROM pools p JOIN pool_state s ON s.address=p.address LEFT JOIN pool_stats st ON st.address=p.address
+    WHERE p.proto IN ('univ3','up33cl') AND COALESCE(s.tvl_usd,st.liq_usd,0)>=10000 AND COALESCE(st.vol24h_usd,0)>=10000
+    ORDER BY (
+      MIN(
+        COALESCE(st.vol1h_usd,st.vol24h_usd/24.0),
+        COALESCE(st.vol6h_usd/6.0,st.vol24h_usd/24.0),
+        st.vol24h_usd/24.0
+      ) * p.fee_ppm / MAX(COALESCE(s.tvl_usd,st.liq_usd),1)
+    ) DESC LIMIT ?`).all(n) as { address: string }[]
+  const rewardRows = db.prepare(`SELECT p.address FROM pools p JOIN pool_state s ON s.address=p.address JOIN pool_stats st ON st.address=p.address
+    WHERE p.proto='up33cl' AND s.gauge_alive=1 AND s.period_finish>? AND CAST(s.reward_rate AS REAL)>0
+      AND COALESCE(s.tvl_usd,st.liq_usd,0)>=10000 AND COALESCE(st.vol24h_usd,0)>=10000
+    ORDER BY CAST(s.reward_rate AS REAL) DESC LIMIT ?`).all(now(), Math.min(30, n)) as { address: string }[]
+  return [...new Set([...feeRows, ...rewardRows].map((row) => row.address))]
+}
+
+export function captureTickSamples(addrs: string[], blockNumber: string, timestamp = now()) {
+  const bucket = Math.floor(timestamp / 60) * 60
+  const insert = db.prepare(`INSERT OR REPLACE INTO pool_tick_samples(pool,ts,tick,block_number)
+    SELECT address,?,tick,? FROM pool_state WHERE address=? AND tick IS NOT NULL`)
+  tx(() => { for (const addr of addrs) insert.run(bucket, blockNumber, addr.toLowerCase()) })
+}
+
+export function pruneAnalytics(timestamp = now()) {
+  db.prepare('DELETE FROM pool_tick_samples WHERE ts<?').run(timestamp - 30 * 86_400)
+  db.prepare('DELETE FROM pool_market_snapshots WHERE ts<?').run(timestamp - 180 * 86_400)
+}
 
 /**
  * Frontpage set: the top-N pools by TVL — exactly what /api/pools?sort=tvl

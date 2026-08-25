@@ -87,6 +87,10 @@ try {
     method: 'PUT', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(config),
   })
   assert.equal(put.status, 200)
+  const invalidProfitTarget = await fetch(`${base}/v1/strategies/${encodeURIComponent(config.id)}/withdraw-profit`, {
+    method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ target: 'USDT' }),
+  })
+  assert.equal(invalidProfitTarget.status, 400)
 
   const loginOrigin = 'http://127.0.0.1:9999'
   const challenge = await fetch(`${base}/auth/challenge`, {
@@ -107,6 +111,10 @@ try {
   assert.deepEqual(scopedWallets.wallets.map((wallet: any) => wallet.address.toLowerCase()), [importedBody.wallet.address.toLowerCase()])
   const scopedStrategies = await fetch(`${base}/v1/strategies`, { headers: walletAuth }).then((response) => response.json()) as any
   assert.deepEqual(scopedStrategies.strategies.map((row: any) => row.config.id), [config.id])
+  assert.deepEqual(scopedStrategies.archivedStrategyIds, [])
+  assert.equal((await fetch(`${base}/v1/strategies/${encodeURIComponent(config.id)}/withdraw-profit`, {
+    method: 'POST', headers: { ...walletAuth, 'content-type': 'application/json' }, body: JSON.stringify({ target: 'WETH' }),
+  })).status, 403)
   assert.equal((await fetch(`${base}/v1/pause-all`, {
     method: 'POST', headers: { ...walletAuth, 'content-type': 'application/json' }, body: JSON.stringify({ paused: true }),
   })).status, 403)
@@ -120,6 +128,7 @@ try {
   assert.deepEqual(await removed.json(), { archived: true, chainTransactions: 0, assetLocation: 'position' })
   const afterRemove = await fetch(`${base}/v1/strategies`, { headers: auth }).then((response) => response.json()) as any
   assert.equal(afterRemove.strategies.some((row: any) => row.config.id === config.id), false)
+  assert.equal(afterRemove.archivedStrategyIds.includes(config.id), true)
   const history = await fetch(`${base}/v1/history`, { headers: auth })
   assert.equal(history.status, 200)
   const historyBody = await history.json() as any

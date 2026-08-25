@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-test-module-mocks --import=tsx --test executor/*.test.ts indexer/*.test.ts src/lib/*.test.ts src/lib/bridge/*.test.ts",
+    "test": "node --experimental-test-module-mocks --import=tsx --test executor/*.test.ts indexer/*.test.ts shared/recommendation/*.test.ts shared/strategy/*.test.ts src/lib/*.test.ts src/lib/bridge/*.test.ts",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:bridge": "tsx scripts/bridge-smoke.ts",
     "smoke:uni": "tsx scripts/uni-browse-smoke.ts",

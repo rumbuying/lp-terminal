@@ -70,6 +70,16 @@ export function allocateProRata(total: bigint, weights: bigint[]): bigint[] {
   })
 }
 
+/** A distribution changes custody, not lifetime performance. */
+export function distributionAdjustedPnl(args: {
+  currentValue: bigint
+  withdrawnValue: bigint
+  baselineValue: bigint
+  gasCost: bigint
+}) {
+  return args.currentValue + args.withdrawnValue - args.baselineValue - args.gasCost
+}
+
 /** Record USDG retained directly from collected income as an explicit tax fact. */
 export function incomeTaxRetentionEntry(args: {
   id: string

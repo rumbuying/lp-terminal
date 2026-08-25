@@ -4,6 +4,7 @@
 // the vite dev/preview proxy locally.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { PORT, TUNE, log } from './config'
+import { ADDR } from '../src/config/addresses'
 import { db, kvGet, notePoolsHit, poolCounts } from './store'
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8' }
@@ -24,6 +25,10 @@ function poolsWhere(params: Params): { where: string; args: (string | number)[] 
   if (proto.length) {
     clauses.push(`p.proto IN (${proto.map(() => '?').join(',')})`)
     args.push(...proto)
+  } else {
+    // UP33 CL lives in this database for recommendation analytics, while this
+    // long-standing endpoint remains the Uniswap catalog consumed by uniIndex.
+    clauses.push("p.proto IN ('univ2','univ3')")
   }
 
   const minTvl = Number(params.get('min_tvl'))
@@ -145,6 +150,47 @@ function getTokens(params: Params) {
   return { tokens: rows }
 }
 
+/**
+ * Batch mark prices for wallet/position screens. The indexer has already done
+ * the expensive, depth-bounded graph pricing pass; exposing those marks in one
+ * request keeps the browser off third-party token endpoints and avoids one
+ * request per held asset.
+ */
+function getPrices(params: Params) {
+  const addresses = [
+    ...new Set(
+      (params.get('addresses') ?? '')
+        .split(',')
+        .map((address) => address.trim().toLowerCase())
+        .filter((address) => HEX40.test(address)),
+    ),
+  ].slice(0, 200)
+  if (!addresses.length) return { ready: kvGet('ready') === '1', prices: {} }
+
+  const rows = db
+    .prepare(
+      `SELECT address, price_usd, price_depth_usd, price_src, price_updated
+       FROM tokens WHERE address IN (${addresses.map(() => '?').join(',')})`,
+    )
+    .all(...addresses) as {
+      address: string
+      price_usd: number | null
+      price_depth_usd: number
+      price_src: string | null
+      price_updated: number | null
+    }[]
+  const prices: Record<string, unknown> = {}
+  for (const row of rows) {
+    prices[row.address] = {
+      priceUsd: row.price_usd,
+      depthUsd: row.price_depth_usd,
+      source: row.price_src,
+      updatedAt: row.price_updated,
+    }
+  }
+  return { ready: kvGet('ready') === '1', prices }
+}
+
 function getHealth() {
   const totals = Object.fromEntries(poolCounts().map((c) => [c.proto, c.n]))
   const tokens = (db.prepare('SELECT COUNT(*) AS n FROM tokens').get() as { n: number }).n
@@ -156,6 +202,11 @@ function getHealth() {
   ).n
   const stateFreshness = db.prepare('SELECT MIN(updated) AS oldest, MAX(updated) AS newest FROM pool_state').get()
   const statsFreshness = db.prepare('SELECT MAX(updated) AS newest FROM pool_stats').get()
+  const analytics = db.prepare(`SELECT
+    (SELECT COUNT(*) FROM pool_market_snapshots) AS marketSnapshots,
+    (SELECT COUNT(*) FROM pool_tick_samples) AS tickSamples,
+    (SELECT MIN(ts) FROM pool_tick_samples) AS firstTick,
+    (SELECT MAX(ts) FROM pool_tick_samples) AS lastTick`).get()
   return {
     ready: kvGet('ready') === '1',
     asof: Number(kvGet('snapshot_asof')) || null,
@@ -167,9 +218,87 @@ function getHealth() {
     corruptTvlPools: corrupt,
     stateFreshness,
     statsFreshness,
+    analytics,
     v3Cursor: Number(kvGet('v3_cursor') ?? 0),
     v2Count: Number(kvGet('v2_count') ?? 0),
     rssMb: Math.round(process.memoryUsage.rss() / 1e6),
+  }
+}
+
+function getRecommendationCandidates(params: Params) {
+  const limit = Math.min(Math.max(Number(params.get('limit')) || 50, 1), 80)
+  const minTvl = Math.max(Number(params.get('min_tvl')) || 10_000, 0)
+  const minVolume = Math.max(Number(params.get('min_volume')) || 10_000, 0)
+  const now = Math.floor(Date.now() / 1000)
+  const marketSince = now - 30 * 86_400
+  const tickSince = now - 7 * 86_400
+  const candidateSelect = `SELECT p.address,p.proto,p.token0,p.token1,p.fee_ppm,p.unstaked_fee_ppm,p.tick_spacing,
+    t0.symbol AS symbol0,t0.decimals AS decimals0,t0.price_usd AS token0_usd,
+    t1.symbol AS symbol1,t1.decimals AS decimals1,t1.price_usd AS token1_usd,
+    s.sqrt_price,s.tick,s.liquidity,s.staked_liquidity,s.reward_rate,s.period_finish,s.gauge_alive,s.updated AS state_updated,
+    COALESCE(s.tvl_usd,st.liq_usd) AS tvl_usd,st.vol1h_usd,st.vol6h_usd,st.vol24h_usd,st.updated AS stats_updated
+    FROM pools p JOIN pool_state s ON s.address=p.address JOIN pool_stats st ON st.address=p.address
+    JOIN tokens t0 ON t0.address=p.token0 JOIN tokens t1 ON t1.address=p.token1
+    WHERE p.proto IN ('univ3','up33cl') AND s.sqrt_price IS NOT NULL AND s.tick IS NOT NULL AND s.liquidity IS NOT NULL
+      AND COALESCE(s.tvl_usd,st.liq_usd,0)>=? AND COALESCE(st.vol24h_usd,0)>=?`
+  const feeRows = db.prepare(`${candidateSelect}
+    ORDER BY (
+      MIN(
+        COALESCE(st.vol1h_usd,st.vol24h_usd/24.0),
+        COALESCE(st.vol6h_usd/6.0,st.vol24h_usd/24.0),
+        st.vol24h_usd/24.0
+      ) * p.fee_ppm / MAX(COALESCE(s.tvl_usd,st.liq_usd),1)
+    ) DESC LIMIT ?`).all(minTvl, minVolume, limit) as Record<string, any>[]
+  // Emission opportunities are not necessarily the highest-volume fee pools.
+  // Keep a bounded reward cohort so reward mode cannot silently miss its best
+  // gauge before scoring even starts.
+  const rewardRows = db.prepare(`${candidateSelect}
+    AND p.proto='up33cl' AND s.gauge_alive=1 AND s.period_finish>? AND CAST(s.reward_rate AS REAL)>0
+    ORDER BY CAST(s.reward_rate AS REAL) DESC LIMIT ?`)
+    .all(minTvl, minVolume, now, Math.min(30, limit)) as Record<string, any>[]
+  const rows = [...new Map([...feeRows, ...rewardRows].map((row) => [row.address, row])).values()]
+  // Hourly history is sufficient for walk-forward volume validation. Returning
+  // every five-minute rolling snapshot made this endpoint multi-megabyte and
+  // blocked the indexer's event loop for several seconds.
+  const marketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
+      AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,AVG(vol24h_usd) AS vol24hUsd
+    FROM pool_market_snapshots WHERE pool=? AND ts>=?
+    GROUP BY CAST(ts/3600 AS INTEGER) ORDER BY ts`)
+  const recentTickQ = db.prepare('SELECT ts,tick FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts')
+  const historicTickQ = db.prepare(`SELECT sample.ts,sample.tick FROM pool_tick_samples sample
+    JOIN (
+      SELECT MAX(ts) AS ts FROM pool_tick_samples
+      WHERE pool=? AND ts>=? AND ts<? GROUP BY CAST(ts/600 AS INTEGER)
+    ) bucket ON bucket.ts=sample.ts
+    WHERE sample.pool=? ORDER BY sample.ts`)
+  const up = db.prepare('SELECT price_usd FROM tokens WHERE address=?').get('0x57c0e45cb534413d1c20a4240955d6bb250bb4f1') as { price_usd: number | null } | undefined
+  const weth = ADDR.WETH.toLowerCase()
+  const usdg = ADDR.USDG.toLowerCase()
+  return {
+    ready: kvGet('ready') === '1',
+    asof: Math.floor(Date.now() / 1000),
+    candidates: rows.map((row) => ({
+      pool: row.address,
+      protocol: row.proto === 'up33cl' ? 'up33' : 'univ3',
+      token0: row.token0, token1: row.token1,
+      symbol0: row.symbol0, symbol1: row.symbol1,
+      decimals0: row.decimals0, decimals1: row.decimals1,
+      token0Usd: row.token0_usd, token1Usd: row.token1_usd,
+      token0IsRisk: row.token1 === usdg ? true : row.token0 === usdg ? false : row.token0 === weth ? false : true,
+      hasStableQuote: row.token0 === usdg || row.token1 === usdg,
+      feePpm: row.fee_ppm, unstakedFeePpm: row.unstaked_fee_ppm,
+      tickSpacing: row.tick_spacing, tick: row.tick, sqrtPriceX96: row.sqrt_price,
+      liquidity: row.liquidity, stakedLiquidity: row.staked_liquidity,
+      tvlUsd: row.tvl_usd, vol1hUsd: row.vol1h_usd, vol6hUsd: row.vol6h_usd, vol24hUsd: row.vol24h_usd,
+      statsUpdatedAt: row.stats_updated, stateUpdatedAt: row.state_updated,
+      gaugeAlive: row.gauge_alive === 1, rewardRate: row.reward_rate, periodFinish: row.period_finish,
+      upUsd: up?.price_usd ?? null,
+      marketHistory: marketQ.all(row.address, marketSince),
+      tickHistory: [
+        ...historicTickQ.all(row.address, tickSince, now - 30 * 3_600, row.address),
+        ...recentTickQ.all(row.address, now - 30 * 3_600),
+      ],
+    })),
   }
 }
 
@@ -190,6 +319,14 @@ export function startApi(): void {
         body = getPools(url.searchParams)
       }
       else if (url.pathname === '/api/tokens') body = getTokens(url.searchParams)
+      else if (url.pathname === '/api/prices') {
+        body = getPrices(url.searchParams)
+        cache = 'public, max-age=15'
+      }
+      else if (url.pathname === '/api/recommendation-candidates') {
+        body = getRecommendationCandidates(url.searchParams)
+        cache = 'public, max-age=30'
+      }
       else if (url.pathname === '/api/health') {
         body = getHealth()
         cache = 'no-store'
