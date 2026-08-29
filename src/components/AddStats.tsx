@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next'
-import { fmtApr, type AddSim } from '../lib/apr'
+import { fmtApr, volumeWindowLabel, type AddSim, type VolumeWindow } from '../lib/apr'
 import { fmtUsd } from '../lib/format'
 
 /**
@@ -14,7 +14,7 @@ import { fmtUsd } from '../lib/format'
  * Out of range there is nothing to project — an empty strip of dashes would
  * look like missing data, so the whole strip is replaced by the reason.
  */
-export function AddStats({ sim, emitless }: { sim: AddSim | null; emitless?: boolean }) {
+export function AddStats({ sim, emitless, volumeWindow = 'h24' }: { sim: AddSim | null; emitless?: boolean; volumeWindow?: VolumeWindow }) {
   const { t } = useTranslation()
   if (!sim) return null
   if (!sim.inRange) return <div className="red mono-sm zstats-out">{t('add.projOut')}</div>
@@ -27,7 +27,7 @@ export function AddStats({ sim, emitless }: { sim: AddSim | null; emitless?: boo
         <div className="v">{fmtUsd(sim.depositUsd)}</div>
       </div>
       <div className="stat">
-        <div className="k">{t('add.statFeeApr')}</div>
+        <div className="k">{t('add.statFeeApr')} · {volumeWindowLabel(volumeWindow)}</div>
         <div className="v">{fmtApr(sim.feeApr)}</div>
         {emit && <div className="sub green">{t('add.statEmit', { apr: emit })}</div>}
       </div>

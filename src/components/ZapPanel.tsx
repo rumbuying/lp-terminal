@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { formatUnits, parseUnits, zeroAddress, type Address } from 'viem'
 import { ADDR, CHAIN_ID, NATIVE } from '../config/addresses'
 import { CHAIN } from '../config/chains'
-import { simulateClAdd, simulateV2Add } from '../lib/apr'
+import { simulateClAdd, simulateV2Add, type VolumeWindow } from '../lib/apr'
 import { fmtAmount } from '../lib/format'
 import { autoSlippage, needsSlippageConfirm, retrySlippage, slippagePctToBps, slippageTone, SLIPPAGE_CHOICES, type AutoSlippage } from '../lib/swapGate'
 import { SOLVER_AUTO_REFRESHES, solverQuoteAutoRefreshExhausted, solverQuoteCanAutoRefresh } from '../lib/solverRefresh'
@@ -66,6 +66,7 @@ export function ZapPanel(props: {
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  volumeWindow?: VolumeWindow
 }) {
   const { target, t0, t1 } = props
   const { t } = useTranslation()
@@ -212,6 +213,7 @@ export function ZapPanel(props: {
         stat: props.stat,
         upUsd: props.upUsd,
         wethUsd: props.wethUsd,
+        volumeWindow: props.volumeWindow,
       })
     return simulateV2Add({
       pool: target.pool,
@@ -221,8 +223,9 @@ export function ZapPanel(props: {
       dec1: t1.decimals,
       stat: props.stat,
       upUsd: props.upUsd,
+      volumeWindow: props.volumeWindow,
     })
-  }, [p, target, t0, t1, props.stat, props.upUsd, props.wethUsd])
+  }, [p, target, t0, t1, props.stat, props.upUsd, props.wethUsd, props.volumeWindow])
 
   // impact-vs-band honesty: a swap that eats a big slice of the band's width
   // will land the deposit off-ratio (dust) or out of band entirely
@@ -456,7 +459,7 @@ export function ZapPanel(props: {
               {t('zap.dust', { dust: dusts.join(' + ') })}
             </div>
           )}
-          <AddStats sim={sim} emitless={pool.protocol !== 'home'} />
+          <AddStats sim={sim} emitless={pool.protocol !== 'home'} volumeWindow={props.volumeWindow} />
           {bandWarn && <div className="amber mono-sm">!! {bandWarn}</div>}
         </>
       )}

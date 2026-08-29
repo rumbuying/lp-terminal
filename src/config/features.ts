@@ -53,4 +53,11 @@ export const FEATURES = {
   v4Positions: CHAIN.uniV4 !== null && CHAIN.uniV4.positionSubgraph !== null,
   /** the BRIDGE tab — hidden entirely where no route model exists */
   bridge: CHAIN.hasBridge,
+  /**
+   * One-sided home-CL range orders. The current order picker is backed by the
+   * enumerable home registry, which exists on Robinhood Chain. Pancake pools
+   * are indexer-catalogued and need a separate picker before this can be
+   * truthfully exposed on BSC.
+   */
+  rangeOrders: CHAIN.gov !== null,
 } as const

@@ -50,11 +50,14 @@ import {
 import {
   emitAprOf,
   feeAprOf,
-  fees24Of,
+  feesOf,
   fmtApr,
   simulateClAdd,
   simulateV2Add,
   stakedShareOf,
+  volumeOf,
+  volumeWindowLabel,
+  type VolumeWindow,
 } from "../../lib/apr";
 import {
   clampWidth,
@@ -269,6 +272,8 @@ function releaseOf(pool: Pool, proven: LaunchpadTokenMap): LaunchpadReleaseId | 
 // Top-level tabs unmount; retain only the browsing choices for this session.
 let rememberedSort: SortKey = "vol";
 let rememberedMarket: MarketFilter = "all";
+let rememberedVolumeWindow: VolumeWindow = "h24";
+const VOLUME_WINDOWS: readonly VolumeWindow[] = ["m5", "h1", "h6", "h24"];
 
 export function PoolsTab() {
   const { t } = useTranslation();
@@ -296,6 +301,7 @@ export function PoolsTab() {
   // form mid-trade.
   const [openId, setOpenId] = useState<string | null>(recommendationId || null);
   const [sort, setSortState] = useState<SortKey>(rememberedSort);
+  const [volumeWindow, setVolumeWindowState] = useState<VolumeWindow>(rememberedVolumeWindow);
   const [onlyMine, setOnlyMine] = useState(false);
   // Pool browsing is public data. The expensive wallet-wide position scan is
   // activated only when the user explicitly asks for MY POOLS; a fresh result
@@ -346,6 +352,9 @@ export function PoolsTab() {
   const [flat, setFlat] = useState(false);
   const grouping = origin !== null && !q.trim() && !flat;
   const groups = usePoolGroups(origin, groupSortOf(sort), hideDust ? 1_000 : 0, grouping);
+  // Group totals come from the server's 24H aggregate. Flat rows carry every
+  // rolling window, so only they follow the user's window switch.
+  const effectiveVolumeWindow: VolumeWindow = grouping ? "h24" : volumeWindow;
   const [openGroup, setOpenGroup] = useState<string | null>(null);
   const v4Stats = useMemo(
     () => v4PoolStats(v4.data, stats.data?.wethUsd),
@@ -359,6 +368,10 @@ export function PoolsTab() {
   const setSort = (next: SortKey) => {
     rememberedSort = next;
     setSortState(next);
+  };
+  const setVolumeWindow = (next: VolumeWindow) => {
+    rememberedVolumeWindow = next;
+    setVolumeWindowState(next);
   };
   const setMarket = (next: MarketFilter) => {
     rememberedMarket = next;
@@ -545,12 +558,12 @@ export function PoolsTab() {
     const stat = (p: Pool) => mergedStats[poolIdentity(p)];
     const sorted = [...kept].sort((a, b) => {
       if (sort === "vol")
-        return (stat(b)?.vol24hUsd ?? -1) - (stat(a)?.vol24hUsd ?? -1);
+        return (volumeOf(stat(b), effectiveVolumeWindow) ?? -1) - (volumeOf(stat(a), effectiveVolumeWindow) ?? -1);
       if (sort === "fees24")
-        return (fees24Of(b, stat(b)) ?? -1) - (fees24Of(a, stat(a)) ?? -1);
+        return (feesOf(b, stat(b), effectiveVolumeWindow) ?? -1) - (feesOf(a, stat(a), effectiveVolumeWindow) ?? -1);
       if (sort === "tvl") return (stat(b)?.liqUsd ?? -1) - (stat(a)?.liqUsd ?? -1);
       if (sort === "feeApr")
-        return (feeAprOf(b, stat(b)) ?? -1) - (feeAprOf(a, stat(a)) ?? -1);
+        return (feeAprOf(b, stat(b), effectiveVolumeWindow) ?? -1) - (feeAprOf(a, stat(a), effectiveVolumeWindow) ?? -1);
       return (
         (emitAprOf(b, stat(b), upPrice.data) ?? -1) -
         (emitAprOf(a, stat(a), upPrice.data) ?? -1)
@@ -570,6 +583,7 @@ export function PoolsTab() {
     sort,
     mergedStats,
     upPrice.data,
+    effectiveVolumeWindow,
   ]);
 
   // Which tokens the launchpad factory gets asked about. Scoped, because the
@@ -915,6 +929,16 @@ export function PoolsTab() {
                 {t("pools.groupUngrouped")}
               </button>
             )}
+            {!grouping && VOLUME_WINDOWS.map((window) => (
+              <button
+                key={window}
+                className={`chip ${volumeWindow === window ? "on" : ""}`}
+                onClick={() => setVolumeWindow(window)}
+                title={t("pools.volumeWindowTip", { window: volumeWindowLabel(window) })}
+              >
+                {volumeWindowLabel(window)}
+              </button>
+            ))}
             <button
               className={`chip ${hideDust ? "on" : ""}`}
               onClick={() => setHideDust(!hideDust)}
@@ -1157,15 +1181,15 @@ export function PoolsTab() {
                     edge, and its content ("24.9M CASHCAT + 12.4 WETH") has no
                     natural width bound. */}
                 <th className="hide-t">{t("pools.thPrice")}</th>
-                {th("tvl", t("pools.thTvl"), "", t("pools.thVol"))}
-                {th("vol", t("pools.thVol"), "hide-m")}
-                {th("fees24", t("pools.thFees"), "hide-m")}
+                {th("tvl", t("pools.thTvl"), "", t("pools.thVolWindow", { window: volumeWindowLabel(effectiveVolumeWindow) }))}
+                {th("vol", t("pools.thVolWindow", { window: volumeWindowLabel(effectiveVolumeWindow) }), "hide-m")}
+                {th("fees24", t("pools.thFeesWindow", { window: volumeWindowLabel(effectiveVolumeWindow) }), "hide-m")}
                 {/* REWARDS is an emissions column: on a chain with no ve(3,3) it can
                     only ever hold a dash, in the table's widest layout. Gone with the
                     same flag that hides the epoch, the gauges and the vote share. */}
                 {th(
                   "feeApr",
-                  t("pools.thFeeApr"),
+                  t("pools.thFeeAprWindow", { window: volumeWindowLabel(effectiveVolumeWindow) }),
                   "",
                   FEATURES.emissions ? t("pools.thRewards") : undefined,
                   true,
@@ -1229,6 +1253,7 @@ export function PoolsTab() {
                                 totalWeight={totalWeight}
                                 mine={mySet.has(id)}
                                 open={openId === id}
+                                volumeWindow={effectiveVolumeWindow}
                                 nested
                                 onToggle={() => setOpenId(openId === id ? null : id)}
                               />
@@ -1249,6 +1274,7 @@ export function PoolsTab() {
                         totalWeight={totalWeight}
                         mine={mySet.has(id)}
                         open={openId === id}
+                        volumeWindow={effectiveVolumeWindow}
                         onToggle={() => setOpenId(openId === id ? null : id)}
                       />
                     );
@@ -1275,6 +1301,7 @@ export function PoolsTab() {
               stat={statOf(selected)}
               upUsd={upPrice.data}
               wethUsd={stats.data?.wethUsd}
+              volumeWindow={effectiveVolumeWindow}
               recommendation={
                 poolIdentity(selected) === recommendationId
                   ? recommendation
@@ -1305,6 +1332,7 @@ export function PoolsTab() {
             stat={statOf(selected)}
             upUsd={upPrice.data}
             wethUsd={stats.data?.wethUsd}
+            volumeWindow={effectiveVolumeWindow}
             recommendation={
               poolIdentity(selected) === recommendationId
                 ? recommendation
@@ -1502,6 +1530,7 @@ function PoolRow(props: {
   mine: boolean;
   /** the row the trade panel is pointed at */
   open: boolean;
+  volumeWindow: VolumeWindow;
   /** a market shown inside its token's group, indented under it */
   nested?: boolean;
   onToggle: () => void;
@@ -1535,8 +1564,9 @@ function PoolRow(props: {
     totalWeight > 0n
       ? Number((p.weight * 1_000_000n) / totalWeight) / 10_000
       : 0;
-  const fees24 = fees24Of(p, stat);
-  const feeApr = feeAprOf(p, stat);
+  const volume = volumeOf(stat, props.volumeWindow);
+  const fees = feesOf(p, stat, props.volumeWindow);
+  const feeApr = feeAprOf(p, stat, props.volumeWindow);
   const emitApr = emitAprOf(p, stat, props.upUsd);
   const stakedPct = stakedShareOf(p) * 100;
   let kindLabel: string;
@@ -1669,26 +1699,26 @@ function PoolRow(props: {
           </Flash>
           {/* phone: VOL 24H stacks under TVL */}
           <span className="cell-sub show-m">
-            {stat?.vol24hUsd != null ? `$${fmtCompact(stat.vol24hUsd)}` : "—"}
+            {volume != null ? `$${fmtCompact(volume)}` : "—"}
           </span>
         </td>
         <td className="num hide-m">
-          <Flash v={stat?.vol24hUsd}>
-            {stat?.vol24hUsd != null ? (
-              fmtUsd(stat.vol24hUsd)
+          <Flash v={volume}>
+            {volume != null ? (
+              fmtUsd(volume)
             ) : (
               <span className="dim">—</span>
             )}
           </Flash>
         </td>
         <td className="num hide-m">
-          {fees24 != null ? (
-            <span className="amber">{fmtUsd(fees24)}</span>
+          {fees != null ? (
+            <span className="amber">{fmtUsd(fees)}</span>
           ) : (
             <span className="dim">—</span>
           )}
         </td>
-        <td className="num" title={t("pools.feeAprTip")}>
+        <td className="num" title={t("pools.feeAprWindowTip", { window: volumeWindowLabel(props.volumeWindow) })}>
           {feeApr != null ? fmtApr(feeApr) : <span className="dim">—</span>}
           {/* phone: reward APR stacks under fee APR — and only where rewards are
               a thing, or the phone grows a second line of dashes */}
@@ -1760,6 +1790,7 @@ function TradePanel(props: {
   stat?: PoolStat;
   upUsd?: number;
   wethUsd?: number | null;
+  volumeWindow: VolumeWindow;
   recommendation?: RecommendationPrefill | null;
   onClose: () => void;
 }) {
@@ -1868,6 +1899,7 @@ function TradePanel(props: {
           data={data}
           stat={props.stat}
           upUsd={props.upUsd}
+          volumeWindow={props.volumeWindow}
         />
       ) : (
         <AddCl
@@ -1877,6 +1909,7 @@ function TradePanel(props: {
           stat={props.stat}
           upUsd={props.upUsd}
           wethUsd={props.wethUsd}
+          volumeWindow={props.volumeWindow}
           recommendedPct={props.recommendation?.pct}
           recommendedCapitalUsd={props.recommendation?.capitalUsd}
           recommendedTicks={
@@ -1930,11 +1963,13 @@ export function AddV2({
   data,
   stat,
   upUsd,
+  volumeWindow = "h24",
 }: {
   pool: V2Pool;
   data: PoolsData;
   stat?: PoolStat;
   upUsd?: number;
+  volumeWindow?: VolumeWindow;
 }) {
   const { t } = useTranslation();
   const { address: user } = useAccount();
@@ -2010,8 +2045,9 @@ export function AddV2({
         dec1: t1.decimals,
         stat,
         upUsd,
+        volumeWindow,
       }),
-    [pool, a0, a1, t0.decimals, t1.decimals, stat, upUsd],
+    [pool, a0, a1, t0.decimals, t1.decimals, stat, upUsd, volumeWindow],
   );
 
   const uni2 = pool.protocol === "univ2";
@@ -2148,6 +2184,7 @@ export function AddV2({
           t1={t1}
           stat={stat}
           upUsd={upUsd}
+          volumeWindow={volumeWindow}
         />
       ) : (
         <>
@@ -2189,7 +2226,7 @@ export function AddV2({
                   : undefined
             }
           />
-          <AddStats sim={sim} emitless={uni2} />
+          <AddStats sim={sim} emitless={uni2} volumeWindow={volumeWindow} />
           <div className="form-row">
             {/* where the LP token lands and what the mins are is reference, not
                 instruction — it belongs to the button that does it, not to a
@@ -2309,6 +2346,7 @@ export function AddCl({
   stat,
   upUsd,
   wethUsd,
+  volumeWindow = "h24",
   recommendedPct,
   recommendedCapitalUsd,
   recommendedTicks,
@@ -2319,6 +2357,7 @@ export function AddCl({
   stat?: PoolStat;
   upUsd?: number;
   wethUsd?: number | null;
+  volumeWindow?: VolumeWindow;
   recommendedPct?: number;
   recommendedCapitalUsd?: number;
   recommendedTicks?: { lower: number; upper: number };
@@ -2633,8 +2672,9 @@ export function AddCl({
       stat,
       upUsd,
       wethUsd,
+      volumeWindow,
     });
-  }, [ticks, liq, a0, a1, pool, t0.decimals, t1.decimals, stat, upUsd, wethUsd]);
+  }, [ticks, liq, a0, a1, pool, t0.decimals, t1.decimals, stat, upUsd, wethUsd, volumeWindow]);
 
   const mint = async () => {
     if (!user || !ticks) return;
@@ -2929,6 +2969,7 @@ export function AddCl({
                 stat={stat}
                 upUsd={upUsd}
                 wethUsd={wethUsd}
+                volumeWindow={volumeWindow}
               />
             ) : (
               <div className="dim mono-sm">{t("add.setRangeFirst")}</div>
@@ -2965,7 +3006,7 @@ export function AddCl({
                 note={note1}
                 onNote={over1 && !below ? fitToBalances : undefined}
               />
-              <AddStats sim={sim} emitless={pool.protocol !== "home"} />
+              <AddStats sim={sim} emitless={pool.protocol !== "home"} volumeWindow={volumeWindow} />
               <div className="form-row">
                 <Btn
                   busy={busy}

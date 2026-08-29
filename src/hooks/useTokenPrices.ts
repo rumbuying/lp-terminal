@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
+import type { TokenUsdMap } from '../lib/apr'
 
 export type TokenPriceMark = {
   priceUsd: number | null
@@ -8,7 +9,7 @@ export type TokenPriceMark = {
   updatedAt: number | null
 }
 
-export type TokenUsdMap = Record<string, number | undefined>
+export type { TokenUsdMap } from '../lib/apr'
 
 type PriceResponse = {
   ready?: boolean

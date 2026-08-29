@@ -39,6 +39,9 @@ export type ApiPool23 = {
   totalSupply: string | null
   stateReady: boolean
   tvlUsd: number | null
+  vol5mUsd?: number | null
+  vol1hUsd?: number | null
+  vol6hUsd?: number | null
   vol24hUsd: number | null
   txns24h: number | null
   gtLiqUsd: number | null
@@ -465,6 +468,9 @@ export function indexAddressPools(
       })
     }
     stats[address.toLowerCase()] = {
+      vol5mUsd: p.vol5mUsd ?? null,
+      vol1hUsd: p.vol1hUsd ?? null,
+      vol6hUsd: p.vol6hUsd ?? null,
       vol24hUsd: p.vol24hUsd,
       liqUsd: p.tvlUsd ?? p.gtLiqUsd, // chain-derived TVL first, GT reserve as backstop
       source: p.statsSource === 'geckoterminal' ? 'geckoterminal' : 'chain',

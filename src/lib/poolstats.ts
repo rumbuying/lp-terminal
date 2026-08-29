@@ -10,6 +10,9 @@ import { pickDsTokenUsd, type DsPair } from './tokenPrice'
 import type { Pool, V2Pool } from '../types'
 
 export type PoolStat = {
+  vol5mUsd?: number | null
+  vol1hUsd?: number | null
+  vol6hUsd?: number | null
   vol24hUsd: number | null
   liqUsd: number | null
   source: 'dexscreener' | 'subgraph' | 'geckoterminal' | 'chain'
@@ -43,6 +46,9 @@ export async function fetchDexscreener(
       const vol = Number(p?.volume?.h24)
       const liq = Number(p?.liquidity?.usd)
       stats[addr] = {
+        vol5mUsd: Number.isFinite(Number(p?.volume?.m5)) ? Number(p.volume.m5) : null,
+        vol1hUsd: Number.isFinite(Number(p?.volume?.h1)) ? Number(p.volume.h1) : null,
+        vol6hUsd: Number.isFinite(Number(p?.volume?.h6)) ? Number(p.volume.h6) : null,
         vol24hUsd: Number.isFinite(vol) ? vol : null,
         liqUsd: Number.isFinite(liq) ? liq : null,
         source: 'dexscreener',

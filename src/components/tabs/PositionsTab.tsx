@@ -11,7 +11,7 @@ import {
   v2RouterAbi,
   wethAbi,
 } from "../../abi";
-import { ADDR, CHAIN_ID, EXPLORER, NATIVE, UNI } from "../../config/addresses";
+import { ADDR, CHAIN_ID, EXPLORER, GOV, NATIVE, UNI } from "../../config/addresses";
 import { CHAIN } from "../../config/chains";
 import { FEATURES } from "../../config/features";
 import { wagmiConfig } from "../../config/wagmi";
@@ -64,6 +64,8 @@ import { usePositions } from "../../hooks/usePositions";
 import { usePoolStats } from "../../hooks/usePoolStats";
 import { useUniPoolStats } from "../../hooks/useUniPoolStats";
 import { useUpPrice } from "../../hooks/useUpPrice";
+import { tokenUsdMapOf, useTokenPrices } from "../../hooks/useTokenPrices";
+import type { TokenUsdMap } from "../../lib/apr";
 import { useLiveSlot0, type LiveSlot0 } from "../../hooks/useLiveSlot0";
 import type { Address } from "viem";
 import type {
@@ -102,6 +104,30 @@ export function PositionsTab() {
   const stats = usePoolStats(); // up33 pool 24h stats + the WETH/USD anchor
   const upPrice = useUpPrice();
   const [claimBusy, setClaimBusy] = useState(false);
+
+  // Price every asset represented in this wallet. Anchor-only valuation makes
+  // a long-tail/long-tail LP look unpriced even when the indexer has reliable
+  // depth-checked marks for both sides.
+  const heldTokenAddresses = useMemo(() => {
+    const byAddress = new Map<string, Address>([
+      [ADDR.WNATIVE.toLowerCase(), ADDR.WNATIVE],
+      [ADDR.STABLE.toLowerCase(), ADDR.STABLE],
+    ]);
+    if (GOV) byAddress.set(GOV.UP.toLowerCase(), GOV.UP);
+    for (const position of [...(positions.data?.cl ?? []), ...(positions.data?.v2 ?? [])]) {
+      for (const token of [position.pool.token0, position.pool.token1]) {
+        if (token !== "0x0000000000000000000000000000000000000000")
+          byAddress.set(token.toLowerCase(), token);
+      }
+    }
+    return [...byAddress.values()];
+  }, [positions.data]);
+  const priceMarks = useTokenPrices(heldTokenAddresses);
+  const tokenUsd = useMemo<TokenUsdMap>(() => {
+    const prices = tokenUsdMapOf(priceMarks.data);
+    prices[ADDR.STABLE.toLowerCase()] = 1;
+    return prices;
+  }, [priceMarks.data]);
 
   // Indexer stats for every catalog-backed pool the user is LPing. On BSC that
   // includes Pancake v2/v3 rows mapped into the home protocol slot.
@@ -219,6 +245,7 @@ export function PositionsTab() {
       stat: statOf(p.pool),
       upUsd,
       wethUsd,
+      tokenUsd,
     });
     clM.set(p, m);
     if (m.valueUsd === null) unpriced++;
@@ -241,6 +268,7 @@ export function PositionsTab() {
       stat: statOf(p.pool),
       upUsd,
       wethUsd,
+      tokenUsd,
     });
     v2Val.set(p, m.valueUsd);
     if (m.valueUsd === null) unpriced++;
@@ -510,6 +538,7 @@ export function PositionsTab() {
             stat={statOf(g[0].pool)}
             upUsd={upUsd}
             wethUsd={wethUsd}
+            tokenUsd={tokenUsd}
           />
         ) : (
           <ClPoolGroup
@@ -523,6 +552,7 @@ export function PositionsTab() {
             statOf={statOf}
             upUsd={upUsd}
             wethUsd={wethUsd}
+            tokenUsd={tokenUsd}
           />
         ),
       )}
@@ -557,6 +587,7 @@ export function PositionsTab() {
           stat={statOf(p.pool)}
           upUsd={upUsd}
           wethUsd={wethUsd}
+          tokenUsd={tokenUsd}
         />
       ))}
     </div>
@@ -574,6 +605,7 @@ export function ClCard({
   stat,
   upUsd,
   wethUsd,
+  tokenUsd,
   nested,
 }: {
   pos: ClPosition;
@@ -584,6 +616,7 @@ export function ClCard({
   stat?: PoolStat;
   upUsd?: number;
   wethUsd?: number | null;
+  tokenUsd?: TokenUsdMap;
   /** rendered inside a ClPoolGroup: the pair title / protocol / pool-type
       badges live in the group head, so drop them from the card head here */
   nested?: boolean;
@@ -656,6 +689,7 @@ export function ClCard({
     stat,
     upUsd,
     wethUsd,
+    tokenUsd,
   });
 
   const run = async (fn: () => Promise<unknown>) => {
@@ -1218,6 +1252,7 @@ export function ClPoolGroup(props: {
   statOf: (pool: Pool) => PoolStat | undefined;
   upUsd?: number;
   wethUsd?: number | null;
+  tokenUsd?: TokenUsdMap;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(true);
@@ -1332,6 +1367,7 @@ export function ClPoolGroup(props: {
               stat={props.statOf(p.pool)}
               upUsd={props.upUsd}
               wethUsd={props.wethUsd}
+              tokenUsd={props.tokenUsd}
               nested
             />
           ))}
@@ -1792,6 +1828,7 @@ export function V2Card({
   stat,
   upUsd,
   wethUsd,
+  tokenUsd,
 }: {
   pos: V2Position;
   data: PoolsData;
@@ -1801,6 +1838,7 @@ export function V2Card({
   stat?: PoolStat;
   upUsd?: number;
   wethUsd?: number | null;
+  tokenUsd?: TokenUsdMap;
 }) {
   const { t } = useTranslation();
   const t0 =
@@ -1820,6 +1858,7 @@ export function V2Card({
     stat,
     upUsd,
     wethUsd,
+    tokenUsd,
   });
 
   const run = async (fn: () => Promise<unknown>) => {

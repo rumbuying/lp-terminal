@@ -28,6 +28,10 @@
   --amber: #ffc266;
   --red: #ff5555;
   --cyan: #c9c9c9;
+  --shadow: rgba(0, 0, 0, 0.7);
+  --semantic-fg: #000000;
+  --uni: #f50db4;
+  --uni-rgb: 245, 13, 180;
   --range: var(--green); /* LP ranges stay green in every theme */
   --range-rgb: 74, 222, 128;
   --crt: 0; /* scanline+vignette opacity (0 disables the CRT layer) */
@@ -40,6 +44,37 @@
   --t1: 120ms ease;
   font-size: 13.5px;
   color-scheme: dark;
+}
+
+/* Daylight terminal — neutral paper surfaces with dark ink. Semantic colors
+   are deliberately darker so status text and LP ranges retain contrast. */
+:root[data-theme='light'] {
+  --bg: #f3f4f6;
+  --panel: #ffffff;
+  --panel2: #f8fafc;
+  --inset: #f1f5f9;
+  --line: #d1d5db;
+  --line-hi: #9ca3af;
+  --fg: #111827;
+  --dim: #5b6472;
+  --placeholder: #8a94a3;
+  --acc: #111827;
+  --acc-dim: #4b5563;
+  --acc-fg: #ffffff;
+  --acc-rgb: 17, 24, 39;
+  --green: #08783f;
+  --green-dim: #179154;
+  --amber: #9a5b00;
+  --red: #c62828;
+  --cyan: #075985;
+  --range: var(--green);
+  --range-rgb: 8, 120, 63;
+  --shadow: rgba(15, 23, 42, 0.18);
+  --semantic-fg: #ffffff;
+  --uni: #a30078;
+  --uni-rgb: 163, 0, 120;
+  --crt: 0;
+  color-scheme: light;
 }
 
 /* phosphor-green CRT — the original UP33 look */
@@ -278,7 +313,7 @@ button, input, select {
   background: var(--inset);
   border: 1px solid var(--acc-dim);
   border-radius: var(--r-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 8px 24px var(--shadow);
   padding: 8px 10px;
   color: var(--dim);
   font-size: 0.8rem;
@@ -311,8 +346,8 @@ button, input, select {
 .btn:hover:not(:disabled) { background: var(--acc); color: var(--acc-fg); border-color: var(--acc); }
 .btn:disabled { color: var(--dim); border-color: var(--line); cursor: not-allowed; }
 .btn.danger { color: var(--red); }
-.btn.danger:hover:not(:disabled) { background: var(--red); color: #000; border-color: var(--red); }
-.btn.amber { background: var(--amber); border-color: var(--amber); color: #000; }
+.btn.danger:hover:not(:disabled) { background: var(--red); color: var(--semantic-fg); border-color: var(--red); }
+.btn.amber { background: var(--amber); border-color: var(--amber); color: var(--semantic-fg); }
 .btn.amber:hover:not(:disabled) { background: transparent; color: var(--amber); }
 .btn.ghost { color: var(--dim); border-color: var(--line); }
 .btn.ghost:hover:not(:disabled) { background: var(--line); color: var(--fg); }
@@ -341,7 +376,7 @@ button, input, select {
 .badge.proto { display: inline-flex; align-items: center; gap: 4px; }
 .badge.proto svg { height: 10px; width: auto; display: block; }
 .badge.proto img { height: 10px; width: 10px; display: block; }
-.badge.proto.uni { color: #f50db4; border-color: rgba(245, 13, 180, 0.55); }
+.badge.proto.uni { color: var(--uni); border-color: rgba(var(--uni-rgb), 0.55); }
 .badge.proto.home { color: var(--acc); border-color: var(--acc-dim); }
 /* logo-only protocol mark for table rows — identity without 100× "UNISWAP".
    Quieted with opacity rather than a faded color: a row mark identifies without
@@ -357,7 +392,7 @@ button, input, select {
 }
 .proto-mini svg { height: 11px; width: auto; display: block; }
 .proto-mini img { height: 11px; width: 11px; display: block; }
-.proto-mini.uni { color: #f50db4; }
+.proto-mini.uni { color: var(--uni); }
 .proto-mini.home { color: var(--acc); }
 
 /* Tokenized-equity marks. The color arrives inline from the issuer's brand
@@ -1464,7 +1499,7 @@ button.note-fix:focus-visible { color: var(--acc); }
   background: var(--inset);
   border: 1px solid var(--acc-dim);
   border-radius: var(--r-lg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 8px 24px var(--shadow);
 }
 .tsel-pop .filter { position: sticky; top: 0; background: var(--inset); padding: 6px; border-bottom: 1px solid var(--line); }
 /* The slot: a picker row, and the status lines that share its shape. */
@@ -1540,7 +1575,7 @@ button.tsel-item {
   background: var(--inset);
   border: 1px solid var(--acc-dim);
   border-radius: var(--r-lg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 8px 24px var(--shadow);
 }
 .hist-pop .logpanel { max-height: 46vh; border: none; }
 
@@ -1636,7 +1671,7 @@ button.tsel-item {
   width: min(320px, 88vw);
   background: var(--inset);
   border: 1px solid var(--acc-dim);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 8px 24px var(--shadow);
   padding: 9px 11px;
   color: var(--dim);
   line-height: 1.55;
@@ -1713,7 +1748,7 @@ button.tsel-item {
   width: min(320px, calc(100vw - 16px));
   background: var(--inset);
   border: 1px solid var(--acc-dim);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 8px 24px var(--shadow);
   padding: 8px 10px;
   text-align: left;
   text-transform: none;
@@ -1790,6 +1825,7 @@ button.tsel-item {
 /* footer theme switcher */
 .theme-ctl { display: inline-flex; gap: 4px; align-items: center; }
 .theme-ctl .chip { padding: 0 6px; font-size: 0.95em; }
+.mobile-theme { display: none; }
 /* The language switcher's two presentations (LangControl): both languages on a
    desktop, one chip naming the other language on a phone. The hidden half takes
    !important for the same reason .hide-m does — the `pointer: coarse` block at
@@ -2168,7 +2204,7 @@ th.sortable.on { color: var(--acc); }
   min-width: 190px;
   background: var(--inset);
   border: 1px solid var(--acc-dim);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 8px 24px var(--shadow);
 }
 .chain-pop .tsel-item {
   letter-spacing: 1px;
@@ -2536,6 +2572,15 @@ th.sortable.on { color: var(--acc); }
   .hdr .hist { margin-left: auto; }
   .hdr .hist ~ .hist { margin-left: 0; }
   .hdr .theme-ctl > .dim { display: none; } /* "lang:" label */
+  .mobile-theme {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 25px;
+    height: 25px;
+    padding: 0;
+    flex: none;
+  }
 
   /* Popovers span the header instead of hanging off their own button. At
      88vw a card whose right edge is pinned to a right-aligned button puts its

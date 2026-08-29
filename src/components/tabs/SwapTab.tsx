@@ -51,12 +51,14 @@ import { RouteMap } from '../RouteMap'
 import { SquatBadge, StockBadge } from '../TokenIdentity'
 import { TokenSelect } from '../TokenSelect'
 import { Badge, Btn, NumInput } from '../ui'
+import { LimitPanel } from './LimitPanel'
 
 // native units withheld from a MAX so the next transaction can still pay gas
 const GAS_BUFFER = CHAIN.gasBuffer
 
 type SlippageChoice = 'auto' | number // bps; a preset chip or the typed custom value
 type SwapSource = 'solver' | DirectProtocol
+type SwapMode = 'market' | 'limit'
 
 // Token choices survive top-level tab unmounts, but intentionally not reloads.
 let rememberedTokenIn: TokenInfo | null = null
@@ -123,6 +125,24 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
   const { openConnectModal } = useConnectModal()
   const tokenList = useTokenList()
   const list = tokenList.tokens
+
+  const [mode, setModeState] = useState<SwapMode>(() =>
+    !props.embedded && FEATURES.rangeOrders && location.hash === '#limit' ? 'limit' : 'market',
+  )
+  const setMode = (next: SwapMode) => {
+    setModeState(next)
+    history.replaceState(null, '', next === 'limit' ? '#limit' : '#swap')
+  }
+
+  useEffect(() => {
+    if (props.embedded || !FEATURES.rangeOrders) return
+    const onHash = () => {
+      if (location.hash === '#limit') setModeState('limit')
+      else if (location.hash === '#swap') setModeState('market')
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [props.embedded])
 
   const [tIn, setTInState] = useState<TokenInfo | null>(rememberedTokenIn)
   const [tOut, setTOutState] = useState<TokenInfo | null>(rememberedTokenOut)
@@ -199,6 +219,7 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
       const output = list.find((token) => token.address.toLowerCase() === intent.tokenOut.toLowerCase())
       if (input && output) {
         takeSwapIntent()
+        setModeState('market')
         setTIn(input)
         setTOut(output)
         setAmtStr(formatUnits(intent.amount, input.decimals))
@@ -501,9 +522,25 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
   // swap tab's top edge repeating it.
   const modeRow = props.embedded ? null : (
     <div
-      className="form-row hide-m"
-      style={{ marginBottom: 10, justifyContent: 'flex-end' }}
+      className="form-row"
+      style={{ marginBottom: 10 }}
     >
+      {FEATURES.rangeOrders && (
+        <>
+          <span className="lbl hide-m">{t('swap.mode')}</span>
+          <button className={`chip ${mode === 'market' ? 'on' : ''}`} onClick={() => setMode('market')}>
+            {t('swap.market')}
+          </button>
+          <button
+            className={`chip ${mode === 'limit' ? 'on' : ''}`}
+            onClick={() => setMode('limit')}
+            title={t('swap.limitTip')}
+          >
+            {t('swap.limit')}
+          </button>
+        </>
+      )}
+      <span style={{ flex: 1 }} />
       <span className="chain-tag" title={t('swap.chainTip', { chain: CHAIN.name, id: CHAIN_ID })}>
         <span className="dot" />
         {CHAIN.name}
@@ -513,6 +550,15 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
   // standalone the form is a centred column; embedded it fills the pane it was
   // given, and the market list beside it owns the width
   const boxCls = `swap-box ${props.embedded ? 'embedded' : 'narrow'}`
+
+  if (!props.embedded && FEATURES.rangeOrders && mode === 'limit') {
+    return (
+      <div className={boxCls}>
+        {modeRow}
+        <LimitPanel />
+      </div>
+    )
+  }
 
   const tokenListNotices = (
     <>

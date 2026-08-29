@@ -10,6 +10,7 @@ import { ChainControl } from './ChainControl'
 import { HistoryButton } from './HistoryButton'
 import { LangControl } from './LangControl'
 import { NewsButton } from './NewsButton'
+import { MobileThemeControl } from './ThemeControl'
 
 export type TabId = 'pools' | 'recommendations' | 'positions' | 'swap' | 'bridge' | 'strategy' | 'strategy-history' | 'pnl-calendar'
 // Reading order is the order of the trade: find a market, take it, then watch
@@ -67,6 +68,7 @@ export function Header(props: { tab: TabId; onTab: (t: TabId) => void }) {
       )}
       <HistoryButton />
       <NewsButton />
+      <MobileThemeControl />
       <LangControl />
       {/* immediately left of the wallet, where every DApp puts it — the two
           answer the same question from different sides */}

@@ -8,7 +8,7 @@
 //   unstaked -> swap fees, pro-rata active liquidity, in-range only
 //   univ3    -> always the fees branch (no gauges)
 import { ADDR, GOV } from '../config/addresses'
-import { clTokenUsd } from './apr'
+import { clTokenUsd, type TokenUsdMap } from './apr'
 import { nowSec } from './format'
 import { effectiveClFeePpm } from './poolIdentity'
 import type { PoolStat } from './poolstats'
@@ -62,10 +62,11 @@ export function clPosMetrics(args: {
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  tokenUsd?: TokenUsdMap
 }): ClMetrics {
   const { pos, dec0, dec1 } = args
   const pool = pos.pool
-  const px = clTokenUsd(pool, dec0, dec1, args.upUsd, args.wethUsd)
+  const px = clTokenUsd(pool, dec0, dec1, args.upUsd, args.wethUsd, args.tokenUsd)
   const h = (v: bigint, d: number) => Number(v) / 10 ** d
   const valueUsd = px ? h(args.amount0, dec0) * px.p0 + h(args.amount1, dec1) * px.p1 : null
   const feesUsd = px ? h(pos.fees0, dec0) * px.p0 + h(pos.fees1, dec1) * px.p1 : null
@@ -109,7 +110,15 @@ export function v2TokenUsd(
   upUsd?: number,
   wethUsd?: number | null,
   statLiqUsd?: number | null,
+  tokenUsd?: TokenUsdMap,
 ): { p0: number; p1: number } | null {
+  const token0 = pool.token0.toLowerCase()
+  const token1 = pool.token1.toLowerCase()
+  const direct0 = tokenUsd?.[token0]
+  const direct1 = tokenUsd?.[token1]
+  const valid = (price: number | null | undefined): price is number =>
+    price !== null && price !== undefined && Number.isFinite(price) && price > 0
+  if (valid(direct0) && valid(direct1)) return { p0: direct0, p1: direct1 }
   const r0h = Number(pool.reserve0) / 10 ** dec0
   const r1h = Number(pool.reserve1) / 10 ** dec1
   if (!(r0h > 0) || !(r1h > 0)) return null
@@ -118,8 +127,10 @@ export function v2TokenUsd(
     [ADDR.WNATIVE.toLowerCase()]: wethUsd ?? undefined,
     ...(GOV ? { [GOV.UP.toLowerCase()]: upUsd } : {}),
   }
-  const a0 = anchors[pool.token0.toLowerCase()]
-  const a1 = anchors[pool.token1.toLowerCase()]
+  if (valid(direct0)) return { p0: direct0, p1: (direct0 * r0h) / r1h }
+  if (valid(direct1)) return { p0: (direct1 * r1h) / r0h, p1: direct1 }
+  const a0 = anchors[token0]
+  const a1 = anchors[token1]
   // value balance: r0·p0 ≈ r1·p1 (true for volatile pairs; good enough for stables)
   if (a0 !== undefined && a0 > 0) return { p0: a0, p1: (a0 * r0h) / r1h }
   if (a1 !== undefined && a1 > 0) return { p0: (a1 * r1h) / r0h, p1: a1 }
@@ -141,10 +152,11 @@ export function v2PosMetrics(args: {
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  tokenUsd?: TokenUsdMap
 }): V2Metrics {
   const { pos, dec0, dec1 } = args
   const pool = pos.pool
-  const px = v2TokenUsd(pool, dec0, dec1, args.upUsd, args.wethUsd, args.stat?.liqUsd)
+  const px = v2TokenUsd(pool, dec0, dec1, args.upUsd, args.wethUsd, args.stat?.liqUsd, args.tokenUsd)
   const h = (v: bigint, d: number) => Number(v) / 10 ** d
   const valueUsd = px ? h(pos.amount0, dec0) * px.p0 + h(pos.amount1, dec1) * px.p1 : null
   const feesUsd = px ? h(pos.claimable0, dec0) * px.p0 + h(pos.claimable1, dec1) * px.p1 : null

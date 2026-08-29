@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <!-- The LP wordmark, same one as the badge in ProtoBadge and wallet-icon.png,
          but redrawn on a 16-unit grid: at tab size every bar has to land on a
          whole pixel or the P's counter fills in and it reads as a blob. -->
@@ -18,7 +18,10 @@
       try {
         var m = location.search.match(/[?&]theme=(\w+)/)
         var t = (m && m[1]) || localStorage.getItem('up33.theme.v1')
-        if (/^(mono|phosphor|amber|ice|violet)$/.test(t)) document.documentElement.dataset.theme = t
+        if (/^(mono|light|phosphor|amber|ice|violet)$/.test(t)) {
+          document.documentElement.dataset.theme = t
+          document.documentElement.style.colorScheme = t === 'light' ? 'light' : 'dark'
+        }
       } catch (e) {}
     </script>
   </head>

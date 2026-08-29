@@ -14,18 +14,48 @@ import type { ClPool, Pool, V2Pool } from '../types'
 
 const YEAR = 31_536_000
 
-export function fees24Of(p: Pool, stat?: PoolStat): number | null {
-  if (stat?.vol24hUsd == null) return null
+export type VolumeWindow = 'm5' | 'h1' | 'h6' | 'h24'
+
+export function volumeWindowLabel(window: VolumeWindow): string {
+  return window === 'm5' ? '5M' : `${window.slice(1)}H`
+}
+
+const VOLUME_FIELD: Record<VolumeWindow, keyof Pick<PoolStat, 'vol5mUsd' | 'vol1hUsd' | 'vol6hUsd' | 'vol24hUsd'>> = {
+  m5: 'vol5mUsd',
+  h1: 'vol1hUsd',
+  h6: 'vol6hUsd',
+  h24: 'vol24hUsd',
+}
+
+const WINDOW_SECONDS: Record<VolumeWindow, number> = {
+  m5: 5 * 60,
+  h1: 60 * 60,
+  h6: 6 * 60 * 60,
+  h24: 24 * 60 * 60,
+}
+
+export function volumeOf(stat: PoolStat | undefined, window: VolumeWindow): number | null {
+  return stat?.[VOLUME_FIELD[window]] ?? null
+}
+
+export function feesOf(p: Pool, stat: PoolStat | undefined, window: VolumeWindow): number | null {
+  const volume = volumeOf(stat, window)
+  if (volume == null) return null
   const feePct = p.kind === 'v2' ? p.feeBps / 100 : effectiveClFeePpm(p) / 10_000
-  return (stat.vol24hUsd * feePct) / 100
+  return (volume * feePct) / 100
+}
+
+export function fees24Of(p: Pool, stat?: PoolStat): number | null {
+  return feesOf(p, stat, 'h24')
 }
 
 /** pool-average fee APR for an UNSTAKED LP (net of the CL unstaked levy) */
-export function feeAprOf(p: Pool, stat?: PoolStat): number | null {
-  if (stat?.vol24hUsd == null || stat.liqUsd == null || stat.liqUsd <= 0) return null
-  const feeFrac = p.kind === 'v2' ? p.feeBps / 10_000 : effectiveClFeePpm(p) / 1e6
+export function feeAprOf(p: Pool, stat?: PoolStat, window: VolumeWindow = 'h24'): number | null {
+  if (stat?.liqUsd == null || stat.liqUsd <= 0) return null
+  const grossFees = feesOf(p, stat, window)
+  if (grossFees == null) return null
   const keep = p.kind === 'cl' ? 1 - p.unstakedFeePpm / 1e6 : 1
-  return ((stat.vol24hUsd * feeFrac * keep * 365) / stat.liqUsd) * 100
+  return ((grossFees * keep * (YEAR / WINDOW_SECONDS[window])) / stat.liqUsd) * 100
 }
 
 export function stakedShareOf(p: Pool): number {
@@ -70,6 +100,11 @@ export type ClTokenUsd = {
   exact: boolean
 }
 
+export type TokenUsdMap = Record<string, number | undefined>
+
+const validUsd = (price: number | null | undefined): price is number =>
+  price !== null && price !== undefined && Number.isFinite(price) && price > 0
+
 /**
  * USD prices of a CL pool's two tokens via USDG($1) / WETH / UP anchors.
  *
@@ -88,7 +123,15 @@ export function clTokenUsd(
   dec1: number,
   upUsd?: number,
   wethUsd?: number | null,
+  tokenUsd?: TokenUsdMap,
 ): ClTokenUsd | null {
+  const token0 = pool.token0.toLowerCase()
+  const token1 = pool.token1.toLowerCase()
+  const direct0 = tokenUsd?.[token0]
+  const direct1 = tokenUsd?.[token1]
+  if (validUsd(direct0) && validUsd(direct1))
+    return { p0: direct0, p1: direct1, anchor: 0, exact: false }
+
   const anchors: Record<string, number | undefined> = {
     [ADDR.STABLE.toLowerCase()]: 1,
     [ADDR.WNATIVE.toLowerCase()]: wethUsd ?? undefined,
@@ -98,8 +141,10 @@ export function clTokenUsd(
   const P = sqrtPriceToPrice(pool.sqrtPriceX96, dec0, dec1) // token1 per 1 token0
   if (!Number.isFinite(P) || P <= 0) return null
   const stable = ADDR.STABLE.toLowerCase()
-  const t0 = pool.token0.toLowerCase()
-  const t1 = pool.token1.toLowerCase()
+  const t0 = token0
+  const t1 = token1
+  if (validUsd(direct0)) return { p0: direct0, p1: direct0 / P, anchor: 0, exact: false }
+  if (validUsd(direct1)) return { p0: P * direct1, p1: direct1, anchor: 1, exact: false }
   const a0 = anchors[t0]
   const a1 = anchors[t1]
   const from0: ClTokenUsd | null =
@@ -139,6 +184,7 @@ export function simulateClAdd(args: {
   stat?: PoolStat
   upUsd?: number
   wethUsd?: number | null
+  volumeWindow?: VolumeWindow
 }): AddSim | null {
   const { pool, liquidity } = args
   if (liquidity <= 0n) return null
@@ -152,10 +198,12 @@ export function simulateClAdd(args: {
   const feeShare = L / (Number(pool.liquidity) + L)
   const emitShare = L / (Number(pool.stakedLiquidity) + L)
   const keep = 1 - pool.unstakedFeePpm / 1e6
+  const volumeWindow = args.volumeWindow ?? 'h24'
+  const windowFees = feesOf(pool, args.stat, volumeWindow)
   const feeApr =
-    args.stat?.vol24hUsd == null
+    windowFees == null
       ? NaN
-      : ((args.stat.vol24hUsd * 365 * (effectiveClFeePpm(pool) / 1e6) * keep * feeShare) / depositUsd) * 100
+      : ((windowFees * (YEAR / WINDOW_SECONDS[volumeWindow]) * keep * feeShare) / depositUsd) * 100
   const emitApr =
     !args.upUsd || !isEmitting(pool)
       ? NaN
@@ -172,6 +220,7 @@ export function simulateV2Add(args: {
   dec1: number
   stat?: PoolStat
   upUsd?: number
+  volumeWindow?: VolumeWindow
 }): AddSim | null {
   const { pool, stat } = args
   if (stat?.liqUsd == null || stat.liqUsd <= 0) return null
@@ -183,10 +232,12 @@ export function simulateV2Add(args: {
   const p1 = stat.liqUsd / 2 / r1h
   const depositUsd = args.amount0h * p0 + args.amount1h * p1
   if (!(depositUsd > 0)) return null
+  const volumeWindow = args.volumeWindow ?? 'h24'
+  const windowFees = feesOf(pool, stat, volumeWindow)
   const feeApr =
-    stat.vol24hUsd == null
+    windowFees == null
       ? NaN
-      : ((stat.vol24hUsd * 365 * (pool.feeBps / 10_000)) / (stat.liqUsd + depositUsd)) * 100
+      : ((windowFees * (YEAR / WINDOW_SECONDS[volumeWindow])) / (stat.liqUsd + depositUsd)) * 100
   const stakedTvl = stat.liqUsd * stakedShareOf(pool)
   const emitApr =
     !args.upUsd || !isEmitting(pool)
