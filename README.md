@@ -441,7 +441,10 @@ of the fee. Fee policy and slippage stay independent. Non-transactional valuatio
 APR, positions and add-LP simulations) uses a fee-free Kyber quote; that display
 price never enters route selection, Zap sizing, minimum output or execution.
 
-Signing is browser-wallet only (RainbowKit / injected EIP-6963). No private keys anywhere.
+Interactive POOLS/SWAP/POSITIONS writes are browser-wallet only (RainbowKit /
+injected EIP-6963). The optional unattended strategy executor is a separate,
+loopback-only service with its own explicit signer and encrypted local state;
+see “Recommendations and unattended strategies” below.
 
 **i18n (en/zh)**: react-i18next with typed keys — catalogs in `src/i18n/en.ts` (source of
 truth) + `zh.ts` (`typeof en` enforces identical key structure at compile time). Language:
@@ -454,10 +457,10 @@ The `#lab` dev page stays English.
 
 ## Tabs
 
-Tab order is `POOLS · SWAP · POSITIONS · BRIDGE` — the order of the act: find a
-market, take it, then watch what you are left holding, with the bridge as how
-funds arrive. Keyboard: `1` pools, `2` swap, `3` positions, `5` bridge, `4`
-opens LIMIT, `/` focuses the pool filter. Tabs
+Tab order includes `POOLS · SWAP · POSITIONS · BRIDGE · STRATEGY · STRATEGY
+HISTORY · P/L CALENDAR · RECOMMEND`. Keyboard: `1` pools, `2` swap, `3`
+positions, `5` bridge, `6` strategy, `9` recommend, `4` opens LIMIT, and `/`
+focuses the pool filter. Tabs
 are hash-routed (`#pools`, `#swap`, …) so reloads and deep links keep your
 place. `#lab` renders the component lab (synthetic data) for visual tweaking.
 (The old DASH tab was removed with the LP-terminal refocus. The header carries
@@ -604,6 +607,12 @@ API:
   cursors and rss). Top-level readiness fails closed across every venue supported
   by the configured chain.
 
+  `GET /api/recommendation-candidates` is deliberately a separate bounded
+  analytics feed. It combines current state with retained market/tick samples
+  for UP33 CL, Uniswap v3/v4 and PancakeSwap v3. UP33 rows come from a complete
+  official-factory enumeration but remain outside the public Uniswap/Pancake
+  pool catalog, counts, cursors and solver adjacency.
+
 Data lives in `indexer/data/index.<chain>-<id>.db` locally and `/data/index.db`
 in production (WAL SQLite); delete only the chain-scoped DB to re-backfill from
 scratch — the kv cursors make every loop resumable. Measured context for
@@ -618,11 +627,62 @@ self-computed fee/APR analytics are ever wanted). At this scale a full state
 sweep is ~1k multicall aggregates (~7 min hourly); the hot tier stays tiny
 because real TVL, not pool count, bounds it.
 
+## Recommendations and unattended strategies
+
+`RECOMMEND` ranks pools for a chosen capital amount, objective (fees or rewards)
+and risk level. The model walk-forward selects a usable volume horizon, replays
+candidate ranges over retained tick history, subtracts measured/default gas and
+execution costs, and applies hard opening gates. A recommendation remains
+observable when gated, but only ungated rows appear as actionable picks. Opening
+one sends the exact PoolId (for v4), ticks, percentages and capital assumption
+into the POOLS liquidity panel; it does not silently replace the range with a UI
+default.
+
+The indexer intentionally enumerates the entire official UP33 CL factory for
+this feed. There is no fixed “first N pools” cutoff, so newly created Robinhood
+markets—the likely home of a newly popular token—cannot disappear merely
+because they sit at the registry tail. Market statistics still have to mature
+and pass the model gates before a row becomes actionable.
+
+`STRATEGY` is the opt-in execution layer. It supports chain-bound UP33,
+Uniswap v3, PancakeSwap v3 and Uniswap v4 positions, including BSC native-BNB
+v4 pools and Permit2. It records plans, signed transactions, receipts,
+allocations, costs, P/L snapshots and recovery state before advancing. Browser
+wallet sessions and admin tokens are scoped by chain, every executor response
+is checked against the selected chain id, and the canonical gateway uses
+`/_chain/<chain>/executor/*`; a compatibility host fails closed for a chain it
+does not serve.
+
+The normal frontend keeps browser-wallet signing. Enabling unattended execution
+adds a hot signer: either an AES-256-GCM encrypted local vault protected by a
+master-key file, or an explicit 0600 private-key file. Exact approvals remain
+the default; low-transaction mode deliberately retains broader approvals and
+must be treated as a separate risk choice. The API binds loopback and must sit
+behind TLS, strict Origin filtering and authentication.
+
+Recovery is conservative. Confirmed v3/UP33 steps are reconciled from durable
+receipts and chain state. Confirmed v4 lifecycle mutations whose receipts do not
+carry the v3 accounting events are quarantined for manual review instead of
+guessing amounts; the same fail-closed rule applies to an unrecorded confirmed
+native-profit swap. This can require operator intervention, but it cannot
+silently invent balances and continue spending.
+
+Useful checks:
+
+```bash
+npm run test:strategy
+npm run smoke:strategy
+npm run smoke:executor
+CHAIN=bsc npm run executor
+CHAIN=robinhood npm run executor
+```
+
 ## Deploy
 
 The frontend remains a static SPA. Production adds a thin stateless Caddy/nginx
-BFF for same-origin data/RPC calls and one pool-indexer process per chain; wallet
-writes are still created and signed only in the browser. Limit-order tags remain
+BFF for same-origin data/RPC calls and one pool-indexer process per chain.
+Interactive writes remain browser-signed; unattended writes exist only when the
+separate stateful executor is explicitly deployed. Limit-order tags remain
 device-local in chain-scoped `localStorage`.
 
 Private RPC credentials are server concerns. Direct Uniswap and UP33 quotes are
@@ -679,19 +739,40 @@ caddy / Cloudflare Worker will do:
 | --------------- | -------------------------------------- | -------------------------------------------------------------------------- |
 | `/rpc`          | your JSON-RPC upstream for this chain  | the key stays server-side; the app auto-detects the path and uses it        |
 | `/api`          | your `indexer` process on :8787        | pool discovery — optional, but the catalog is the good version              |
+| `/executor`     | your build-chain executor on :8790/8791 | opt-in strategy API; strip the prefix and never expose it without TLS/auth   |
 | `/kyber`        | `https://aggregator-api.kyberswap.com` | build with `KYBERSWAP_AGGREGATOR_API_BASE_URL=/kyber`                       |
 | `/dexscreener`  | `https://api.dexscreener.com`          | TVL/volume enrichment                                                       |
 | `/goldsky`      | `https://api.goldsky.com`              | UP33 v2 subgraph (Robinhood)                                                |
 | `/thegraph`     | `https://gateway.thegraph.com`         | BSC position discovery and the guarded v4 fallback; the key stays in the proxy |
 
-One chain per build, one indexer per chain, one database per indexer. To serve
-both chains from a single origin, run a stack per chain and give each a fixed
-path namespace: the bundle expects `/_chain/<chain>/rpc` and
-`/_chain/<chain>/api/*`, and enables those routes only when the runtime
+One chain per build, one indexer and (when enabled) one executor per chain, with
+separate databases, vaults, API tokens and RPC credentials. To serve both chains
+from a single origin, run a stack per chain and give each a fixed path namespace:
+the bundle expects `/_chain/<chain>/rpc`, `/_chain/<chain>/api/*` and
+`/_chain/<chain>/executor/*`, and enables those routes only when the runtime
 `location.hostname` matches `VITE_CHAIN_GATEWAY_HOST` exactly, so the same build
 stays safe on every other host. Refuse unscoped `/rpc` and `/api` on that
-combined origin rather than letting them fall through, or a stale tab can cross
-chains without saying so.
+combined origin, and never map a namespaced executor to the other chain's
+process. The client checks the executor's `x-lp-chain-id` response header as a
+second boundary.
+
+The supplied systemd templates run explicit per-chain instances. Put all
+chain-specific values in root-owned files such as
+`/etc/lp-terminal-indexer/bsc.env` and
+`/etc/lp-terminal-executor/bsc.env`, then enable the matching instances:
+
+```bash
+sudo systemctl enable --now lp-terminal-indexer@bsc lp-terminal-indexer@robinhood
+sudo systemctl enable --now lp-terminal-executor@bsc lp-terminal-executor@robinhood
+```
+
+An executor environment must at least align `CHAIN`,
+`LP_EXECUTOR_CHAIN_ID`, `LP_EXECUTOR_PORT`, `LP_EXECUTOR_DATA_DIR`,
+`LP_EXECUTOR_INDEXER_BASE`, the three secret-file paths, and
+`LP_EXECUTOR_ALLOWED_ORIGIN`. Use different directories and secret files for
+`bsc` and `robinhood`; example keys and the expected ports are documented in
+`.env.example`. The templates are `deploy/lp-terminal-indexer@.service` and
+`deploy/lp-terminal-executor@.service`.
 
 Routing the data APIs through your own origin means the browser only ever talks
 to your origin + the chain RPC + wallet relays, so users on restrictive networks
@@ -734,14 +815,18 @@ Other targets:
 
 Threat model researched against real dApp incidents (BadgerDAO injected-script
 approval drain, Curve/CoW DNS hijacks, Ledger Connect Kit npm supply chain) and
-the OWASP Web3 attack-vector list. Architecture principle: **static SPA + thin
-stateless reverse proxy = minimal attack surface** — no accounts or application
-database; server-side credentials are limited to upstream RPC access.
+the OWASP Web3 attack-vector list. The default architecture remains a static SPA
+plus a stateless reverse proxy. The optional executor is a distinct, stateful
+trust boundary with loopback binding, authenticated APIs, chain-isolated data,
+encrypted vaults, durable transaction journals and explicit operator recovery.
 
 **Wallet-interaction safety (the money paths)**
 
-- browser-wallet signing only; no key material anywhere in app, server, or storage
-- exact-amount approvals; selected direct router, route, assets, recipient and net
+- browser-wallet signing only in the standard frontend; no key material is sent
+  to the SPA server or browser storage. An explicitly enabled executor keeps its
+  signer only in its encrypted local vault or configured 0600 file
+- exact-amount approvals by default; executor low-transaction mode is an
+  explicit exception that retains allowances/operator approval. Selected direct router, route, assets, recipient and net
   minimum are gated before signing; writes are chainId-pinned with deadlines
 - terminal fees execute atomically with the swap; native-route minimums come from
   fresh on-chain quotes
@@ -764,9 +849,9 @@ database; server-side credentials are limited to upstream RPC access.
 
 - dependencies exact-pinned (`.npmrc save-exact`) + lockfile — a compromised
   patch release can't slip in via re-install (Ledger-style attack)
-- `npm audit` on every dependency change. Known open advisory: `ws` DoS via
-  wagmi's WalletConnect chain — server-side-only issue, browsers use native
-  WebSocket; the fix is a wagmi v2→v3 major migration, deferred deliberately
+- `npm audit` on every dependency change; transitive `axios` and `ws` versions
+  are held at the reviewed root override until their parent dependency floors
+  catch up
 - zero analytics/trackers/third-party runtime scripts
 
 **Frontend integrity (DNS/CDN hijack detection)**

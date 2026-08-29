@@ -105,8 +105,13 @@ export const clPmAbi = parseAbi([
   'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
   'function ownerOf(uint256 tokenId) view returns (address)',
   'function getApproved(uint256 tokenId) view returns (address)',
+  'function isApprovedForAll(address owner, address operator) view returns (bool)',
   'function approve(address to, uint256 tokenId)',
+  'function setApprovalForAll(address operator, bool approved)',
   'function burn(uint256 tokenId) payable',
+  'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
 ])
 
 // Note: CLGauge also has getReward(address); only the tokenId variant is included

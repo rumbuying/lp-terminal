@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "echo '── CHAIN=bsc' && CHAIN=bsc npm run --silent test:target && echo '── CHAIN=robinhood' && CHAIN=robinhood npm run --silent test:target",
     "test:target": "node --experimental-test-module-mocks --import=tsx --test indexer/*.test.ts scripts/*.test.ts src/config/chains/*.test.ts src/lib/*.test.ts src/lib/bridge/*.test.ts",
+    "test:strategy": "node --experimental-test-module-mocks --import=tsx --test executor/*.test.ts shared/recommendation/*.test.ts shared/strategy/*.test.ts",
     "test:chain-check": "node --import=tsx --test scripts/chain-check-policy.test.ts",
     "check:bsc": "npm run test:chain-check && CHAIN=bsc tsx scripts/chain-check.ts",
     "smoke": "tsx scripts/smoke.ts",
@@ -17,9 +18,15 @@
     "smoke:uni": "tsx scripts/uni-browse-smoke.ts",
     "smoke:launchpad": "tsx scripts/launchpad-smoke.ts",
     "smoke:logtail": "tsx scripts/logtail-smoke.ts",
+    "smoke:strategy": "tsx scripts/strategy-smoke.ts",
+    "smoke:executor": "tsx scripts/executor-smoke.ts",
+    "smoke:executor-api": "tsx scripts/executor-api-smoke.ts",
+    "smoke:executor-integration": "tsx scripts/executor-integration-smoke.ts",
+    "preflight:real": "tsx scripts/executor-real-preflight.ts",
     "indexer": "tsx indexer/main.ts",
     "indexer:rebuild-adjacency": "tsx indexer/rebuildSolverAdjacency.ts",
-    "indexer:rebuild-connectors": "tsx indexer/rebuildSolverConnectors.ts"
+    "indexer:rebuild-connectors": "tsx indexer/rebuildSolverConnectors.ts",
+    "executor": "tsx executor/main.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "2.2.11",
@@ -31,9 +38,12 @@
     "viem": "2.55.2",
     "wagmi": "2.19.5"
   },
-  "// overrides": "rainbowkit -> cuer@0.0.3 renders every QR with `border: 0`, but it asks npm for `qr: \"~0\"` — which floats to ANY 0.x. qr@0.6.0 started rejecting border <= 0, so the QR component throws on render, the error escapes React, and the WHOLE APP unmounts to a black screen the moment you pick a WalletConnect-backed wallet. Latent until 2026-07-23: a dead projectId meant we never reached the QR. cuer@0.0.3 and rainbowkit@2.2.11 are both latest — nothing upstream to upgrade to, so pin the last qr that accepts border=0.",
+  "// overrides": "qr@0.5.5 preserves RainbowKit/cuer border=0 compatibility; axios, Hono, and ws are reviewed transitive security floors until parent dependency ranges catch up.",
   "overrides": {
-    "qr": "0.5.5"
+    "qr": "0.5.5",
+    "axios": "1.19.0",
+    "hono": "4.13.5",
+    "ws": "8.21.3"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

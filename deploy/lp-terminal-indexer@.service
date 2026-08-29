@@ -1,0 +1,26 @@
+[Unit]
+Description=LP Terminal pool indexer (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=lpindexer
+Group=lpindexer
+WorkingDirectory=/opt/lp-terminal-indexer/app
+Environment=NODE_ENV=production
+Environment=HOME=/opt/lp-terminal-indexer
+Environment=PATH=/opt/node-v22/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/lp-terminal-indexer/%i.env
+ExecStart=/opt/lp-terminal-indexer/app/node_modules/.bin/tsx indexer/main.ts
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/lp-terminal-indexer
+ReadOnlyPaths=/etc/lp-terminal-indexer
+
+[Install]
+WantedBy=multi-user.target

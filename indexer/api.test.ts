@@ -220,6 +220,83 @@ test('token search bounds the work in front of its pool-count subquery', () => {
   );
 });
 
+test('recommendation candidates expose fresh v3 state without changing the public catalog protocol contract', () => {
+  const pool = address(0xd001);
+  store.insertPool({
+    address: pool,
+    proto: CHAIN.id === 56 ? 'pancakev3' : 'univ3',
+    token0,
+    token1,
+    feePpm: 2_500,
+    tickSpacing: 50,
+  });
+  try {
+    store.upsertState(pool, {
+      sqrtPrice: 1n << 96n,
+      tick: 0,
+      liquidity: 1_000_000n,
+      reserve0: 1_000n,
+      reserve1: 1_000n,
+    });
+    store.setTvl(pool, 100_000, false);
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 100_000, 'test');
+    store.captureAddressTickSamples([pool], '123');
+
+    const result = api.getRecommendationCandidates(new URLSearchParams({ limit: '10' }));
+    const candidate = result.candidates.find((row) => row.pool === pool);
+    assert.ok(candidate);
+    assert.equal(candidate.protocol, CHAIN.id === 56 ? 'pancakeswap-v3' : 'univ3');
+    assert.equal(candidate.poolId, undefined);
+    assert.equal(candidate.vol1hUsd, 1_000);
+    assert.equal(candidate.tickHistory.at(-1)?.tick, 0);
+    assert.throws(
+      () => api.canonicalPoolsRequest(new URLSearchParams({ proto: 'up33cl' })),
+      /invalid pool protocol/,
+    );
+  } finally {
+    store.db.prepare('DELETE FROM pools WHERE address = ?').run(pool);
+  }
+});
+
+test('Robinhood recommendation candidates retain UP33 fee and reward identity', { skip: !CHAIN.gov }, () => {
+  const pool = address(0xd002);
+  store.insertPool({
+    address: pool,
+    proto: 'up33cl',
+    token0,
+    token1,
+    feePpm: 3_000,
+    unstakedFeePpm: 100_000,
+    tickSpacing: 60,
+    gauge: address(0xd003),
+  });
+  try {
+    store.upsertState(pool, {
+      sqrtPrice: 1n << 96n,
+      tick: 0,
+      liquidity: 1_000_000n,
+      stakedLiquidity: 750_000n,
+      rewardRate: 10n ** 18n,
+      periodFinish: BigInt(Math.floor(Date.now() / 1_000) + 86_400),
+      gaugeAlive: true,
+      reserve0: 1_000n,
+      reserve1: 1_000n,
+    });
+    store.setTvl(pool, 100_000, false);
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 100_000, 'test');
+
+    const candidate = api.getRecommendationCandidates(new URLSearchParams({ limit: '20' }))
+      .candidates.find((row) => row.pool === pool);
+    assert.ok(candidate);
+    assert.equal(candidate.protocol, 'up33');
+    assert.equal(candidate.unstakedFeePpm, 100_000);
+    assert.equal(candidate.gaugeAlive, true);
+    assert.equal(candidate.stakedLiquidity, '750000');
+  } finally {
+    store.db.prepare('DELETE FROM pools WHERE address = ?').run(pool);
+  }
+});
+
 test('LIKE metacharacters in a search term only ever match themselves', () => {
   assert.equal(api.escapeLikePattern('usdt'), 'usdt');
   assert.equal(api.escapeLikePattern('%'), '\\%');

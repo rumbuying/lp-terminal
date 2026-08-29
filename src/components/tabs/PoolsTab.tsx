@@ -75,6 +75,10 @@ import {
 import { poolStatWithFallback } from "../../lib/poolStatFallback";
 import { pairSquats } from "../../lib/knownToken";
 import { orientPair, pairSide } from "../../lib/pairSide";
+import {
+  takeRecommendationPrefill,
+  type RecommendationPrefill,
+} from "../../lib/recommendationPrefill";
 import { tradePanelTab, type TradeTab } from "../../lib/tradePanelPref";
 import { shouldDiscoverPositionsInPools } from "../../lib/positionLifecycle";
 import {
@@ -275,12 +279,22 @@ export function PoolsTab() {
   const stats = usePoolStats();
   const upPrice = useUpPrice();
   const { address: user } = useAccount();
-  const [q, setQ] = useState(""); // one input: filters home locally + queries both catalogs
+  // Recommendations cross a top-level tab boundary. Consume the one-shot
+  // handoff exactly once when POOLS mounts, then use the canonical pool
+  // identity (PoolId for v4, contract address otherwise) for both catalog
+  // lookup and selection.
+  const [recommendation] = useState<RecommendationPrefill | null>(() =>
+    takeRecommendationPrefill(),
+  );
+  const recommendationId = (
+    recommendation?.poolId ?? recommendation?.pool ?? ""
+  ).toLowerCase();
+  const [q, setQ] = useState(recommendationId); // one input: filters home locally + queries both catalogs
   // The row the trade panel is pointed at, by pool identity rather than by
   // object: the catalog re-fetches underneath this and hands back a new object
   // for the same pool, and a selection that broke on a refresh would clear the
   // form mid-trade.
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(recommendationId || null);
   const [sort, setSortState] = useState<SortKey>(rememberedSort);
   const [onlyMine, setOnlyMine] = useState(false);
   // Pool browsing is public data. The expensive wallet-wide position scan is
@@ -290,8 +304,8 @@ export function PoolsTab() {
     enabled: shouldDiscoverPositionsInPools(onlyMine),
   });
   const [market, setMarketState] = useState<MarketFilter>(rememberedMarket);
-  const [uniQuery, setUniQuery] = useState(""); // '' = useful catalog front pages; text/address/id = indexed search
-  const [hideDust, setHideDust] = useState(true); // most long-tail factory catalogs are <$1k dust
+  const [uniQuery, setUniQuery] = useState(recommendationId); // '' = useful catalog front pages; text/address/id = indexed search
+  const [hideDust, setHideDust] = useState(!recommendation); // most long-tail factory catalogs are <$1k dust
   // Pools whose token wears a name belonging to another contract. Hidden by
   // default because a landing page sorted by volume is exactly where a
   // "USDC/WBNB" row that is not USDC does its work — but only hidden, never
@@ -356,6 +370,10 @@ export function PoolsTab() {
     const id = setTimeout(() => setUniQuery(q.trim()), 350);
     return () => clearTimeout(id);
   }, [q]);
+
+  useEffect(() => {
+    if (recommendation) tradePanelTab.set("liquidity");
+  }, [recommendation]);
 
   useEffect(() => {
     if (!user) setOnlyMine(false);
@@ -1257,6 +1275,11 @@ export function PoolsTab() {
               stat={statOf(selected)}
               upUsd={upPrice.data}
               wethUsd={stats.data?.wethUsd}
+              recommendation={
+                poolIdentity(selected) === recommendationId
+                  ? recommendation
+                  : null
+              }
               onClose={() => setOpenId(null)}
             />
           ) : (
@@ -1282,6 +1305,11 @@ export function PoolsTab() {
             stat={statOf(selected)}
             upUsd={upPrice.data}
             wethUsd={stats.data?.wethUsd}
+            recommendation={
+              poolIdentity(selected) === recommendationId
+                ? recommendation
+                : null
+            }
             onClose={() => setOpenId(null)}
           />
         </Modal>
@@ -1732,6 +1760,7 @@ function TradePanel(props: {
   stat?: PoolStat;
   upUsd?: number;
   wethUsd?: number | null;
+  recommendation?: RecommendationPrefill | null;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -1848,6 +1877,17 @@ function TradePanel(props: {
           stat={props.stat}
           upUsd={props.upUsd}
           wethUsd={props.wethUsd}
+          recommendedPct={props.recommendation?.pct}
+          recommendedCapitalUsd={props.recommendation?.capitalUsd}
+          recommendedTicks={
+            props.recommendation
+              ? {
+                  lower: props.recommendation.tickLower,
+                  upper: props.recommendation.tickUpper,
+                }
+              : undefined
+          }
+          recommendationStatus={props.recommendation?.status}
         />
       )}
     </div>
@@ -2269,12 +2309,20 @@ export function AddCl({
   stat,
   upUsd,
   wethUsd,
+  recommendedPct,
+  recommendedCapitalUsd,
+  recommendedTicks,
+  recommendationStatus,
 }: {
   pool: ClPool;
   data: PoolsData;
   stat?: PoolStat;
   upUsd?: number;
   wethUsd?: number | null;
+  recommendedPct?: number;
+  recommendedCapitalUsd?: number;
+  recommendedTicks?: { lower: number; upper: number };
+  recommendationStatus?: "recommended" | "observed";
 }) {
   const { t } = useTranslation();
   const { address: user } = useAccount();
@@ -2282,16 +2330,36 @@ export function AddCl({
   const t1 = tokenOf(data, pool.token1);
   const hookedV4 = v4HasHooks(pool);
   const [fund, setFund] = useState<"pair" | "zap">(hookedV4 ? "pair" : "zap");
-  const [mode, setMode] = useState<RangeMode>("p10");
+  const recommendedPreset = PRESETS.find(
+    (preset) =>
+      Math.abs(preset.pct * 100 - (recommendedPct ?? -1)) < 1e-9,
+  );
+  const [mode, setMode] = useState<RangeMode>(
+    recommendedTicks
+      ? "ticks"
+      : (recommendedPreset?.id ?? (recommendedPct ? "pct" : "p10")),
+  );
   const [advOpen, setAdvOpen] = useState(false);
-  const [pctStr, setPctStr] = useState("10");
+  const [pctStr, setPctStr] = useState(
+    recommendedPct ? String(recommendedPct) : "10",
+  );
   const [custom, setCustom] = useState<{ lower: string; upper: string }>({
-    lower: "",
-    upper: "",
+    lower: recommendedTicks ? String(recommendedTicks.lower) : "",
+    upper: recommendedTicks ? String(recommendedTicks.upper) : "",
   });
   const [a0, setA0] = useState("");
   const [a1, setA1] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!recommendedTicks) return;
+    setCustom({
+      lower: String(recommendedTicks.lower),
+      upper: String(recommendedTicks.upper),
+    });
+    setMode("ticks");
+    setAdvOpen(true);
+  }, [recommendedTicks?.lower, recommendedTicks?.upper]);
   const addr0 = v4BalanceAddress(pool.token0);
   const addr1 = v4BalanceAddress(pool.token1);
   // A v3-family pool names the chain's coin by its wrapper, and pair mode
@@ -2691,6 +2759,21 @@ export function AddCl({
 
   return (
     <div className="expander add-cl">
+      {recommendedPct != null && (
+        <div
+          className={`rec-applied mono-sm ${recommendationStatus === "observed" ? "amber" : "green"}`}
+        >
+          {t(
+            recommendationStatus === "observed"
+              ? "pools.recObservedApplied"
+              : "pools.recApplied",
+            {
+              pct: recommendedPct,
+              capital: fmtUsd(recommendedCapitalUsd ?? 0),
+            },
+          )}
+        </div>
+      )}
       {/* Two decisions, not one form: WHERE the band goes, and HOW MUCH goes
           into it. They are revised against each other — the fee APR on the
           right is the answer to the range on the left — and stacked they could

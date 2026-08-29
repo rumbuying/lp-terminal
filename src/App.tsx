@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { WagmiProvider } from 'wagmi'
 import { QueryClientProvider } from '@tanstack/react-query'
@@ -15,12 +15,17 @@ import { NetworkPrompt } from './components/NetworkPrompt'
 import { RpcControl } from './components/RpcControl'
 import { ThemeControl } from './components/ThemeControl'
 import { THEMES, useTheme } from './lib/theme'
-import { BridgeTab } from './components/tabs/BridgeTab'
-import { LabTab } from './components/tabs/LabTab'
 import { PoolsTab } from './components/tabs/PoolsTab'
-import { PositionsTab } from './components/tabs/PositionsTab'
-import { SwapTab } from './components/tabs/SwapTab'
 import { Btn } from './components/ui'
+
+const BridgeTab = lazy(() => import('./components/tabs/BridgeTab').then(({ BridgeTab }) => ({ default: BridgeTab })))
+const LabTab = lazy(() => import('./components/tabs/LabTab').then(({ LabTab }) => ({ default: LabTab })))
+const PositionsTab = lazy(() => import('./components/tabs/PositionsTab').then(({ PositionsTab }) => ({ default: PositionsTab })))
+const RecommendationsTab = lazy(() => import('./components/tabs/RecommendationsTab').then(({ RecommendationsTab }) => ({ default: RecommendationsTab })))
+const SwapTab = lazy(() => import('./components/tabs/SwapTab').then(({ SwapTab }) => ({ default: SwapTab })))
+const StrategyTab = lazy(() => import('./components/tabs/StrategyTab').then(({ StrategyTab }) => ({ default: StrategyTab })))
+const StrategyHistoryTab = lazy(() => import('./components/tabs/StrategyHistoryTab').then(({ StrategyHistoryTab }) => ({ default: StrategyHistoryTab })))
+const PnlCalendarTab = lazy(() => import('./components/tabs/PnlCalendarTab').then(({ PnlCalendarTab }) => ({ default: PnlCalendarTab })))
 
 export default function App() {
   const theme = useTheme() // wallet modal accent follows the terminal theme
@@ -55,13 +60,17 @@ const KEYS: Record<string, TabId> = {
   '2': 'swap',
   '3': 'positions',
   ...(FEATURES.bridge ? { '5': 'bridge' as TabId } : {}),
+  '6': 'strategy',
+  '7': 'strategy-history',
+  '8': 'pnl-calendar',
+  '9': 'recommendations',
 }
 
 const validTab = (h: string): TabId | null => {
   if (h === 'limit') return 'swap' // LIMIT mode is a sub-view of the swap tab
   if (h === 'lab') return 'pools' // hidden component lab rides the pools slot
   if (h === 'bridge' && !FEATURES.bridge) return null
-  return (['pools', 'positions', 'swap', 'bridge'] as const).includes(h as TabId) ? (h as TabId) : null
+  return (['pools', 'recommendations', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar'] as const).includes(h as TabId) ? (h as TabId) : null
 }
 
 function Shell() {
@@ -125,10 +134,16 @@ function Shell() {
       <Header tab={tab} onTab={setTab} />
       <div className="main">
         <NetworkPrompt enabled={tab !== 'bridge'} />
-        {tab === 'pools' && (location.hash === '#lab' ? <LabTab /> : <PoolsTab />)}
-        {tab === 'positions' && <PositionsTab />}
-        {tab === 'swap' && <SwapTab />}
-        {tab === 'bridge' && FEATURES.bridge && <BridgeTab />}
+        <Suspense fallback={<div className="panel dim mono-sm">{t('app.loadingTab')}</div>}>
+          {tab === 'pools' && (location.hash === '#lab' ? <LabTab /> : <PoolsTab />)}
+          {tab === 'recommendations' && <RecommendationsTab onOpenPool={() => setTab('pools')} />}
+          {tab === 'positions' && <PositionsTab />}
+          {tab === 'swap' && <SwapTab />}
+          {tab === 'bridge' && FEATURES.bridge && <BridgeTab />}
+          {tab === 'strategy' && <StrategyTab />}
+          {tab === 'strategy-history' && <StrategyHistoryTab />}
+          {tab === 'pnl-calendar' && <PnlCalendarTab />}
+        </Suspense>
       </div>
       <div className="footer">
         <span className="hide-m">{t('app.tagline')}</span>

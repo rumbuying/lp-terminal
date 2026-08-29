@@ -16,5 +16,5 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["vite/client", "node"]
   },
-  "include": ["src", "scripts", "indexer"]
+  "include": ["src", "scripts", "indexer", "shared", "executor", "tests"]
 }

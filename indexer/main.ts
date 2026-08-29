@@ -22,7 +22,7 @@ import {
   sweepAllState,
   sweepState,
 } from './state';
-import { gtCycle } from './stats';
+import { statsCycle } from './stats';
 import { runStockOriginSweep } from './stockOrigin';
 import { logtail } from './logtail';
 import {
@@ -49,6 +49,8 @@ import {
 import { startApi } from './api';
 import { backfillV4, ensureV4TokenMeta, refreshV4FeaturedStats, tailV4 } from './v4Subgraph';
 import { backfillV4Rpc, tailV4Rpc } from './v4Rpc';
+import { syncUp33Cl } from './up33';
+import { refreshRecommendationSamples } from './recommendation';
 
 /**
  * Whether this chain has a v4 pool DIRECTORY at all — from a subgraph, or from
@@ -247,10 +249,11 @@ let v23TailLoopStarted = false;
 
 async function runV23Tail(): Promise<void> {
   const { freshV3, v2Delta } = await refreshV23CatalogTail();
-  const fresh = [...freshV3, ...v2Delta.fresh];
-  const added = freshV3.length + v2Delta.added;
+  const freshUp33 = await syncUp33Cl();
+  const fresh = [...freshV3, ...v2Delta.fresh, ...freshUp33];
+  const added = freshV3.length + v2Delta.added + freshUp33.length;
   if (!added) return;
-  log(`[v23-tail] ${added} new v2/v3 pools`);
+  log(`[v23-tail] ${added} new address-keyed pools`);
   await ensurePoolTokenMeta(fresh);
   await sweepState(fresh);
   computeTvlFor(fresh);
@@ -265,6 +268,7 @@ function startV23TailLoop(): void {
 }
 
 async function initialRefresh(): Promise<void> {
+  let freshUp33: string[] = [];
   // Each chain's v2 venues complete first. On BSC this independently resumes
   // both the official Uniswap and Pancake allPairs arrays. V3 then performs its
   // chain-specific bootstrap/catch-up (BSC: Graph snapshot + bounded RPC tail).
@@ -277,6 +281,7 @@ async function initialRefresh(): Promise<void> {
         log(`[catalog] v3 venue bootstrap done: +${addedV3} pools (${(msV3 / 1000).toFixed(0)}s)`);
         kvSet('v3_boot_logged', '1');
       }
+      freshUp33 = await syncUp33Cl();
       // A persisted tail failure is cleared only after both address-keyed
       // catalog families have been re-proved during this boot.
       recordV23TailError(null);
@@ -315,8 +320,11 @@ async function initialRefresh(): Promise<void> {
 
     // GT's bounded top lists identify useful pools without ever admitting an
     // identity (the factory-built catalog remains the gate in stats.ts).
-    await gtCycle().catch((e) => log('[stats] gt cycle failed:', safeError(e)));
-    const seeds = bootstrapAddrs(Math.max(BOOTSTRAP_POOL_LIMIT, TUNE.frontpageN));
+    await statsCycle().catch((e) => log('[stats] market cycle failed:', safeError(e)));
+    const seeds = [...new Set([
+      ...bootstrapAddrs(Math.max(BOOTSTRAP_POOL_LIMIT, TUNE.frontpageN)),
+      ...freshUp33,
+    ])];
     const [metaN, msMeta] = await timed(() => ensurePoolTokenMeta(seeds));
     if (metaN) log(`[tokens] boot metadata fetched for ${metaN} tokens (${(msMeta / 1_000).toFixed(1)}s)`);
     const [swept, msSweep] = await timed(() => sweepState(seeds));
@@ -334,10 +342,13 @@ async function initialRefresh(): Promise<void> {
     log(`[sweep] full ${swept}/${total} pools (${(msSweep / 1000).toFixed(0)}s)`);
     if (total && !swept) throw new Error('initial state sweep updated no pools');
 
-    await gtCycle().catch((e) => log('[stats] gt cycle failed:', safeError(e)));
+    await statsCycle().catch((e) => log('[stats] market cycle failed:', safeError(e)));
   }
   const pr = await requestFullReprice('boot');
   log(`[price] ${pr.priced} tokens priced · tvl on ${pr.tvlPools} pools`);
+  await refreshRecommendationSamples()
+    .then((sampled) => log(`[analytics] sampled ${sampled.addressPools} address pools + ${sampled.v4Pools} v4 pools`))
+    .catch((error) => log('[analytics] initial sample failed:', safeError(error)));
 
   kvSet('ready', '1');
   kvSet('snapshot_asof', String(now()));
@@ -409,6 +420,11 @@ function startLoops(): void {
       );
     }
   });
+  loop('analytics', TUNE.analyticsMs, async () => {
+    const sampled = await refreshRecommendationSamples();
+    if (sampled.addressPools || sampled.v4Pools)
+      log(`[analytics] sampled ${sampled.addressPools} address pools + ${sampled.v4Pools} v4 pools`);
+  });
   // A repeating keyset census over BSC's multi-million identity directory took
   // longer than its nominal interval and spent millions of reads on dust. Large
   // catalogs retain every identity but hydrate only bounded useful tiers.
@@ -434,7 +450,7 @@ function startLoops(): void {
     'stats',
     TUNE.statsMs,
     async () => {
-      const matched = await gtCycle();
+      const matched = await statsCycle();
       if (progressiveCatalog) computeTvlFor(matched.slice(0, PROGRESSIVE_TIER_LIMIT));
       else await requestFullReprice('stats');
     },

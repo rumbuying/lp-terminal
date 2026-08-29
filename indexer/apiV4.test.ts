@@ -256,6 +256,27 @@ test('v4 landing page and 64-byte PoolId cursor cover singleton-backed pools', (
   store.kvSet('v4_target_block', '220')
 })
 
+test('recommendation candidates keep v4 PoolId distinct from the singleton address', () => {
+  store.setTokenPrice(token0, 2, 100_000, 'test')
+  store.setTokenPrice(token1, 1, 100_000, 'test')
+  store.upsertV4MarketStats(id(1), { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 20, 100_000, 'test')
+  store.upsertV4RecommendationState(id(1), {
+    sqrtPrice: 1n << 96n,
+    tick: 0,
+    liquidity: 1_000_000n,
+    lpFee: 3_000,
+  }, '321')
+
+  const result = api.getRecommendationCandidates(new URLSearchParams({ limit: '10' }))
+  const candidate = result.candidates.find((row) => row.poolId === id(1))
+  assert.ok(candidate)
+  assert.equal(candidate.protocol, 'univ4')
+  assert.equal(candidate.pool, V4.POOL_MANAGER.toLowerCase())
+  assert.equal(candidate.poolId, id(1))
+  assert.equal(candidate.hooks, hooks)
+  assert.equal(candidate.tickHistory.at(-1)?.tick, 0)
+})
+
 test('v4 search returns raw Graph accounting and isolated display metadata', () => {
   const exact = api.getV4Pools(
     new URLSearchParams({ proto: 'univ4', q: id(4), limit: '10' }),

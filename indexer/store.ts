@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS pools (
   token0        TEXT NOT NULL,             -- lowercase
   token1        TEXT NOT NULL,
   fee_ppm       INTEGER NOT NULL,          -- venue fee in parts per million
+  unstaked_fee_ppm INTEGER NOT NULL DEFAULT 0, -- UP33 fee withheld from unstaked LPs
+  gauge         TEXT,                      -- UP33 per-pool gauge; null elsewhere
   tick_spacing  INTEGER,                   -- CL/v3 only
   created_block INTEGER,                   -- CL/v3 only (snapshot or PoolCreated)
   pair_index    INTEGER,                   -- v2 only (allPairs index)
@@ -84,6 +86,10 @@ CREATE TABLE IF NOT EXISTS pool_state (
   sqrt_price   TEXT,    -- CL/v3
   tick         INTEGER, -- CL/v3
   liquidity    TEXT,    -- CL/v3 in-range L
+  staked_liquidity TEXT NOT NULL DEFAULT '0', -- UP33 active liquidity earning emissions
+  reward_rate  TEXT NOT NULL DEFAULT '0',
+  period_finish INTEGER NOT NULL DEFAULT 0,
+  gauge_alive  INTEGER NOT NULL DEFAULT 0,
   reserve0     TEXT NOT NULL DEFAULT '0', -- v2: reserves; CL/v3: erc20 balances (TVL basis)
   reserve1     TEXT NOT NULL DEFAULT '0',
   total_supply TEXT,    -- v2 LP supply
@@ -98,6 +104,9 @@ CREATE INDEX IF NOT EXISTS idx_state_updated ON pool_state(updated);
 CREATE TABLE IF NOT EXISTS pool_stats (
   address    TEXT PRIMARY KEY,
   proto      TEXT,
+  vol5m_usd  REAL,
+  vol1h_usd  REAL,
+  vol6h_usd  REAL,
   vol24h_usd REAL,
   txns24h    INTEGER,
   liq_usd    REAL,     -- GT's own reserve figure (cross-check; tvl_usd is chain-derived)
@@ -107,6 +116,43 @@ CREATE TABLE IF NOT EXISTS pool_stats (
 CREATE INDEX IF NOT EXISTS idx_stats_liq ON pool_stats(liq_usd DESC, address);
 CREATE INDEX IF NOT EXISTS idx_stats_vol ON pool_stats(vol24h_usd DESC, address);
 CREATE INDEX IF NOT EXISTS idx_stats_updated ON pool_stats(updated);
+
+-- Strategy recommendation history is deliberately identity-agnostic: v2/v3
+-- rows use a pool address, while v4 rows use their bytes32 PoolId. The public
+-- pool catalogs remain separate and keep their existing cursor contracts.
+CREATE TABLE IF NOT EXISTS pool_market_snapshots (
+  pool TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  vol5m_usd REAL,
+  vol1h_usd REAL,
+  vol6h_usd REAL,
+  vol24h_usd REAL,
+  tvl_usd REAL,
+  tick INTEGER,
+  liquidity TEXT,
+  fee_ppm INTEGER NOT NULL,
+  PRIMARY KEY(pool, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_market_snapshots_ts ON pool_market_snapshots(ts);
+
+CREATE TABLE IF NOT EXISTS pool_tick_samples (
+  pool TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  tick INTEGER NOT NULL,
+  block_number TEXT NOT NULL,
+  PRIMARY KEY(pool, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_tick_samples_ts ON pool_tick_samples(ts);
+
+CREATE TABLE IF NOT EXISTS v4_recommendation_state (
+  pool_id TEXT PRIMARY KEY,
+  sqrt_price TEXT NOT NULL,
+  tick INTEGER NOT NULL,
+  liquidity TEXT NOT NULL,
+  lp_fee INTEGER NOT NULL,
+  updated INTEGER NOT NULL
+);
 
 -- API reads may discover an official catalog row before its progressive
 -- metadata/state pass. Keep that demand durable and bounded; the shared loop owns
@@ -220,6 +266,9 @@ CREATE TABLE IF NOT EXISTS v4_pool_days (
 -- is the fallback and the cross-check.
 CREATE TABLE IF NOT EXISTS v4_market_stats (
   pool_id    TEXT PRIMARY KEY,
+  vol5m_usd  REAL,
+  vol1h_usd  REAL,
+  vol6h_usd  REAL,
   vol24h_usd REAL,
   txns24h    INTEGER,
   liq_usd    REAL,     -- the aggregator's own reserve figure
@@ -247,6 +296,24 @@ if (!poolColumns.some((column) => column.name === 'catalog_seq'))
   db.exec('ALTER TABLE pools ADD COLUMN catalog_seq INTEGER');
 if (!poolColumns.some((column) => column.name === 'snapshot_generation'))
   db.exec('ALTER TABLE pools ADD COLUMN snapshot_generation TEXT');
+if (!poolColumns.some((column) => column.name === 'unstaked_fee_ppm'))
+  db.exec('ALTER TABLE pools ADD COLUMN unstaked_fee_ppm INTEGER NOT NULL DEFAULT 0');
+if (!poolColumns.some((column) => column.name === 'gauge'))
+  db.exec('ALTER TABLE pools ADD COLUMN gauge TEXT');
+const stateColumns = db.prepare('PRAGMA table_info(pool_state)').all() as Array<{ name: string }>;
+if (!stateColumns.some((column) => column.name === 'staked_liquidity'))
+  db.exec("ALTER TABLE pool_state ADD COLUMN staked_liquidity TEXT NOT NULL DEFAULT '0'");
+if (!stateColumns.some((column) => column.name === 'reward_rate'))
+  db.exec("ALTER TABLE pool_state ADD COLUMN reward_rate TEXT NOT NULL DEFAULT '0'");
+if (!stateColumns.some((column) => column.name === 'period_finish'))
+  db.exec('ALTER TABLE pool_state ADD COLUMN period_finish INTEGER NOT NULL DEFAULT 0');
+if (!stateColumns.some((column) => column.name === 'gauge_alive'))
+  db.exec('ALTER TABLE pool_state ADD COLUMN gauge_alive INTEGER NOT NULL DEFAULT 0');
+const poolStatColumns = db.prepare('PRAGMA table_info(pool_stats)').all() as Array<{ name: string }>;
+for (const column of ['vol5m_usd', 'vol1h_usd', 'vol6h_usd']) {
+  if (!poolStatColumns.some((existing) => existing.name === column))
+    db.exec(`ALTER TABLE pool_stats ADD COLUMN ${column} REAL`);
+}
 // Retire the briefly-developed full-catalog form if this migration was ever
 // exercised locally. Snapshot generations are CL-only; indexing millions of
 // V2 rows whose value is always NULL wastes both disk and write bandwidth.
@@ -358,6 +425,15 @@ if (!catalogCounterRows)
     INSERT INTO pool_catalog_counts(proto, n)
     SELECT proto, COUNT(*) FROM pools GROUP BY proto;
   `);
+// UP33 reuses the pool/state tables for strategy analytics, but it is not a
+// member of the public V2/V3 catalog. Replace older broad trigger bodies so an
+// UP33 discovery cannot advance a public cursor or invalidate its generation.
+db.exec(`
+DROP TRIGGER IF EXISTS pools_catalog_fence_insert;
+DROP TRIGGER IF EXISTS pools_catalog_generation_delete;
+DROP TRIGGER IF EXISTS pools_catalog_generation_update;
+DROP TRIGGER IF EXISTS pools_related_delete;
+`);
 db.exec(`
 CREATE TRIGGER IF NOT EXISTS pools_catalog_count_insert
 AFTER INSERT ON pools BEGIN
@@ -369,19 +445,23 @@ AFTER DELETE ON pools BEGIN
   UPDATE pool_catalog_counts SET n = n - 1 WHERE proto = OLD.proto;
 END;
 CREATE TRIGGER IF NOT EXISTS pools_catalog_fence_insert
-AFTER INSERT ON pools BEGIN
+AFTER INSERT ON pools
+WHEN NEW.proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3') BEGIN
   UPDATE v23_catalog_clock SET next_seq = next_seq + 1 WHERE singleton = 1;
   UPDATE pools SET catalog_seq = (
     SELECT next_seq FROM v23_catalog_clock WHERE singleton = 1
   ) WHERE address = NEW.address;
 END;
 CREATE TRIGGER IF NOT EXISTS pools_catalog_generation_delete
-AFTER DELETE ON pools BEGIN
+AFTER DELETE ON pools
+WHEN OLD.proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3') BEGIN
   UPDATE v23_catalog_clock SET generation = generation + 1 WHERE singleton = 1;
 END;
 CREATE TRIGGER IF NOT EXISTS pools_catalog_generation_update
 AFTER UPDATE OF address, proto, token0, token1, fee_ppm, tick_spacing, created_block, pair_index
-ON pools BEGIN
+ON pools
+WHEN OLD.proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3')
+  OR NEW.proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3') BEGIN
   UPDATE v23_catalog_clock SET generation = generation + 1 WHERE singleton = 1;
 END;
 CREATE TRIGGER IF NOT EXISTS pools_pancake_v2_generation_delete
@@ -402,6 +482,8 @@ AFTER DELETE ON pools BEGIN
   DELETE FROM hydration_demand WHERE address = OLD.address;
   DELETE FROM pool_state WHERE address = OLD.address;
   DELETE FROM pool_stats WHERE address = OLD.address;
+  DELETE FROM pool_market_snapshots WHERE pool = OLD.address;
+  DELETE FROM pool_tick_samples WHERE pool = OLD.address;
 END;
 CREATE TRIGGER IF NOT EXISTS pools_catalog_count_move
 AFTER UPDATE OF proto ON pools WHEN OLD.proto <> NEW.proto BEGIN
@@ -424,6 +506,10 @@ if (!v4MarketColumns.some((column) => column.name === 'tvl_usd')) {
     ALTER TABLE v4_market_stats ADD COLUMN tvl_approx INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS idx_v4_market_depth
       ON v4_market_stats(COALESCE(tvl_usd, liq_usd) DESC, pool_id);`);
+for (const column of ['vol5m_usd', 'vol1h_usd', 'vol6h_usd']) {
+  if (!v4MarketColumns.some((existing) => existing.name === column))
+    db.exec(`ALTER TABLE v4_market_stats ADD COLUMN ${column} REAL`);
+}
 }
 
 const v4PoolColumns = db.prepare('PRAGMA table_info(v4_pools)').all() as {
@@ -553,11 +639,15 @@ DROP TRIGGER IF EXISTS v4_pools_solver_snapshot_insert;
 DROP TRIGGER IF EXISTS v4_pools_solver_snapshot_update;
 DROP TRIGGER IF EXISTS solver_v4_adjacency_snapshot_gc_insert;
 DROP TRIGGER IF EXISTS solver_v4_adjacency_snapshot_gc_update;
+DROP TRIGGER IF EXISTS pools_solver_adjacency_insert;
+DROP TRIGGER IF EXISTS pools_solver_adjacency_delete;
+DROP TRIGGER IF EXISTS pools_solver_adjacency_identity_update;
 `);
 
 db.exec(`
 CREATE TRIGGER IF NOT EXISTS pools_solver_adjacency_insert
-AFTER INSERT ON pools BEGIN
+AFTER INSERT ON pools
+WHEN NEW.proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3') BEGIN
   INSERT INTO solver_v23_adjacency(
     proto, token0, token1, first_seq, ref_count
   ) VALUES (
@@ -579,7 +669,8 @@ AFTER INSERT ON pools BEGIN
     );
 END;
 CREATE TRIGGER IF NOT EXISTS pools_solver_adjacency_delete
-AFTER DELETE ON pools BEGIN
+AFTER DELETE ON pools
+WHEN OLD.proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3') BEGIN
   DELETE FROM solver_v23_adjacency
   WHERE proto = OLD.proto
     AND token0 = CASE WHEN OLD.token0 < OLD.token1 THEN OLD.token0 ELSE OLD.token1 END
@@ -605,13 +696,13 @@ AFTER UPDATE OF proto, token0, token1 ON pools BEGIN
     AND token1 = CASE WHEN OLD.token0 < OLD.token1 THEN OLD.token1 ELSE OLD.token0 END;
   INSERT INTO solver_v23_adjacency(
     proto, token0, token1, first_seq, ref_count
-  ) VALUES (
+  ) SELECT
     NEW.proto,
     CASE WHEN NEW.token0 < NEW.token1 THEN NEW.token0 ELSE NEW.token1 END,
     CASE WHEN NEW.token0 < NEW.token1 THEN NEW.token1 ELSE NEW.token0 END,
     COALESCE(NEW.catalog_seq, 0),
     1
-  )
+  WHERE NEW.proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3')
   ON CONFLICT(proto, token0, token1)
   DO UPDATE SET
     ref_count = solver_v23_adjacency.ref_count + 1,
@@ -873,6 +964,12 @@ WHEN NEW.k = 'v4_snapshot_generation' AND NEW.v <> ''
 END;
 `);
 
+// A database opened once by the broad pre-UP33 triggers may already contain
+// an unreachable UP33 adjacency row. Removing only unsupported protocol keys
+// is cheap, idempotent, and avoids requiring a full offline projection rebuild.
+db.exec(`DELETE FROM solver_v23_adjacency
+         WHERE proto NOT IN ('univ2', 'univ3', 'pancakev2', 'pancakev3')`);
+
 // Never rebuild a large legacy catalog during synchronous module import. A
 // fresh empty DB is immediately ready because all later writes hit the
 // projection triggers. A DB with existing identities stays fail-closed until
@@ -966,6 +1063,7 @@ export function rebuildSolverAdjacencyProjection(): void {
         MIN(COALESCE(catalog_seq, 0)),
         COUNT(*)
       FROM pools
+      WHERE proto IN ('univ2', 'univ3', 'pancakev2', 'pancakev3')
       GROUP BY
         proto,
         CASE WHEN token0 < token1 THEN token0 ELSE token1 END,
@@ -1074,7 +1172,7 @@ export const SOLVER_CONNECTOR_RANK_K = 256;
  * extends this with univ4, so keeping the shared bits in one place is what stops
  * the two assignments from drifting apart unnoticed.
  */
-export const SOLVER_PROTO_BIT: Record<PoolProto, number> = {
+export const SOLVER_PROTO_BIT: Record<Exclude<PoolProto, 'up33cl'>, number> = {
   univ2: 0,
   univ3: 1,
   pancakev2: 2,
@@ -1408,11 +1506,11 @@ export function pancakeV2CatalogGeneration(): string {
 // ---- pools ----
 const insPoolQ = db.prepare(`
   INSERT OR IGNORE INTO pools (
-    address, proto, token0, token1, fee_ppm, tick_spacing, created_block,
-    pair_index, snapshot_generation, added_ts
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    address, proto, token0, token1, fee_ppm, unstaked_fee_ppm, gauge,
+    tick_spacing, created_block, pair_index, snapshot_generation, added_ts
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 /** returns true when the pool is new */
-export type PoolProto = 'univ2' | 'univ3' | 'pancakev2' | 'pancakev3';
+export type PoolProto = 'univ2' | 'univ3' | 'pancakev2' | 'pancakev3' | 'up33cl';
 
 export function insertPool(p: {
   address: string;
@@ -1420,6 +1518,8 @@ export function insertPool(p: {
   token0: string;
   token1: string;
   feePpm: number;
+  unstakedFeePpm?: number;
+  gauge?: string;
   tickSpacing?: number;
   createdBlock?: number;
   pairIndex?: number;
@@ -1434,6 +1534,8 @@ export function insertPool(p: {
     p.token0.toLowerCase(),
     p.token1.toLowerCase(),
     p.feePpm,
+    p.unstakedFeePpm ?? 0,
+    p.gauge?.toLowerCase() ?? null,
     p.tickSpacing ?? null,
     p.createdBlock ?? null,
     p.pairIndex ?? null,
@@ -1449,12 +1551,35 @@ export type PoolRow = {
   token0: string;
   token1: string;
   fee_ppm: number;
+  unstaked_fee_ppm: number;
+  gauge: string | null;
   tick_spacing: number | null;
 };
 const poolsByAddrQ = db.prepare(
-  'SELECT address, proto, token0, token1, fee_ppm, tick_spacing FROM pools WHERE address = ?',
+  'SELECT address, proto, token0, token1, fee_ppm, unstaked_fee_ppm, gauge, tick_spacing FROM pools WHERE address = ?',
 );
 export const poolRow = (addr: string) => poolsByAddrQ.get(addr.toLowerCase()) as PoolRow | undefined;
+
+const updatePoolStaticQ = db.prepare(
+  'UPDATE pools SET fee_ppm=?, unstaked_fee_ppm=?, tick_spacing=?, gauge=? WHERE address=? AND proto=\'up33cl\'',
+);
+export const updateUp33PoolStatic = (
+  address: string,
+  feePpm: number,
+  unstakedFeePpm: number,
+  tickSpacing: number,
+  gauge?: string,
+): void => void updatePoolStaticQ.run(
+  feePpm,
+  unstakedFeePpm,
+  tickSpacing,
+  gauge?.toLowerCase() ?? null,
+  address.toLowerCase(),
+);
+
+export const protocolPoolAddrs = (proto: PoolProto): string[] =>
+  (db.prepare('SELECT address FROM pools WHERE proto=? ORDER BY address').all(proto) as { address: string }[])
+    .map((row) => row.address);
 
 const setPoolSnapshotGenerationQ = db.prepare(
   'UPDATE pools SET snapshot_generation = ? WHERE address = ? AND proto = ?',
@@ -1576,14 +1701,14 @@ export function v2PairIndexStats(proto: 'univ2' | 'pancakev2'): V2PairIndexStats
   };
 }
 const poolRowsPageQ = db.prepare(
-  `SELECT address, proto, token0, token1, fee_ppm, tick_spacing
+  `SELECT address, proto, token0, token1, fee_ppm, unstaked_fee_ppm, gauge, tick_spacing
    FROM pools WHERE address > ? ORDER BY address LIMIT ?`,
 );
 /** Address-keyset page used by full-catalog jobs; never materializes the catalog. */
 export const poolRowsPage = (afterAddress: string, limit: number): PoolRow[] =>
   poolRowsPageQ.all(afterAddress.toLowerCase(), limit) as PoolRow[];
 const clPoolRowsPageQ = db.prepare(
-  `SELECT address, proto, token0, token1, fee_ppm, tick_spacing
+  `SELECT address, proto, token0, token1, fee_ppm, unstaked_fee_ppm, gauge, tick_spacing
    FROM pools
    WHERE proto IN ('univ3', 'pancakev3') AND address > ?
    ORDER BY address LIMIT ?`,
@@ -1879,20 +2004,88 @@ export function upsertV4GraphStats(
 }
 
 const upV4MarketStatsQ = db.prepare(`
-  INSERT INTO v4_market_stats (pool_id, vol24h_usd, txns24h, liq_usd, source, updated)
-  VALUES (?, ?, ?, ?, ?, ?)
+  INSERT INTO v4_market_stats (
+    pool_id, vol5m_usd, vol1h_usd, vol6h_usd, vol24h_usd,
+    txns24h, liq_usd, source, updated
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(pool_id) DO UPDATE SET
-    vol24h_usd = excluded.vol24h_usd, txns24h = excluded.txns24h,
+    vol5m_usd = excluded.vol5m_usd, vol1h_usd = excluded.vol1h_usd,
+    vol6h_usd = excluded.vol6h_usd, vol24h_usd = excluded.vol24h_usd,
+    txns24h = excluded.txns24h,
     liq_usd = excluded.liq_usd, source = excluded.source, updated = excluded.updated`);
 /** An aggregator's USD reading of one v4 pool, keyed by PoolId rather than address. */
 export const upsertV4MarketStats = (
   poolId: string,
-  vol24h: number | null,
+  volumes: number | null | RollingVolumes,
   txns24h: number | null,
   liqUsd: number | null,
   source: string,
-): void =>
-  void upV4MarketStatsQ.run(poolId.toLowerCase(), vol24h, txns24h, liqUsd, source, now());
+): void => {
+  const normalized: RollingVolumes = typeof volumes === 'number' || volumes === null
+    ? { m5: null, h1: null, h6: null, h24: volumes }
+    : volumes;
+  const id = poolId.toLowerCase();
+  const timestamp = now();
+  upV4MarketStatsQ.run(
+    id, normalized.m5, normalized.h1, normalized.h6, normalized.h24,
+    txns24h, liqUsd, source, timestamp,
+  );
+  const bucket = Math.floor(timestamp / 300) * 300;
+  db.prepare(`INSERT INTO pool_market_snapshots(
+      pool,ts,source,vol5m_usd,vol1h_usd,vol6h_usd,vol24h_usd,tvl_usd,tick,liquidity,fee_ppm
+    ) SELECT v.pool_id,?,?,?,?,?,?,COALESCE(m.tvl_usd,?),r.tick,r.liquidity,
+        COALESCE(r.lp_fee,v.key_fee_ppm,0)
+      FROM v4_pools v
+      LEFT JOIN v4_market_stats m ON m.pool_id=v.pool_id
+      LEFT JOIN v4_recommendation_state r ON r.pool_id=v.pool_id
+      WHERE v.pool_id=?
+    ON CONFLICT(pool,ts) DO UPDATE SET source=excluded.source,
+      vol5m_usd=excluded.vol5m_usd,vol1h_usd=excluded.vol1h_usd,
+      vol6h_usd=excluded.vol6h_usd,vol24h_usd=excluded.vol24h_usd,
+      tvl_usd=excluded.tvl_usd,tick=excluded.tick,liquidity=excluded.liquidity,
+      fee_ppm=excluded.fee_ppm`)
+    .run(
+      bucket, source, normalized.m5, normalized.h1, normalized.h6,
+      normalized.h24, liqUsd, id,
+    );
+};
+
+export type V4RecommendationTarget = {
+  pool_id: string;
+  key_fee_ppm: number | null;
+};
+export const recommendationV4Targets = (limit: number): V4RecommendationTarget[] =>
+  db.prepare(`SELECT v.pool_id,v.key_fee_ppm FROM v4_pools v
+    JOIN v4_market_stats m ON m.pool_id=v.pool_id
+    WHERE COALESCE(m.tvl_usd,m.liq_usd,0)>=10000 AND COALESCE(m.vol24h_usd,0)>=10000
+    ORDER BY (
+      MIN(
+        COALESCE(m.vol1h_usd,m.vol24h_usd/24.0),
+        COALESCE(m.vol6h_usd/6.0,m.vol24h_usd/24.0),
+        m.vol24h_usd/24.0
+      ) * COALESCE(v.key_fee_ppm,0) / MAX(COALESCE(m.tvl_usd,m.liq_usd),1)
+    ) DESC LIMIT ?`).all(Math.max(1, Math.floor(limit))) as V4RecommendationTarget[];
+
+const upsertV4RecommendationStateQ = db.prepare(`
+  INSERT INTO v4_recommendation_state(pool_id,sqrt_price,tick,liquidity,lp_fee,updated)
+  VALUES (?,?,?,?,?,?)
+  ON CONFLICT(pool_id) DO UPDATE SET sqrt_price=excluded.sqrt_price,
+    tick=excluded.tick,liquidity=excluded.liquidity,lp_fee=excluded.lp_fee,
+    updated=excluded.updated`);
+export function upsertV4RecommendationState(
+  poolId: string,
+  state: { sqrtPrice: bigint; tick: number; liquidity: bigint; lpFee: number },
+  blockNumber: string,
+  timestamp = now(),
+): void {
+  const id = poolId.toLowerCase();
+  upsertV4RecommendationStateQ.run(
+    id, String(state.sqrtPrice), state.tick, String(state.liquidity), state.lpFee, timestamp,
+  );
+  const bucket = Math.floor(timestamp / 60) * 60;
+  db.prepare(`INSERT OR REPLACE INTO pool_tick_samples(pool,ts,tick,block_number) VALUES(?,?,?,?)`)
+    .run(id, bucket, state.tick, blockNumber);
+}
 
 const setV4ChainTvlQ = db.prepare(`
   INSERT INTO v4_market_stats (pool_id, tvl_usd, tvl_approx, source, updated)
@@ -2026,28 +2219,44 @@ export const missingMetaTokensPage = (afterAddress: string, limit: number): stri
     (r) => r.addr,
   );
 
-const missingClMetaTokensPageSql = `SELECT u.addr FROM (
-     SELECT token0 AS addr FROM pools INDEXED BY idx_pools_cl_token0
-       WHERE proto IN ('univ3', 'pancakev3') AND token0 > ?
-     UNION
-     SELECT token1 AS addr FROM pools INDEXED BY idx_pools_cl_token1
-       WHERE proto IN ('univ3', 'pancakev3') AND token1 > ?
-   ) u
-   LEFT JOIN tokens t ON t.address = u.addr
-   WHERE t.address IS NULL OR t.meta_ok = 0
-   ORDER BY u.addr LIMIT ?`;
-const missingClMetaTokensPageQ = db.prepare(missingClMetaTokensPageSql);
+const missingClMetaSideSql = (column: 'token0' | 'token1') => `SELECT p.${column} AS addr
+   FROM pools p INDEXED BY idx_pools_cl_${column}
+   LEFT JOIN tokens t ON t.address = p.${column}
+   WHERE p.proto IN ('univ3', 'pancakev3') AND p.${column} > ?
+     AND (t.address IS NULL OR t.meta_ok = 0)
+   ORDER BY p.${column} LIMIT ?`;
+const missingClMetaToken0Sql = missingClMetaSideSql('token0');
+const missingClMetaToken1Sql = missingClMetaSideSql('token1');
+const missingClMetaToken0Q = db.prepare(missingClMetaToken0Sql);
+const missingClMetaToken1Q = db.prepare(missingClMetaToken1Sql);
 /** Missing token metadata for CL pools only, in deterministic keyset order. */
-export const missingClMetaTokensPage = (afterAddress: string, limit: number): string[] =>
-  (
-    missingClMetaTokensPageQ.all(afterAddress.toLowerCase(), afterAddress.toLowerCase(), limit) as { addr: string }[]
-  ).map((row) => row.addr);
+export const missingClMetaTokensPage = (afterAddress: string, limit: number): string[] => {
+  const after = afterAddress.toLowerCase();
+  const side0 = missingClMetaToken0Q.all(after, limit) as { addr: string }[];
+  const side1 = missingClMetaToken1Q.all(after, limit) as { addr: string }[];
+  // Each input is already ordered by its covering partial index. A bounded
+  // in-process merge avoids SQLite materializing the entire two-sided catalog
+  // into temporary B-trees merely to return one metadata page.
+  const merged: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (merged.length < limit && (i < side0.length || j < side1.length)) {
+    const a = side0[i]?.addr;
+    const b = side1[j]?.addr;
+    const next = b === undefined || (a !== undefined && a <= b) ? a! : b;
+    if (a === next) i++;
+    if (b === next) j++;
+    if (merged.at(-1) !== next) merged.push(next);
+  }
+  return merged;
+};
 
 /** Query-plan hook: the CL census must merge its two partial token indexes. */
 export const explainMissingClMetaPlan = (): string[] =>
-  (db.prepare(`EXPLAIN QUERY PLAN ${missingClMetaTokensPageSql}`).all('', '', 1_000) as Array<{ detail: string }>).map(
-    (row) => row.detail,
-  );
+  [missingClMetaToken0Sql, missingClMetaToken1Sql].flatMap((sql) =>
+    (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('', 1_000) as Array<{ detail: string }>).map(
+      (row) => row.detail,
+    ));
 
 const missingClMetaTokenCountQ = db.prepare(
   `SELECT COUNT(*) AS n FROM (
@@ -2063,10 +2272,14 @@ export const missingClMetaTokenCount = (): number => (missingClMetaTokenCountQ.g
 
 // ---- pool_state ----
 const upStateQ = db.prepare(`
-  INSERT INTO pool_state (address, proto, sqrt_price, tick, liquidity, reserve0, reserve1, total_supply, updated)
-  VALUES (?, (SELECT proto FROM pools WHERE address = ?), ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO pool_state (
+    address, proto, sqrt_price, tick, liquidity, staked_liquidity,
+    reward_rate, period_finish, gauge_alive, reserve0, reserve1, total_supply, updated
+  ) VALUES (?, (SELECT proto FROM pools WHERE address = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(address) DO UPDATE SET sqrt_price = excluded.sqrt_price, tick = excluded.tick,
-    liquidity = excluded.liquidity, reserve0 = excluded.reserve0, reserve1 = excluded.reserve1,
+    liquidity = excluded.liquidity, staked_liquidity = excluded.staked_liquidity,
+    reward_rate = excluded.reward_rate, period_finish = excluded.period_finish,
+    gauge_alive = excluded.gauge_alive, reserve0 = excluded.reserve0, reserve1 = excluded.reserve1,
     total_supply = excluded.total_supply, updated = excluded.updated,
     proto = excluded.proto`);
 export const upsertState = (
@@ -2075,6 +2288,10 @@ export const upsertState = (
     sqrtPrice?: bigint;
     tick?: number;
     liquidity?: bigint;
+    stakedLiquidity?: bigint;
+    rewardRate?: bigint;
+    periodFinish?: bigint;
+    gaugeAlive?: boolean;
     reserve0: bigint;
     reserve1: bigint;
     totalSupply?: bigint;
@@ -2086,6 +2303,10 @@ export const upsertState = (
     s.sqrtPrice !== undefined ? String(s.sqrtPrice) : null,
     s.tick ?? null,
     s.liquidity !== undefined ? String(s.liquidity) : null,
+    String(s.stakedLiquidity ?? 0n),
+    String(s.rewardRate ?? 0n),
+    Number(s.periodFinish ?? 0n),
+    s.gaugeAlive ? 1 : 0,
     String(s.reserve0),
     String(s.reserve1),
     s.totalSupply !== undefined ? String(s.totalSupply) : null,
@@ -2101,18 +2322,82 @@ export const setTvl = (addr: string, tvl: number | null, approx: boolean) =>
 
 // ---- pool_stats ----
 const upStatsQ = db.prepare(`
-  INSERT INTO pool_stats (address, proto, vol24h_usd, txns24h, liq_usd, source, updated)
-  VALUES (?, (SELECT proto FROM pools WHERE address = ?), ?, ?, ?, ?, ?)
-  ON CONFLICT(address) DO UPDATE SET vol24h_usd = excluded.vol24h_usd, txns24h = excluded.txns24h,
+  INSERT INTO pool_stats (address, proto, vol5m_usd, vol1h_usd, vol6h_usd, vol24h_usd, txns24h, liq_usd, source, updated)
+  VALUES (?, (SELECT proto FROM pools WHERE address = ?), ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(address) DO UPDATE SET vol5m_usd = excluded.vol5m_usd,
+    vol1h_usd = excluded.vol1h_usd, vol6h_usd = excluded.vol6h_usd,
+    vol24h_usd = excluded.vol24h_usd, txns24h = excluded.txns24h,
     liq_usd = excluded.liq_usd, source = excluded.source, updated = excluded.updated,
     proto = excluded.proto`);
+export type RollingVolumes = {
+  m5: number | null;
+  h1: number | null;
+  h6: number | null;
+  h24: number | null;
+};
 export const upsertStats = (
   addr: string,
-  vol24h: number | null,
+  volumes: number | null | RollingVolumes,
   txns24h: number | null,
   liqUsd: number | null,
   source: string,
-) => void upStatsQ.run(addr.toLowerCase(), addr.toLowerCase(), vol24h, txns24h, liqUsd, source, now());
+) => {
+  const normalized: RollingVolumes = typeof volumes === 'number' || volumes === null
+    ? { m5: null, h1: null, h6: null, h24: volumes }
+    : volumes;
+  const address = addr.toLowerCase();
+  const timestamp = now();
+  upStatsQ.run(
+    address, address,
+    normalized.m5, normalized.h1, normalized.h6, normalized.h24,
+    txns24h, liqUsd, source, timestamp,
+  );
+  const bucket = Math.floor(timestamp / 300) * 300;
+  db.prepare(`INSERT INTO pool_market_snapshots(
+      pool,ts,source,vol5m_usd,vol1h_usd,vol6h_usd,vol24h_usd,tvl_usd,tick,liquidity,fee_ppm
+    ) SELECT p.address,?,?,?,?,?,?,COALESCE(s.tvl_usd,?),s.tick,s.liquidity,p.fee_ppm
+      FROM pools p LEFT JOIN pool_state s ON s.address=p.address WHERE p.address=?
+    ON CONFLICT(pool,ts) DO UPDATE SET source=excluded.source,
+      vol5m_usd=excluded.vol5m_usd,vol1h_usd=excluded.vol1h_usd,
+      vol6h_usd=excluded.vol6h_usd,vol24h_usd=excluded.vol24h_usd,
+      tvl_usd=excluded.tvl_usd,tick=excluded.tick,liquidity=excluded.liquidity,
+      fee_ppm=excluded.fee_ppm`)
+    .run(
+      bucket, source, normalized.m5, normalized.h1, normalized.h6,
+      normalized.h24, liqUsd, address,
+    );
+};
+
+/** Bounded high-value CL cohort sampled for strategy modelling. */
+export const recommendationAddressPoolAddrs = (limit: number): string[] => {
+  const cap = Math.max(1, Math.floor(limit));
+  return (db.prepare(`SELECT p.address FROM pools p
+      JOIN pool_state s ON s.address=p.address
+      JOIN pool_stats st ON st.address=p.address
+    WHERE p.proto IN ('up33cl','univ3','pancakev3')
+      AND s.sqrt_price IS NOT NULL AND s.tick IS NOT NULL AND s.liquidity IS NOT NULL
+      AND COALESCE(s.tvl_usd,st.liq_usd,0)>=10000
+      AND COALESCE(st.vol24h_usd,0)>=10000
+    ORDER BY (
+      MIN(
+        COALESCE(st.vol1h_usd,st.vol24h_usd/24.0),
+        COALESCE(st.vol6h_usd/6.0,st.vol24h_usd/24.0),
+        st.vol24h_usd/24.0
+      ) * p.fee_ppm / MAX(COALESCE(s.tvl_usd,st.liq_usd),1)
+    ) DESC LIMIT ?`).all(cap) as { address: string }[]).map((row) => row.address);
+};
+
+export function captureAddressTickSamples(addresses: readonly string[], blockNumber: string, timestamp = now()): void {
+  const bucket = Math.floor(timestamp / 60) * 60;
+  const insert = db.prepare(`INSERT OR REPLACE INTO pool_tick_samples(pool,ts,tick,block_number)
+    SELECT address,?,tick,? FROM pool_state WHERE address=? AND tick IS NOT NULL`);
+  tx(() => { for (const address of addresses) insert.run(bucket, blockNumber, address.toLowerCase()); });
+}
+
+export function pruneRecommendationHistory(timestamp = now()): void {
+  db.prepare('DELETE FROM pool_tick_samples WHERE ts<?').run(timestamp - 30 * 86_400);
+  db.prepare('DELETE FROM pool_market_snapshots WHERE ts<?').run(timestamp - 180 * 86_400);
+}
 
 /**
  * Frontpage set: the top-N pools by TVL — exactly what /api/pools?sort=tvl

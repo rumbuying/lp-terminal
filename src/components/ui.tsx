@@ -143,6 +143,8 @@ export function NumInput(props: {
   invalid?: boolean
   /** clamp typed fraction digits (token precision); 18 = EVM max */
   decimals?: number
+  /** Allow a leading minus sign for ticks and simulation deltas. */
+  signed?: boolean
 }) {
   return (
     <input
@@ -155,8 +157,11 @@ export function NumInput(props: {
       value={props.value}
       disabled={props.disabled}
       onChange={(e) => {
-        const v = sanitizeAmountInput(e.target.value, props.decimals ?? 18)
-        if (v !== null) props.onChange(v)
+        const raw = e.target.value
+        const negative = props.signed && raw.startsWith('-')
+        const unsigned = negative ? raw.slice(1) : raw
+        const v = sanitizeAmountInput(unsigned, props.decimals ?? 18)
+        if (v !== null) props.onChange(negative ? `-${v}` : v)
       }}
     />
   )

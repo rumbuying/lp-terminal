@@ -9,6 +9,12 @@ export function chainApiPath(chainKey: string, endpoint: string): string {
   return `/_chain/${encodeURIComponent(chainKey)}/api/${endpoint.replace(/^\/+/, '')}`
 }
 
+export function chainExecutorPath(chainKey: string, endpoint = ''): string {
+  const base = `/_chain/${encodeURIComponent(chainKey)}/executor`
+  const suffix = endpoint.replace(/^\/+/, '')
+  return suffix ? `${base}/${suffix}` : base
+}
+
 function normalizedHostname(value: string | null | undefined): string | null {
   const host = (value ?? '').trim().toLowerCase().replace(/\.$/, '')
   if (!host || host.length > 253) return null
@@ -91,6 +97,20 @@ export function indexerApiPath(
 ): string | null {
   if (gatewayEnabled) return chainApiPath(chainKey, endpoint)
   return activeIsBuild ? `/api/${endpoint.replace(/^\/+/, '')}` : null
+}
+
+/** The executor is stateful and chain-bound, so it follows the same fail-closed
+ * routing rule as the indexer. A compatibility host must never send a strategy
+ * request for its non-build chain to the one executor mounted at `/executor`. */
+export function executorApiPath(
+  endpoint: string,
+  chainKey: string,
+  gatewayEnabled: boolean,
+  activeIsBuild: boolean,
+): string | null {
+  if (gatewayEnabled) return chainExecutorPath(chainKey, endpoint)
+  const suffix = endpoint.replace(/^\/+/, '')
+  return activeIsBuild ? `/executor${suffix ? `/${suffix}` : ''}` : null
 }
 
 export function indexerPoolsPath(

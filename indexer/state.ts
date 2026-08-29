@@ -36,8 +36,8 @@
 // capped at maxSideOverDepth × the credible depth that established its price.
 // Every bounded figure flags tvl_approx.
 import { erc20Abi, formatUnits } from 'viem';
-import { uniV2PairAbi, uniV3PoolAbi } from '../src/abi';
-import { ADDR, TUNE, log, now } from './config';
+import { clGaugeAbi, clPoolAbi, uniV2PairAbi, uniV3PoolAbi, voterAbi } from '../src/abi';
+import { ADDR, CHAIN, TUNE, log, now } from './config';
 import { mc, ok, type Call } from './rpc';
 import {
   clPoolRowsPage,
@@ -232,14 +232,29 @@ export async function sweepClStatePage(
   };
 }
 
-const isClPool = (proto: PoolRow['proto'] | string): boolean => proto === 'univ3' || proto === 'pancakev3';
+const isClPool = (proto: PoolRow['proto'] | string): boolean =>
+  proto === 'univ3' || proto === 'pancakev3' || proto === 'up33cl';
 
 async function sweepRows(rows: PoolRow[], countReadableCl = false): Promise<number> {
   if (!rows.length) return 0;
   const calls: Call[] = [];
   for (const p of rows) {
     const a = p.address as `0x${string}`;
-    if (isClPool(p.proto))
+    if (p.proto === 'up33cl') {
+      if (!CHAIN.gov) throw new Error('UP33 pool found on a chain without governance contracts');
+      calls.push(
+        { abi: clPoolAbi, address: a, functionName: 'slot0' },
+        { abi: clPoolAbi, address: a, functionName: 'liquidity' },
+        { abi: clPoolAbi, address: a, functionName: 'stakedLiquidity' },
+        { abi: erc20Abi, address: p.token0 as `0x${string}`, functionName: 'balanceOf', args: [a] },
+        { abi: erc20Abi, address: p.token1 as `0x${string}`, functionName: 'balanceOf', args: [a] },
+        ...(p.gauge ? [
+          { abi: clGaugeAbi, address: p.gauge as `0x${string}`, functionName: 'rewardRate' },
+          { abi: clGaugeAbi, address: p.gauge as `0x${string}`, functionName: 'periodFinish' },
+          { abi: voterAbi, address: CHAIN.gov.VOTER, functionName: 'isAlive', args: [p.gauge] },
+        ] : []),
+      );
+    } else if (isClPool(p.proto))
       calls.push(
         { abi: uniV3PoolAbi, address: a, functionName: 'slot0' },
         { abi: uniV3PoolAbi, address: a, functionName: 'liquidity' },
@@ -267,7 +282,30 @@ async function sweepRows(rows: PoolRow[], countReadableCl = false): Promise<numb
   let done = 0;
   tx(() => {
     for (const p of rows) {
-      if (isClPool(p.proto)) {
+      if (p.proto === 'up33cl') {
+        const s0 = ok<readonly [bigint, number, ...unknown[]]>(res[i++]);
+        const liq = ok<bigint>(res[i++]);
+        const staked = ok<bigint>(res[i++]);
+        const b0 = ok<bigint>(res[i++]);
+        const b1 = ok<bigint>(res[i++]);
+        const rewardRate = p.gauge ? ok<bigint>(res[i++]) : 0n;
+        const periodFinish = p.gauge ? ok<bigint>(res[i++]) : 0n;
+        const gaugeAlive = p.gauge ? ok<boolean>(res[i++]) : false;
+        if (!s0 || liq === undefined || staked === undefined) continue;
+        const stored = b0 === undefined || b1 === undefined
+          ? storedPoolReservesQ.get(p.address) as { reserve0: string; reserve1: string } | undefined
+          : undefined;
+        upsertState(p.address, {
+          sqrtPrice: s0[0], tick: s0[1], liquidity: liq,
+          stakedLiquidity: staked,
+          rewardRate: rewardRate ?? 0n,
+          periodFinish: periodFinish ?? 0n,
+          gaugeAlive: gaugeAlive ?? false,
+          reserve0: b0 ?? BigInt(stored?.reserve0 ?? 0),
+          reserve1: b1 ?? BigInt(stored?.reserve1 ?? 0),
+        });
+        done++;
+      } else if (isClPool(p.proto)) {
         const s0 = ok<readonly [bigint, number, ...unknown[]]>(res[i++]);
         const liq = ok<bigint>(res[i++]);
         const b0 = ok<bigint>(res[i++]);

@@ -11,7 +11,7 @@ import { HistoryButton } from './HistoryButton'
 import { LangControl } from './LangControl'
 import { NewsButton } from './NewsButton'
 
-export type TabId = 'pools' | 'positions' | 'swap' | 'bridge'
+export type TabId = 'pools' | 'recommendations' | 'positions' | 'swap' | 'bridge' | 'strategy' | 'strategy-history' | 'pnl-calendar'
 // Reading order is the order of the trade: find a market, take it, then watch
 // what you are left holding. POOLS now carries the swap form beside the market
 // list, so SWAP sits next to it as the same act at full width; POSITIONS is
@@ -19,9 +19,13 @@ export type TabId = 'pools' | 'positions' | 'swap' | 'bridge'
 // [5] keeps its old binding because the bridge never moved.
 const ALL_TABS = [
   { id: 'pools', labelKey: 'hdr.pools', key: '1' },
+  { id: 'recommendations', labelKey: 'hdr.recommendations', key: '9' },
   { id: 'swap', labelKey: 'hdr.swap', key: '2' },
   { id: 'positions', labelKey: 'hdr.positions', key: '3' },
   { id: 'bridge', labelKey: 'hdr.bridge', key: '5' },
+  { id: 'strategy', labelKey: 'hdr.strategy', key: '6' },
+  { id: 'strategy-history', labelKey: 'hdr.strategyHistory', key: '7' },
+  { id: 'pnl-calendar', labelKey: 'hdr.pnlCalendar', key: '8' },
 ] as const
 // a chain with no bridge route model never shows the tab (FEATURES.bridge)
 const TABS = ALL_TABS.filter((tb) => tb.id !== 'bridge' || FEATURES.bridge)

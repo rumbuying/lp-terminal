@@ -10,6 +10,7 @@
 import { CHAIN, GT, TUNE, log, sleep } from './config';
 import { plausibleUsd } from './state';
 import {
+  db,
   poolRow,
   setTokenPrice,
   upsertStats,
@@ -48,7 +49,7 @@ type GtPool = {
   attributes?: {
     address?: string;
     reserve_in_usd?: string;
-    volume_usd?: { h24?: string };
+    volume_usd?: { m5?: string; h1?: string; h6?: string; h24?: string };
     transactions?: { h24?: { buys?: number; sells?: number } };
     base_token_price_usd?: string;
     quote_token_price_usd?: string;
@@ -115,9 +116,14 @@ function ingest(p: GtPool): Ingested {
   const reserve = num(a.reserve_in_usd);
   const h24 = a.transactions?.h24;
   const txns = h24 ? (h24.buys ?? 0) + (h24.sells ?? 0) : null;
-  const vol = num(a.volume_usd?.h24);
-  if (v4) upsertV4MarketStats(key, vol, txns, reserve, 'geckoterminal');
-  else upsertStats(key, vol, txns, reserve, 'geckoterminal');
+  const volumes = {
+    m5: num(a.volume_usd?.m5),
+    h1: num(a.volume_usd?.h1),
+    h6: num(a.volume_usd?.h6),
+    h24: num(a.volume_usd?.h24),
+  };
+  if (v4) upsertV4MarketStats(key, volumes, txns, reserve, 'geckoterminal');
+  else upsertStats(key, volumes, txns, reserve, 'geckoterminal');
   // Token price seeds — these are the CREDIBLE roots the whole pricing graph
   // hangs off, and they're the one input the propagation rails can't second-
   // guess, so an implausible GT quote is dropped rather than seeded.
@@ -166,4 +172,68 @@ export async function gtCycle(): Promise<string[]> {
       `(${matchedPoolIds.size} univ4)`,
   );
   return [...matchedAddresses];
+}
+
+type DsPair = {
+  pairAddress?: string;
+  baseToken?: { address?: string };
+  quoteToken?: { address?: string };
+  priceUsd?: string;
+  priceNative?: string;
+  volume?: { m5?: number; h1?: number; h6?: number; h24?: number };
+  liquidity?: { usd?: number };
+  txns?: { h24?: { buys?: number; sells?: number } };
+};
+
+/** DexScreener is the intraday source for UP33, which GeckoTerminal does not
+ * index. The official on-chain registry remains the identity gate. */
+export async function up33StatsCycle(): Promise<string[]> {
+  if (!CHAIN.gov || !CHAIN.slugs.dexscreener) return [];
+  const addresses = (db.prepare("SELECT address FROM pools WHERE proto='up33cl' ORDER BY pair_index")
+    .all() as { address: string }[]).map((row) => row.address);
+  const matched = new Set<string>();
+  for (let index = 0; index < addresses.length; index += 30) {
+    const batch = addresses.slice(index, index + 30);
+    let pairs: DsPair[] = [];
+    try {
+      const response = await fetch(
+        `https://api.dexscreener.com/latest/dex/pairs/${CHAIN.slugs.dexscreener}/${batch.join(',')}`,
+        {
+          headers: { accept: 'application/json', 'user-agent': 'up33-lp-indexer/0.1' },
+          signal: AbortSignal.timeout(12_000),
+        },
+      );
+      if (response.ok) pairs = ((await response.json()) as { pairs?: DsPair[] }).pairs ?? [];
+    } catch {
+      // A later cycle retries; last-good market history remains published.
+    }
+    for (const pair of pairs) {
+      const address = pair.pairAddress?.toLowerCase();
+      if (!address || poolRow(address)?.proto !== 'up33cl') continue;
+      const h24 = pair.txns?.h24;
+      const txns = h24 ? (h24.buys ?? 0) + (h24.sells ?? 0) : null;
+      const liquidity = num(pair.liquidity?.usd);
+      upsertStats(address, {
+        m5: num(pair.volume?.m5), h1: num(pair.volume?.h1),
+        h6: num(pair.volume?.h6), h24: num(pair.volume?.h24),
+      }, txns, liquidity, 'dexscreener');
+      const depth = (liquidity ?? 0) / 2;
+      const base = pair.baseToken?.address?.toLowerCase();
+      const quote = pair.quoteToken?.address?.toLowerCase();
+      const baseUsd = num(pair.priceUsd);
+      const native = num(pair.priceNative);
+      if (depth > 0 && base && plausibleUsd(baseUsd)) setTokenPrice(base, baseUsd, depth, 'ds');
+      if (depth > 0 && quote && plausibleUsd(baseUsd) && native && native > 0 && plausibleUsd(baseUsd / native))
+        setTokenPrice(quote, baseUsd / native, depth, 'ds');
+      matched.add(address);
+    }
+    if (index + 30 < addresses.length) await sleep(250);
+  }
+  if (addresses.length) log(`[stats] DexScreener UP33: ${matched.size}/${addresses.length} pools matched`);
+  return [...matched];
+}
+
+export async function statsCycle(): Promise<string[]> {
+  const [gt, up33] = await Promise.all([gtCycle(), up33StatsCycle()]);
+  return [...new Set([...gt, ...up33])];
 }

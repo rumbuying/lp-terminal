@@ -220,6 +220,7 @@ export const v4StateViewAbi = parseAbi([
  * rather than trusted.
  */
 export const v4PositionManagerAbi = parseAbi([
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
   'function ownerOf(uint256 tokenId) view returns (address)',
   'function getPoolAndPositionInfo(uint256 tokenId) view returns ((address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) poolKey, uint256 info)',
   'function getPositionLiquidity(uint256 tokenId) view returns (uint128 liquidity)',

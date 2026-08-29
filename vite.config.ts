@@ -15,7 +15,7 @@ export default defineConfig(({ mode }) => {
   // this process needs the key to build the proxy header, and the bundle must
   // never see it. Adding it there would ship a metered credential to every
   // visitor.
-  const env = loadEnv(mode, envDir, ['RPC', 'KYBERSWAP_', 'CHAIN', 'THEGRAPH_'])
+  const env = loadEnv(mode, envDir, ['RPC', 'KYBERSWAP_', 'CHAIN', 'THEGRAPH_', 'LP_EXECUTOR_'])
   const feeReceiver = (process.env.KYBERSWAP_FEE_RECEIVER ?? env.KYBERSWAP_FEE_RECEIVER ?? '').trim()
   if (!/^0x[0-9a-fA-F]{40}$/.test(feeReceiver)) {
     throw new Error('KYBERSWAP_FEE_RECEIVER must be a valid address')
@@ -32,6 +32,10 @@ export default defineConfig(({ mode }) => {
     rewrite: (p: string) => p.replace(new RegExp(`^${prefix}`), ''),
   })
   const graphKey = (process.env.THEGRAPH_API_KEY ?? env.THEGRAPH_API_KEY ?? '').trim()
+  const buildChain = (process.env.CHAIN ?? env.CHAIN ?? 'bsc').trim()
+  const executorPort = Number((process.env.LP_EXECUTOR_PORT ?? env.LP_EXECUTOR_PORT ?? (buildChain === 'robinhood' ? '8790' : '8791')).trim())
+  if (!Number.isInteger(executorPort) || executorPort < 1 || executorPort > 65_535)
+    throw new Error('LP_EXECUTOR_PORT must be a TCP port')
   const proxy: Record<string, object> = {
     '/kyber': passthru('/kyber', 'https://aggregator-api.kyberswap.com'),
     '/dexscreener': passthru('/dexscreener', 'https://api.dexscreener.com'),
@@ -49,6 +53,14 @@ export default defineConfig(({ mode }) => {
     // production nginx route; the frontend falls back to client-side
     // dexscreener discovery when it isn't running
     '/api': { target: `http://localhost:${process.env.INDEXER_PORT || 8787}`, changeOrigin: true },
+    // Chain-bound unattended strategy service. The canonical production
+    // gateway exposes one instance under each /_chain/<chain>/executor path;
+    // dev/preview has exactly one build-chain instance behind this legacy path.
+    '/executor': {
+      target: `http://127.0.0.1:${executorPort}`,
+      changeOrigin: true,
+      rewrite: (p: string) => p.replace(/^\/executor/, ''),
+    },
   }
   if (/^https?:\/\//.test(upstream)) proxy['/rpc'] = passthru('/rpc', upstream)
 

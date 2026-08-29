@@ -237,6 +237,19 @@ export function poolsWhere(params: Params): {
   if (requestedProto.length) {
     clauses.push(`p.proto IN (${requestedProto.map(() => '?').join(',')})`);
     args.push(...requestedProto);
+  } else {
+    // UP33 shares the address/state substrate for recommendation sampling, but
+    // it is not part of this public Uniswap/Pancake catalog contract. Keep the
+    // default just as narrow as an explicit request; otherwise an internal
+    // strategy venue leaks into counts, cursors and clients that cannot render
+    // its protocol value.
+    // Express the exclusion as an anti-set (the official UP33 registry is small
+    // relative to the public factory catalogs). A direct `p.proto <> ...`
+    // predicate makes SQLite abandon
+    // the composite token-pair index for symbol-pair searches; this shape
+    // materializes the small internal set once and preserves the bounded pair
+    // seek on the multi-million-row public catalog.
+    clauses.push("p.address NOT IN (SELECT address FROM pools WHERE proto = 'up33cl')");
   }
 
   const minTvl = Number(params.get('min_tvl'));
@@ -478,7 +491,7 @@ function addressCatalogTotals(): Record<string, number> {
     pancakev2: 0,
     pancakev3: 0,
   };
-  for (const row of poolCounts()) totals[row.proto] = row.n;
+  for (const row of poolCounts()) if (PROTOS.has(row.proto)) totals[row.proto] = row.n;
   return totals;
 }
 
@@ -734,10 +747,11 @@ function fastV23Count(
   const protocols = requestedProtocols(params);
   const minTvl = Number(params.get('min_tvl'));
   if (Number.isFinite(minTvl) && minTvl > 0) {
-    const protoClause = protocols.length ? ` AND proto IN (${protocols.map(() => '?').join(',')})` : '';
+    const countProtocols = protocols.length ? protocols : [...PROTOS];
+    const protoClause = ` AND proto IN (${countProtocols.map(() => '?').join(',')})`;
     const { n } = db
       .prepare(`SELECT COUNT(*) AS n FROM pool_state WHERE tvl_usd >= ?${protoClause}`)
-      .get(minTvl, ...protocols) as { n: number };
+      .get(minTvl, ...countProtocols) as { n: number };
     return exactly(n);
   }
   return exactly(
@@ -2970,6 +2984,150 @@ export function getHealth() {
   };
 }
 
+type RecommendationRow = Record<string, string | number | null>;
+
+/** Raw, explainable inputs for the executor-side recommendation model. The
+ * indexer never turns these observations into financial advice or calldata. */
+export function getRecommendationCandidates(params: Params) {
+  const rawLimit = params.get('limit');
+  const limit = Math.min(Math.max(Number(rawLimit) || 50, 1), 80);
+  const minTvl = Math.max(Number(params.get('min_tvl')) || 10_000, 0);
+  const minVolume = Math.max(Number(params.get('min_volume')) || 10_000, 0);
+  const timestamp = now();
+  const marketSince = timestamp - 30 * 86_400;
+  const tickSince = timestamp - 7 * 86_400;
+  const addressSelect = `SELECT
+      p.address AS identity,p.address AS pool,NULL AS pool_id,p.proto,
+      p.token0,p.token1,p.fee_ppm,p.fee_ppm AS key_fee_ppm,
+      p.unstaked_fee_ppm,p.tick_spacing,NULL AS hooks,
+      t0.symbol AS symbol0,t0.decimals AS decimals0,t0.price_usd AS token0_usd,
+      t1.symbol AS symbol1,t1.decimals AS decimals1,t1.price_usd AS token1_usd,
+      s.sqrt_price,s.tick,s.liquidity,s.staked_liquidity,s.reward_rate,
+      s.period_finish,s.gauge_alive,s.updated AS state_updated,
+      COALESCE(s.tvl_usd,st.liq_usd) AS tvl_usd,
+      st.vol1h_usd,st.vol6h_usd,st.vol24h_usd,st.updated AS stats_updated
+    FROM pools p
+    JOIN pool_state s ON s.address=p.address
+    JOIN pool_stats st ON st.address=p.address
+    JOIN tokens t0 ON t0.address=p.token0
+    JOIN tokens t1 ON t1.address=p.token1
+    WHERE p.proto IN ('up33cl','univ3','pancakev3')
+      AND s.sqrt_price IS NOT NULL AND s.tick IS NOT NULL AND s.liquidity IS NOT NULL
+      AND COALESCE(s.tvl_usd,st.liq_usd,0)>=?
+      AND COALESCE(st.vol24h_usd,0)>=?`;
+  const feeOrder = ` ORDER BY (
+      MIN(
+        COALESCE(st.vol1h_usd,st.vol24h_usd/24.0),
+        COALESCE(st.vol6h_usd/6.0,st.vol24h_usd/24.0),
+        st.vol24h_usd/24.0
+      ) * p.fee_ppm / MAX(COALESCE(s.tvl_usd,st.liq_usd),1)
+    ) DESC LIMIT ?`;
+  const addressRows = db.prepare(addressSelect + feeOrder)
+    .all(minTvl, minVolume, limit) as RecommendationRow[];
+  const rewardRows = CHAIN.gov ? db.prepare(`${addressSelect}
+      AND p.proto='up33cl' AND s.gauge_alive=1 AND s.period_finish>?
+      AND CAST(s.reward_rate AS REAL)>0
+    ORDER BY CAST(s.reward_rate AS REAL) DESC LIMIT ?`)
+    .all(minTvl, minVolume, timestamp, Math.min(30, limit)) as RecommendationRow[] : [];
+
+  const v4Rows = V4 ? db.prepare(`SELECT
+      v.pool_id AS identity,v.pool_manager AS pool,v.pool_id,'univ4' AS proto,
+      v.currency0 AS token0,v.currency1 AS token1,r.lp_fee AS fee_ppm,
+      v.key_fee_ppm,0 AS unstaked_fee_ppm,v.tick_spacing,v.hooks,
+      t0.symbol AS symbol0,t0.decimals AS decimals0,
+      COALESCE(p0.price_usd,CASE WHEN v.currency0=? THEN pn.price_usd END) AS token0_usd,
+      t1.symbol AS symbol1,t1.decimals AS decimals1,
+      COALESCE(p1.price_usd,CASE WHEN v.currency1=? THEN pn.price_usd END) AS token1_usd,
+      r.sqrt_price,r.tick,r.liquidity,r.liquidity AS staked_liquidity,
+      '0' AS reward_rate,0 AS period_finish,0 AS gauge_alive,r.updated AS state_updated,
+      COALESCE(m.tvl_usd,m.liq_usd) AS tvl_usd,
+      m.vol1h_usd,m.vol6h_usd,m.vol24h_usd,m.updated AS stats_updated
+    FROM v4_pools v
+    JOIN v4_recommendation_state r ON r.pool_id=v.pool_id
+    JOIN v4_market_stats m ON m.pool_id=v.pool_id
+    JOIN v4_tokens t0 ON t0.address=v.currency0
+    JOIN v4_tokens t1 ON t1.address=v.currency1
+    LEFT JOIN tokens p0 ON p0.address=v.currency0
+    LEFT JOIN tokens p1 ON p1.address=v.currency1
+    LEFT JOIN tokens pn ON pn.address=?
+    WHERE COALESCE(m.tvl_usd,m.liq_usd,0)>=? AND COALESCE(m.vol24h_usd,0)>=?
+    ORDER BY (
+      MIN(
+        COALESCE(m.vol1h_usd,m.vol24h_usd/24.0),
+        COALESCE(m.vol6h_usd/6.0,m.vol24h_usd/24.0),
+        m.vol24h_usd/24.0
+      ) * r.lp_fee / MAX(COALESCE(m.tvl_usd,m.liq_usd),1)
+    ) DESC LIMIT ?`)
+    .all(
+      '0x0000000000000000000000000000000000000000',
+      '0x0000000000000000000000000000000000000000',
+      ADDR.WNATIVE.toLowerCase(), minTvl, minVolume, limit,
+    ) as RecommendationRow[] : [];
+  const rows = [...new Map([...addressRows, ...rewardRows, ...v4Rows]
+    .map((row) => [String(row.identity), row])).values()];
+  const marketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
+      AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,
+      AVG(vol24h_usd) AS vol24hUsd
+    FROM pool_market_snapshots WHERE pool=? AND ts>=?
+    GROUP BY CAST(ts/3600 AS INTEGER) ORDER BY ts`);
+  const recentTickQ = db.prepare(
+    'SELECT ts,tick FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts',
+  );
+  const historicTickQ = db.prepare(`SELECT sample.ts,sample.tick
+    FROM pool_tick_samples sample JOIN (
+      SELECT MAX(ts) AS ts FROM pool_tick_samples
+      WHERE pool=? AND ts>=? AND ts<? GROUP BY CAST(ts/600 AS INTEGER)
+    ) bucket ON bucket.ts=sample.ts
+    WHERE sample.pool=? ORDER BY sample.ts`);
+  const up = CHAIN.gov
+    ? db.prepare('SELECT price_usd FROM tokens WHERE address=?').get(CHAIN.gov.UP.toLowerCase()) as { price_usd: number | null } | undefined
+    : undefined;
+  const stable = ADDR.STABLE.toLowerCase();
+  const wrapped = ADDR.WNATIVE.toLowerCase();
+  return {
+    ready: kvGet('ready') === '1',
+    chainId: CHAIN.id,
+    asof: timestamp,
+    candidates: rows.map((row) => {
+      const identity = String(row.identity);
+      const token0 = String(row.token0);
+      const token1 = String(row.token1);
+      const proto = String(row.proto);
+      return {
+        pool: String(row.pool),
+        ...(row.pool_id ? { poolId: String(row.pool_id) } : {}),
+        ...(row.hooks ? { hooks: String(row.hooks) } : {}),
+        protocol: proto === 'up33cl' ? 'up33' : proto === 'pancakev3' ? 'pancakeswap-v3' : proto,
+        token0, token1,
+        symbol0: String(row.symbol0), symbol1: String(row.symbol1),
+        decimals0: Number(row.decimals0), decimals1: Number(row.decimals1),
+        token0Usd: row.token0_usd === null ? null : Number(row.token0_usd),
+        token1Usd: row.token1_usd === null ? null : Number(row.token1_usd),
+        token0IsRisk: token1 === stable ? true : token0 === stable ? false : token0 === wrapped ? false : true,
+        hasStableQuote: token0 === stable || token1 === stable,
+        feePpm: Number(row.fee_ppm),
+        keyFeePpm: row.key_fee_ppm === null ? null : Number(row.key_fee_ppm),
+        unstakedFeePpm: Number(row.unstaked_fee_ppm),
+        tickSpacing: Number(row.tick_spacing), tick: Number(row.tick),
+        sqrtPriceX96: String(row.sqrt_price), liquidity: String(row.liquidity),
+        stakedLiquidity: String(row.staked_liquidity),
+        tvlUsd: Number(row.tvl_usd),
+        vol1hUsd: row.vol1h_usd === null ? null : Number(row.vol1h_usd),
+        vol6hUsd: row.vol6h_usd === null ? null : Number(row.vol6h_usd),
+        vol24hUsd: row.vol24h_usd === null ? null : Number(row.vol24h_usd),
+        statsUpdatedAt: Number(row.stats_updated), stateUpdatedAt: Number(row.state_updated),
+        gaugeAlive: Number(row.gauge_alive) === 1, rewardRate: String(row.reward_rate),
+        periodFinish: Number(row.period_finish), upUsd: up?.price_usd ?? null,
+        marketHistory: marketQ.all(identity, marketSince),
+        tickHistory: [
+          ...historicTickQ.all(identity, tickSince, timestamp - 30 * 3_600, identity),
+          ...recentTickQ.all(identity, timestamp - 30 * 3_600),
+        ],
+      };
+    }),
+  };
+}
+
 const responseEtag = (body: string): string =>
   `W/"${createHash('sha256').update(body).digest('base64url').slice(0, 22)}"`;
 
@@ -3080,6 +3238,9 @@ export function createApiServer(): Server {
         sendPoolsResponse(req, res, preparePoolGroupsResponse(url.searchParams));
         if (Date.now() - started > 500) log(`[api] slow ${url.pathname} ${Date.now() - started}ms`);
         return;
+      } else if (url.pathname === '/api/recommendation-candidates') {
+        body = getRecommendationCandidates(url.searchParams);
+        cache = 'public, max-age=30';
       } else if (url.pathname === '/api/tokens') body = getTokens(url.searchParams);
       else if (url.pathname === '/api/health') {
         body = getHealth();

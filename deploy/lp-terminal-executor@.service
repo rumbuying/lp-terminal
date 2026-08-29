@@ -1,0 +1,25 @@
+[Unit]
+Description=LP Terminal strategy executor (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=lpexecutor
+Group=lpexecutor
+WorkingDirectory=/opt/lp-terminal-executor/app
+Environment=NODE_ENV=production
+Environment=PATH=/opt/node-v22/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/lp-terminal-executor/%i.env
+ExecStart=/opt/lp-terminal-executor/app/node_modules/.bin/tsx executor/main.ts
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/lp-terminal-executor
+ReadOnlyPaths=/etc/lp-terminal-executor
+
+[Install]
+WantedBy=multi-user.target

@@ -5,9 +5,11 @@ import {
   activeRpcUrls,
   bridgeRpcPath,
   chainApiPath,
+  chainExecutorPath,
   chainGatewayEnabled,
   chainRpcPath,
   chainServedHere,
+  executorApiPath,
   indexerPoolGroupsPath,
   indexerPoolsPath,
 } from './routes'
@@ -68,6 +70,8 @@ test('canonical gateway services are namespaced by the selected chain on one ori
     assert.equal(chainRpcPath(chain.key), `/_chain/${chain.key}/rpc`)
     assert.equal(chainRpcPath(chain.key, '/eth'), `/_chain/${chain.key}/rpc/eth`)
     assert.equal(chainApiPath(chain.key, '/pools'), `/_chain/${chain.key}/api/pools`)
+    assert.equal(chainExecutorPath(chain.key, '/health'), `/_chain/${chain.key}/executor/health`)
+    assert.equal(executorApiPath('/health', chain.key, true, false), `/_chain/${chain.key}/executor/health`)
     assert.equal(indexerPoolsPath(chain.key, true, false), `/_chain/${chain.key}/api/pools`)
     assert.equal(bridgeRpcPath(chain.key, 'eth', true), `/_chain/${chain.key}/rpc/eth`)
   }
@@ -155,6 +159,8 @@ test('ordinary production aliases keep only their build-chain legacy proxies', (
   ])
   assert.deepEqual(activeRpcUrls({ ...base, activeIsBuild: false }), ['https://public.example'])
   assert.equal(indexerPoolsPath('robinhood', false, true), '/api/pools')
+  assert.equal(executorApiPath('/health', 'robinhood', false, true), '/executor/health')
+  assert.equal(executorApiPath('/health', 'bsc', false, false), null)
   assert.equal(indexerPoolsPath('bsc', false, false), null)
   assert.equal(bridgeRpcPath('robinhood', 'arb', false), '/rpc/arb')
 })
