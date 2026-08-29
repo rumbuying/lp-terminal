@@ -54,7 +54,11 @@ export function activeRpcUrls(options: {
   if (options.customRpc) return [options.customRpc]
   if (options.envRpc && options.activeIsBuild) return [options.envRpc]
   if (options.gatewayEnabled) return [chainRpcPath(options.chainKey), options.publicRpc]
-  if (options.production && options.activeIsBuild) return ['/rpc', options.publicRpc]
+  // Vite dev/preview implements the same build-chain `/rpc` contract as a
+  // compatibility production host. When no local proxy target is configured
+  // the failed same-origin request simply falls through to the public RPC;
+  // when one is configured, private credentials stay in the Vite process.
+  if (options.activeIsBuild) return ['/rpc', options.publicRpc]
   return [options.publicRpc]
 }
 

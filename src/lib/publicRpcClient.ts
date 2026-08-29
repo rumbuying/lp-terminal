@@ -1,23 +1,38 @@
-import { createPublicClient, http, type PublicClient } from 'viem'
+import { createPublicClient, fallback, http, type PublicClient } from 'viem'
+import { customRpc } from './rpcPref'
 import { activeChain } from '../config/chain'
-import { PUBLIC_RPC } from '../config/env'
+import { ACTIVE_IS_BUILD, CHAIN } from '../config/chains'
+import { activeRpcUrls } from '../config/chains/routes'
+import { ENV, PUBLIC_RPC } from '../config/env'
 
 /**
- * The position scanner's own client, pinned to the chain's OFFICIAL public RPC.
+ * The position scanner's own chain-bound client.
  *
  * Position discovery is the app's widest wallet read (NFT enumeration, per-pool
- * balances, fee simulations, farm walks) and it fires every thirty seconds —
- * on the terminal's own RPC quota that is the one bill every visitor runs up.
- * The official endpoint rate-limits by the CALLER's IP, which is exactly right
- * for a per-wallet scan: every user spends their own allowance, from their own
- * browser, and the terminal's quota is not involved.
+ * balances, fee simulations, farm walks) and it fires every thirty seconds.
  *
- * Pinned means pinned: not the user's custom RPC (footer), not the same-origin
- * gateway proxy, not the env override. A public-endpoint outage degrades the
- * venue readers, which the failed-sources warning on POSITIONS now names,
- * instead of silently rerouting onto paid quota.
+ * It follows the same explicit transport policy as the rest of the terminal:
+ * user RPC, local/private build RPC, same-origin proxy, then public fallback.
+ * This matters when an official endpoint puts JSON-RPC behind a browser
+ * challenge: a per-call multicall failure must not make one valid NFT index
+ * look corrupt or blank every position. The client remains separate from
+ * wagmi so wallet lifecycle changes cannot replace it mid-scan.
  */
+const buildEnv = (import.meta as ImportMeta & { env?: { PROD?: boolean } }).env
+const urls = activeRpcUrls({
+  chainKey: CHAIN.key,
+  publicRpc: PUBLIC_RPC,
+  customRpc: customRpc() || null,
+  envRpc: ENV.rpcUrl,
+  production: buildEnv?.PROD === true,
+  gatewayEnabled: ENV.chainGateway,
+  activeIsBuild: ACTIVE_IS_BUILD,
+})
+
 export const publicRpcClient = createPublicClient({
   chain: activeChain,
-  transport: http(PUBLIC_RPC, { batch: true }),
+  transport:
+    urls.length === 1
+      ? http(urls[0], { batch: true })
+      : fallback(urls.map((url) => http(url, { batch: true }))),
 }) as PublicClient

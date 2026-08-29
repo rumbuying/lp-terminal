@@ -144,6 +144,21 @@ test('local build RPC cannot be reused for another selected chain', () => {
   assert.equal(indexerPoolsPath('bsc', false, true), '/api/pools')
 })
 
+test('local build without a bundled RPC still tries its server-side proxy before public RPC', () => {
+  assert.deepEqual(
+    activeRpcUrls({
+      chainKey: 'robinhood',
+      publicRpc: 'https://robinhood-public.example',
+      customRpc: null,
+      envRpc: '',
+      production: false,
+      gatewayEnabled: false,
+      activeIsBuild: true,
+    }),
+    ['/rpc', 'https://robinhood-public.example'],
+  )
+})
+
 test('ordinary production aliases keep only their build-chain legacy proxies', () => {
   const base = {
     chainKey: 'robinhood',

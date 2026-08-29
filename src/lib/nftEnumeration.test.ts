@@ -33,3 +33,16 @@ test("fails instead of returning a partial NFT enumeration", async () => {
     /failed at owner index 100/,
   );
 });
+
+test("retries only a transiently missing owner index", async () => {
+  const calls: bigint[][] = [];
+  const ids = await enumerateOwnedNftIds(4n, async (indices) => {
+    calls.push([...indices]);
+    if (indices.length > 1)
+      return indices.map((index) => index === 2n ? undefined : 100n + index);
+    return [102n];
+  });
+
+  assert.deepEqual(ids, [100n, 101n, 102n, 103n]);
+  assert.deepEqual(calls, [[0n, 1n, 2n, 3n], [2n]]);
+});
