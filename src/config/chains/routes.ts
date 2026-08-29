@@ -33,6 +33,21 @@ export function chainGatewayEnabled(
   return configured !== null && configured === normalizedHostname(runtimeHostname)
 }
 
+/**
+ * Vite dev is also a real multi-chain gateway: vite.config.ts exposes the same
+ * `/_chain/<key>/...` namespaces as production, backed by one local sidecar per
+ * chain. Keeping this explicit prevents the chain switcher from sending a
+ * localhost tab to the production origin just because localhost is not the
+ * configured production gateway hostname.
+ */
+export function chainGatewayAvailable(
+  configuredHost: string | null | undefined,
+  runtimeHostname: string | null | undefined,
+  viteDevelopment: boolean,
+): boolean {
+  return viteDevelopment || chainGatewayEnabled(configuredHost, runtimeHostname)
+}
+
 export function bridgeRpcPath(chainKey: string, network: string, gatewayEnabled: boolean): string {
   const suffix = network.replace(/^\/+/, '')
   return gatewayEnabled ? chainRpcPath(chainKey, suffix) : `/rpc/${suffix}`

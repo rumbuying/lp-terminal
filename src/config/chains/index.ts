@@ -1,7 +1,7 @@
 import { storedChainKey, urlChainKey } from '../../lib/chainPref'
 import { bscConfig } from './bsc'
 import { robinhoodConfig } from './robinhood'
-import { chainGatewayEnabled, chainServedHere } from './routes'
+import { chainGatewayAvailable, chainServedHere } from './routes'
 import type { ChainConfig } from './types'
 
 export type { ChainConfig, GovAddresses, HomeDexAddresses, UniAddresses } from './types'
@@ -70,9 +70,16 @@ function gatewayHost(): string {
   return (fromVite ?? fromNode ?? '').trim()
 }
 
-export const CHAIN_GATEWAY: boolean = chainGatewayEnabled(
+function viteDevelopment(): boolean {
+  return (
+    (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true
+  )
+}
+
+export const CHAIN_GATEWAY: boolean = chainGatewayAvailable(
   gatewayHost(),
   typeof window !== 'undefined' ? window.location.hostname : null,
+  viteDevelopment(),
 )
 
 const fromLink = chainByKey(urlChainKey())

@@ -24,9 +24,13 @@
     "smoke:executor-integration": "tsx scripts/executor-integration-smoke.ts",
     "preflight:real": "tsx scripts/executor-real-preflight.ts",
     "indexer": "tsx indexer/main.ts",
+    "indexer:robinhood": "CHAIN=robinhood INDEXER_PORT=8787 tsx indexer/main.ts",
+    "indexer:bsc": "CHAIN=bsc INDEXER_PORT=8788 tsx indexer/main.ts",
     "indexer:rebuild-adjacency": "tsx indexer/rebuildSolverAdjacency.ts",
     "indexer:rebuild-connectors": "tsx indexer/rebuildSolverConnectors.ts",
-    "executor": "tsx executor/main.ts"
+    "executor": "tsx executor/main.ts",
+    "executor:robinhood": "CHAIN=robinhood LP_EXECUTOR_CHAIN_ID=4663 LP_EXECUTOR_PORT=8790 LP_EXECUTOR_INDEXER_BASE=http://127.0.0.1:8787 tsx executor/main.ts",
+    "executor:bsc": "CHAIN=bsc LP_EXECUTOR_CHAIN_ID=56 LP_EXECUTOR_PORT=8791 LP_EXECUTOR_INDEXER_BASE=http://127.0.0.1:8788 tsx executor/main.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "2.2.11",

@@ -36,7 +36,29 @@ export default defineConfig(({ mode }) => {
   const executorPort = Number((process.env.LP_EXECUTOR_PORT ?? env.LP_EXECUTOR_PORT ?? (buildChain === 'robinhood' ? '8790' : '8791')).trim())
   if (!Number.isInteger(executorPort) || executorPort < 1 || executorPort > 65_535)
     throw new Error('LP_EXECUTOR_PORT must be a TCP port')
+  const sidecarPort = (key: string, fallback: number) => {
+    const value = Number(process.env[key] || fallback)
+    if (!Number.isInteger(value) || value < 1 || value > 65_535)
+      throw new Error(`${key} must be a TCP port`)
+    return value
+  }
+  // A Vite dev server is the local form of the production multi-chain
+  // gateway. Keep each chain's stateful services isolated while making chain
+  // switches stay on this origin. The unscoped routes below remain the
+  // build-chain compatibility contract used by preview and older bookmarks.
+  const robinhoodIndexerPort = sidecarPort('ROBINHOOD_INDEXER_PORT', 8787)
+  const bscIndexerPort = sidecarPort('BSC_INDEXER_PORT', 8788)
+  const robinhoodExecutorPort = sidecarPort('ROBINHOOD_EXECUTOR_PORT', 8790)
+  const bscExecutorPort = sidecarPort('BSC_EXECUTOR_PORT', 8791)
+  const robinhoodRpc = upstream || 'https://rpc.mainnet.chain.robinhood.com'
+  const bscRpc = (process.env.BSC_RPC_PROXY_TARGET || 'https://bsc-dataseed.bnbchain.org').trim()
   const proxy: Record<string, object> = {
+    '/_chain/robinhood/api': passthru('/_chain/robinhood', `http://127.0.0.1:${robinhoodIndexerPort}`),
+    '/_chain/bsc/api': passthru('/_chain/bsc', `http://127.0.0.1:${bscIndexerPort}`),
+    '/_chain/robinhood/executor': passthru('/_chain/robinhood/executor', `http://127.0.0.1:${robinhoodExecutorPort}`),
+    '/_chain/bsc/executor': passthru('/_chain/bsc/executor', `http://127.0.0.1:${bscExecutorPort}`),
+    '/_chain/robinhood/rpc': passthru('/_chain/robinhood/rpc', robinhoodRpc),
+    '/_chain/bsc/rpc': passthru('/_chain/bsc/rpc', bscRpc),
     '/kyber': passthru('/kyber', 'https://aggregator-api.kyberswap.com'),
     '/dexscreener': passthru('/dexscreener', 'https://api.dexscreener.com'),
     '/goldsky': passthru('/goldsky', 'https://api.goldsky.com'),

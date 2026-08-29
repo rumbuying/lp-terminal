@@ -6,6 +6,7 @@ import {
   bridgeRpcPath,
   chainApiPath,
   chainExecutorPath,
+  chainGatewayAvailable,
   chainGatewayEnabled,
   chainRpcPath,
   chainServedHere,
@@ -95,6 +96,13 @@ test('the chain gateway capability is bound to its exact runtime host', () => {
   assert.equal(chainGatewayEnabled('lp-terminal.xyz', 'up33-terminal.xyz'), false)
   for (const invalid of ['', 'https://lp-terminal.xyz', 'user@lp-terminal.xyz', 'lp-terminal.xyz:443'])
     assert.equal(chainGatewayEnabled(invalid, 'lp-terminal.xyz'), false)
+})
+
+test('vite development exposes the same multi-chain gateway on localhost', () => {
+  assert.equal(chainGatewayAvailable('lp-terminal.xyz', '127.0.0.1', true), true)
+  assert.equal(chainGatewayAvailable('lp-terminal.xyz', 'localhost', true), true)
+  assert.equal(chainGatewayAvailable('lp-terminal.xyz', '127.0.0.1', false), false)
+  assert.equal(chainGatewayAvailable('lp-terminal.xyz', 'lp-terminal.xyz', false), true)
 })
 
 test('production RPC uses the selected namespace even when it differs from the build', () => {

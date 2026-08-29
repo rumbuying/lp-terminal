@@ -781,8 +781,20 @@ per-IP plus a global ceiling, and 403 requests carrying a foreign browser
 `Origin` so other sites can't burn your upstream quota through users' browsers.
 No-Origin clients (scripts) can stay allowed and rate-limited.
 
-`vite.config.ts` emulates every one of these proxies in dev and preview, so the
-server mode is testable locally without deploying anything:
+`vite.config.ts` exposes the full chain namespaces in dev, so a chain switch
+stays on `127.0.0.1:5173` and reaches isolated local sidecars. Start the two
+indexers (and the optional executors) in separate terminals:
+
+```bash
+npm run indexer:robinhood   # :8787
+npm run indexer:bsc         # :8788
+npm run executor:robinhood  # :8790, optional
+npm run executor:bsc        # :8791, optional
+CHAIN=robinhood npm run dev
+```
+
+Preview retains the single build-chain compatibility routes, so that server
+mode is testable locally without deploying anything:
 
 ```bash
 RPC="" npm run build && npm run preview   # /rpc upstream stays in the node process

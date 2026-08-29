@@ -16,6 +16,11 @@ test('a chain we cannot serve is offered on the origin that can', () => {
     'the stale chain param is replaced, never stacked',
   )
   assert.equal(
+    chainHrefOn('https://lp-terminal.xyz', 'bsc', 'http://127.0.0.1:5173/#pools'),
+    'https://lp-terminal.xyz/?chain=bsc#pools',
+    'rehosting clears an explicit development port',
+  )
+  assert.equal(
     chainHrefOn('https://lp-terminal.xyz', 'bsc', 'not a url'),
     'https://lp-terminal.xyz/?chain=bsc',
     'a malformed caller still gets a link that names the chain',

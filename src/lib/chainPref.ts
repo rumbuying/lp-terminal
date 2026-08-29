@@ -65,7 +65,12 @@ export function chainHrefOn(origin: string, key: string, from: string): string {
     const target = new URL(origin)
     const u = new URL(from)
     u.protocol = target.protocol
-    u.host = target.host
+    // Assign hostname and port separately. Setting `host` to a value without a
+    // port does not reliably clear the source URL's explicit development port
+    // after a protocol change (`http://127.0.0.1:5173` used to become the
+    // invalid `https://lp-terminal.xyz:5173`).
+    u.hostname = target.hostname
+    u.port = target.port
     u.searchParams.set(CHAIN_PARAM, key)
     return u.toString()
   } catch {
