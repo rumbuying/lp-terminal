@@ -801,7 +801,8 @@ Ankr Advanced API. Keep the Graph key outside the repository (for example in
 `../keys.txt`) and start the concentrated-liquidity-only mode with:
 
 ```bash
-node --env-file=../keys.txt --run indexer:bsc  # :8788; V2 omitted from readiness/API
+INDEXER_PANCAKE_V3_SUBGRAPH_MAX_LAG_BLOCKS=6000000 \
+  node --env-file=../keys.txt --run indexer:bsc  # :8788; V2 omitted from readiness/API
 node --env-file=../keys.txt --run dev:bsc:no-v2
 ```
 
@@ -810,6 +811,11 @@ The frontend switch also disables V2 LP-position discovery and requests only
 rejects an explicit V2 request instead of returning a misleading partial result.
 Use `INDEXER_V3_GRAPH_PAGE_SIZE` only to tune the default 100-row Uniswap V3 Graph
 page if a different gateway has been measured. Never commit the key file.
+The explicit Pancake V3 lag budget is currently required because its reviewed
+Graph snapshot trails the BSC head; the indexer proves that immutable snapshot
+and scans the remaining factory events through public RPC before advertising
+readiness. Re-measure this value rather than silently increasing it in a hosted
+deployment, since a larger gap makes the one-time RPC tail proportionally slower.
 
 Preview retains the single build-chain compatibility routes, so that server
 mode is testable locally without deploying anything:
