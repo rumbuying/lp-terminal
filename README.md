@@ -338,9 +338,12 @@ For `CHAIN=bsc`, Uniswap V2 and PancakeSwap V2 independently enumerate their
 official factories through `allPairsLength`/`allPairs`. Uniswap V3's first full
 directory is a block-pinned The Graph snapshot: the indexer
 rejects indexing errors, requires the downloaded count to equal the subgraph
-protocol's `totalPoolCount`, reads the factory tier from `FIXED_TRADING_FEE`,
-and verifies every row with the on-chain official factory before publishing
-provenance. A snapshot more than 10,000 blocks behind finalized head is rejected.
+protocol's `totalPoolCount`, reads token/fee/tick-spacing identity from each pool
+on-chain, and verifies every row with the official factory before publishing
+provenance. Graph pages are deliberately small and durably checkpointed because
+the decentralized gateway can reject heavier pages; a restart resumes the same
+canonical snapshot rather than replaying its verified prefix. A snapshot more
+than 10,000 blocks behind finalized head is rejected.
 RPC then scans only the bounded post-snapshot catch-up and later increments.
 PancakeSwap V3 uses the same snapshot-plus-tail boundary with the reviewed
 Messari-schema Graph deployment. The Graph snapshot is the historical
@@ -792,6 +795,21 @@ npm run executor:robinhood  # :8790, optional
 npm run executor:bsc        # :8791, optional
 CHAIN=robinhood npm run dev
 ```
+
+A personal BSC deployment that intentionally excludes both V2 venues needs no
+Ankr Advanced API. Keep the Graph key outside the repository (for example in
+`../keys.txt`) and start the concentrated-liquidity-only mode with:
+
+```bash
+node --env-file=../keys.txt --run indexer:bsc  # :8788; V2 omitted from readiness/API
+node --env-file=../keys.txt --run dev:bsc:no-v2
+```
+
+The frontend switch also disables V2 LP-position discovery and requests only
+`univ3,pancakev3`; the indexer reports both V2 capabilities as unsupported and
+rejects an explicit V2 request instead of returning a misleading partial result.
+Use `INDEXER_V3_GRAPH_PAGE_SIZE` only to tune the default 100-row Uniswap V3 Graph
+page if a different gateway has been measured. Never commit the key file.
 
 Preview retains the single build-chain compatibility routes, so that server
 mode is testable locally without deploying anything:

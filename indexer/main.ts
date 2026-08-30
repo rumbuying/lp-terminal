@@ -10,7 +10,7 @@
 // The API starts listening immediately; `ready:false` in responses tells the
 // frontend to keep using its client-side fallback until the first pass lands.
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
-import { CHAIN, V4, log, now, PORT, sleep, TUNE } from './config';
+import { CHAIN, INDEX_V2, V4, log, now, PORT, sleep, TUNE } from './config';
 import { RpcChainMismatchError, safeError, usingPrivateRpc, verifyRpcChain } from './rpc';
 import { backfillV3, syncV2, tailV3 } from './catalog';
 import {
@@ -202,7 +202,7 @@ async function refreshV23CatalogTail(): Promise<{
 }> {
   try {
     const freshV3 = await tailV3();
-    const v2Delta = await syncV2();
+    const v2Delta = INDEX_V2 ? await syncV2() : { added: 0, fresh: [] };
     // Catalog identity is current at this point. State/metadata enrichment is a
     // separate, progressive concern and must not keep topology degraded.
     recordV23TailError(null);
@@ -274,8 +274,10 @@ async function initialRefresh(): Promise<void> {
   // chain-specific bootstrap/catch-up (BSC: Graph snapshot + bounded RPC tail).
   if (kvGet('solver_v23_boot_ready') !== '1') {
     try {
-      const [v2Delta, msV2] = await timed(syncV2);
-      if (v2Delta.added) log(`[catalog] v2 venue sync: +${v2Delta.added} pairs (${(msV2 / 1000).toFixed(0)}s)`);
+      if (INDEX_V2) {
+        const [v2Delta, msV2] = await timed(syncV2);
+        if (v2Delta.added) log(`[catalog] v2 venue sync: +${v2Delta.added} pairs (${(msV2 / 1000).toFixed(0)}s)`);
+      }
       const [addedV3, msV3] = await timed(backfillV3);
       if (addedV3 > 0 || !kvGet('v3_boot_logged')) {
         log(`[catalog] v3 venue bootstrap done: +${addedV3} pools (${(msV3 / 1000).toFixed(0)}s)`);
@@ -480,6 +482,7 @@ async function boot(): Promise<void> {
   log(
     `lp-indexer starting — chain: ${CHAIN.key}:${CHAIN.id} · db: ${databaseIdentity.status} ·`,
     usingPrivateRpc ? 'rpc: private (.env)' : 'rpc: public',
+    INDEX_V2 ? '· v2: enabled' : '· v2: disabled',
   );
   // A reused seed may have ready=1 from its previous clean boot. Clear it
   // before exposing the API so an unreachable/wrong RPC cannot serve stale

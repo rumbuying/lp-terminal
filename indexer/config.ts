@@ -38,6 +38,17 @@ export const DB_PATH =
   process.env.INDEXER_DB || fileURLToPath(new URL(`./data/index.${CHAIN.key}-${CHAIN.id}.db`, import.meta.url));
 
 /**
+ * Operators may deliberately run a concentrated-liquidity-only catalog. This
+ * is different from an unavailable V2 provider: disabled venues are omitted
+ * from public results and readiness instead of leaving the whole index warm.
+ */
+export function v2IndexEnabled(value: string | undefined): boolean {
+  return value?.trim() !== '1';
+}
+
+export const INDEX_V2 = v2IndexEnabled(process.env.INDEXER_DISABLE_V2);
+
+/**
  * A pre-identity DB with rows cannot be safely attributed to a chain. Operators
  * may claim a known-good legacy DB once by setting the exact target identity,
  * e.g. INDEXER_ADOPT_LEGACY_DB=robinhood:4663. A typo or stale value is fatal.

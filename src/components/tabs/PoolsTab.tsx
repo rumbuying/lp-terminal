@@ -326,7 +326,9 @@ export function PoolsTab() {
   // Every venue is fetched, always. The chips no longer name one, and narrowing
   // the catalog query by protocol would now be answering a question nobody
   // asked — a market in a token is a market wherever the pool happens to live.
-  const indexProto: V23CatalogFilter | undefined = undefined;
+  const indexProto: V23CatalogFilter | undefined = FEATURES.v2Pools
+    ? undefined
+    : "univ3,pancakev3";
   const wantsV23 = true;
   const wantsV4 = HAS_V4_POOL_CATALOG;
   const uni = useUniPools(

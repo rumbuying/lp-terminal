@@ -20,16 +20,29 @@ export const BSC_UNI_V3_SUBGRAPH_DEPLOYMENT =
   'QmctqZqG2SY5wvwLVBPZY8God2cW3wjNQ14Z4swKeJJX9D'
 
 const GRAPH_GATEWAY = 'https://gateway.thegraph.com/api/subgraphs/id'
-const PAGE_SIZE = 1_000
+const configuredPageSize = Number(process.env.INDEXER_V3_GRAPH_PAGE_SIZE)
+const PAGE_SIZE =
+  Number.isSafeInteger(configuredPageSize) && configuredPageSize > 0 && configuredPageSize <= 1_000
+    ? configuredPageSize
+    : 100
 const DEFAULT_MAX_SNAPSHOT_LAG_BLOCKS = 10_000
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/
 const BLOCK_HASH = /^0x[0-9a-fA-F]{64}$/
 const SUBGRAPH_ID = /^[1-9A-HJ-NP-Za-km-z]{32,64}$/
+const ROW_GENERATION =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const ZERO = '0x0000000000000000000000000000000000000000'
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const factoryVerifyAbi = parseAbi([
   'function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)',
   'function feeAmountTickSpacing(uint24 fee) view returns (int24 tickSpacing)',
+])
+const poolIdentityAbi = parseAbi([
+  'function token0() view returns (address)',
+  'function token1() view returns (address)',
+  'function fee() view returns (uint24)',
+  'function tickSpacing() view returns (int24)',
 ])
 
 type GraphMeta = {
@@ -40,8 +53,6 @@ type GraphMeta = {
 
 type GraphPool = {
   id: string
-  inputTokens: Array<{ id: string }>
-  fees: Array<{ feeType: string; feePercentage: string | null }>
   createdBlockNumber: string
 }
 
@@ -80,29 +91,56 @@ async function graphQuery<T>(
   query: string,
   variables: Record<string, unknown> = {},
 ): Promise<T> {
-  const response = await fetch(`${GRAPH_GATEWAY}/${subgraphId}`, {
-    method: 'POST',
-    headers: {
-      accept: 'application/json',
-      authorization: `Bearer ${apiKey}`,
-      'content-type': 'application/json',
-      'user-agent': 'up33-lp-indexer/0.1',
-    },
-    body: JSON.stringify({ query, variables }),
-    signal: AbortSignal.timeout(30_000),
-  })
-  let body: unknown
-  try {
-    body = await response.json()
-  } catch {
-    throw new Error(`The Graph HTTP ${response.status}: invalid JSON`)
+  const attempts = 4
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let response: Response
+    try {
+      response = await fetch(`${GRAPH_GATEWAY}/${subgraphId}`, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${apiKey}`,
+          'content-type': 'application/json',
+          'user-agent': 'up33-lp-indexer/0.1',
+        },
+        body: JSON.stringify({ query, variables }),
+        signal: AbortSignal.timeout(30_000),
+      })
+    } catch (error) {
+      if (attempt === attempts) throw error
+      await sleep(750 * 2 ** (attempt - 1))
+      continue
+    }
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      if ((response.status === 429 || response.status >= 500) && attempt < attempts) {
+        await sleep(750 * 2 ** (attempt - 1))
+        continue
+      }
+      throw new Error(`The Graph HTTP ${response.status}: invalid JSON`)
+    }
+    if (!response.ok) {
+      if ((response.status === 429 || response.status >= 500) && attempt < attempts) {
+        await sleep(750 * 2 ** (attempt - 1))
+        continue
+      }
+      throw new Error(`The Graph HTTP ${response.status}: ${graphError(body)}`)
+    }
+    if ((body as { errors?: unknown[] })?.errors?.length) {
+      const message = graphError(body)
+      if (/bad indexers|BadResponse|timeout|internal server error|service unavailable/i.test(message) && attempt < attempts) {
+        await sleep(750 * 2 ** (attempt - 1))
+        continue
+      }
+      throw new Error(`The Graph query failed: ${message}`)
+    }
+    const data = (body as { data?: T })?.data
+    if (!data) throw new Error('The Graph query returned no data')
+    return data
   }
-  if (!response.ok) throw new Error(`The Graph HTTP ${response.status}: ${graphError(body)}`)
-  if ((body as { errors?: unknown[] })?.errors?.length)
-    throw new Error(`The Graph query failed: ${graphError(body)}`)
-  const data = (body as { data?: T })?.data
-  if (!data) throw new Error('The Graph query returned no data')
-  return data
+  throw new Error('The Graph request exhausted retries')
 }
 
 const int = (value: unknown, label: string): number => {
@@ -116,20 +154,6 @@ const address = (value: unknown, label: string): string => {
   const parsed = String(value ?? '').toLowerCase()
   if (!ADDRESS.test(parsed)) throw new Error(`The Graph returned invalid ${label}`)
   return parsed
-}
-
-/** Messari schema stores feePercentage in human percent: 0.3 => 3,000 ppm. */
-const feePercentageToPpm = (value: unknown): number => {
-  const text = String(value ?? '')
-  if (!/^\d+(?:\.\d+)?$/.test(text))
-    throw new Error('The Graph returned invalid FIXED_TRADING_FEE percentage')
-  const [whole, fraction = ''] = text.split('.')
-  if (fraction.length > 4 && /[1-9]/.test(fraction.slice(4)))
-    throw new Error('The Graph returned a sub-ppm FIXED_TRADING_FEE percentage')
-  const ppm = Number(whole) * 10_000 + Number((fraction + '0000').slice(0, 4))
-  if (!Number.isSafeInteger(ppm) || ppm <= 0 || ppm >= 1_000_000)
-    throw new Error('The Graph returned invalid FIXED_TRADING_FEE percentage')
-  return ppm
 }
 
 type PinnedMeta = { block: number; blockHash: string; deployment: string }
@@ -273,7 +297,7 @@ const META_QUERY = `
 `
 
 const PAGE_QUERY = `
-  query V3SnapshotPage($hash: Bytes!, $after: Bytes!) {
+  query V3SnapshotPage($hash: Bytes!, $afterBlock: BigInt!, $first: Int!) {
     _meta(block: { hash: $hash }) {
       block { number hash }
       deployment
@@ -285,15 +309,38 @@ const PAGE_QUERY = `
       totalPoolCount
     }
     liquidityPools(
-      first: 1000
-      orderBy: id
+      first: $first
+      orderBy: createdBlockNumber
       orderDirection: asc
-      where: { id_gt: $after }
+      where: { createdBlockNumber_gt: $afterBlock }
       block: { hash: $hash }
     ) {
       id
-      inputTokens { id }
-      fees { feeType feePercentage }
+      createdBlockNumber
+    }
+  }
+`
+
+const BLOCK_PAGE_QUERY = `
+  query V3SnapshotBlockPage(
+    $hash: Bytes!
+    $createdBlock: BigInt!
+    $after: Bytes!
+    $first: Int!
+  ) {
+    _meta(block: { hash: $hash }) {
+      block { number hash }
+      deployment
+      hasIndexingErrors
+    }
+    liquidityPools(
+      first: $first
+      orderBy: id
+      orderDirection: asc
+      where: { createdBlockNumber: $createdBlock, id_gt: $after }
+      block: { hash: $hash }
+    ) {
+      id
       createdBlockNumber
     }
   }
@@ -302,8 +349,9 @@ const PAGE_QUERY = `
 /**
  * Download one immutable BSC V3 catalog snapshot from The Graph, verify every
  * row against the official factory, and only then durably publish provenance
- * and advance the RPC cursor. Partial page inserts are harmless: without the
- * completion marker the next boot repeats the pinned import and de-duplicates.
+ * and advance the RPC cursor. Page rows and their cursor checkpoint commit
+ * together so a transient decentralized-gateway failure resumes rather than
+ * replaying the whole verified prefix.
  */
 export async function importBscV3Snapshot(targetBlock: number): Promise<V3SnapshotResult> {
   if (CHAIN.id !== 56) throw new Error('The Graph V3 snapshot importer is BSC-only')
@@ -320,34 +368,90 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
     )
   if (indexed.block < UNI_V3_START_BLOCK)
     throw new Error('The Graph V3 subgraph has not reached the factory deployment block')
-  const snapshotBlock = Math.min(indexed.block, targetBlock)
+  const storedImportBlock = Number(kvGet('v3_snapshot_import_block'))
+  const storedImportHash = kvGet('v3_snapshot_import_block_hash')?.toLowerCase() ?? ''
+  const storedImportDeployment = kvGet('v3_snapshot_import_deployment') ?? ''
+  const storedImportSubgraphId = kvGet('v3_snapshot_import_subgraph_id') ?? ''
+  let canResumePinnedGeneration =
+    Number.isSafeInteger(storedImportBlock) &&
+    storedImportBlock >= UNI_V3_START_BLOCK &&
+    storedImportBlock <= indexed.block &&
+    targetBlock - storedImportBlock <= maxLagBlocks &&
+    BLOCK_HASH.test(storedImportHash) &&
+    storedImportDeployment === indexed.deployment &&
+    storedImportSubgraphId === subgraphId
+  if (canResumePinnedGeneration) {
+    try {
+      await assertCanonicalSnapshot(storedImportBlock, storedImportHash)
+    } catch (error) {
+      if (error instanceof V3SnapshotCanonicalMismatchError) canResumePinnedGeneration = false
+      else throw error
+    }
+  }
+  const snapshotBlock = canResumePinnedGeneration
+    ? storedImportBlock
+    : Math.min(indexed.block, targetBlock)
   const snapshotLag = targetBlock - snapshotBlock
   if (snapshotLag > maxLagBlocks)
     throw new Error(
       `The Graph V3 snapshot lags the finalized chain head by ${snapshotLag} blocks; maximum is ${maxLagBlocks}`,
     )
-  const snapshotHash =
-    snapshotBlock === indexed.block ? indexed.blockHash : await canonicalHash(snapshotBlock)
+  const snapshotHash = canResumePinnedGeneration
+    ? storedImportHash
+    : snapshotBlock === indexed.block
+      ? indexed.blockHash
+      : await canonicalHash(snapshotBlock)
   await assertCanonicalSnapshot(snapshotBlock, snapshotHash)
-  // Unique per traversal, even when retrying the same immutable Graph block.
-  // A row survives publication only if this exact complete pass observed it.
-  const importGeneration = `${subgraphId}\n${indexed.deployment}\n${snapshotBlock}\n${snapshotHash}\n${randomUUID()}`
-  tx(() => {
-    kvSet('v3_snapshot_complete', '0')
-    kvSet('v3_snapshot_import_generation', importGeneration)
-  })
-
-  let after = ZERO
-  let downloaded = 0
+  // Include the pagination strategy in the identity. Address-ordered deep
+  // pagination eventually times out on the reviewed deployment, whereas the
+  // indexed creation-block cursor remains fast. An older partial generation
+  // must therefore restart under the new cursor semantics.
+  const importGeneration = `created-block-v1\n${subgraphId}\n${indexed.deployment}\n${snapshotBlock}\n${snapshotHash}`
+  const storedRowGeneration = kvGet('v3_snapshot_import_row_generation') ?? ''
+  const resumable =
+    canResumePinnedGeneration &&
+    kvGet('v3_snapshot_import_generation') === importGeneration &&
+    ROW_GENERATION.test(storedRowGeneration)
+  const rowGeneration = resumable ? storedRowGeneration : randomUUID()
+  const storedCursorBlock = Number(kvGet('v3_snapshot_import_cursor_block'))
+  const storedDownloaded = Number(kvGet('v3_snapshot_import_downloaded'))
+  let cursorBlock =
+    resumable &&
+    Number.isSafeInteger(storedCursorBlock) &&
+    storedCursorBlock >= UNI_V3_START_BLOCK - 1 &&
+    storedCursorBlock <= snapshotBlock
+      ? storedCursorBlock
+      : UNI_V3_START_BLOCK - 1
+  let downloaded =
+    resumable && Number.isSafeInteger(storedDownloaded) && storedDownloaded >= 0
+      ? storedDownloaded
+      : 0
   let expectedCount: number | null = null
   let added = 0
   const deployment = indexed.deployment
   const tickSpacingByFee = new Map<number, number>()
 
+  if (!resumable) {
+    tx(() => {
+      kvSet('v3_snapshot_complete', '0')
+      kvSet('v3_snapshot_import_generation', importGeneration)
+      kvSet('v3_snapshot_import_row_generation', rowGeneration)
+      kvSet('v3_snapshot_import_subgraph_id', subgraphId)
+      kvSet('v3_snapshot_import_block', String(snapshotBlock))
+      kvSet('v3_snapshot_import_block_hash', snapshotHash)
+      kvSet('v3_snapshot_import_deployment', deployment)
+      kvSet('v3_snapshot_import_after', '')
+      kvSet('v3_snapshot_import_cursor_block', String(cursorBlock))
+      kvSet('v3_snapshot_import_downloaded', '0')
+      kvSet('v3_snapshot_import_pool_count', '')
+    })
+  }
+
   for (;;) {
     const page = await graphQuery<PageResponse>(subgraphId, apiKey, PAGE_QUERY, {
       hash: snapshotHash,
-      after,
+      afterBlock: String(cursorBlock),
+      first: PAGE_SIZE,
     })
     assertMeta(page._meta, snapshotBlock, snapshotHash, deployment)
 
@@ -362,30 +466,100 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
     if (expectedCount === null) expectedCount = pageFactoryCount
     else if (expectedCount !== pageFactoryCount)
       throw new Error('The Graph factory poolCount changed inside a pinned snapshot')
+    const storedExpected = Number(kvGet('v3_snapshot_import_pool_count'))
+    if (
+      resumable &&
+      Number.isSafeInteger(storedExpected) &&
+      storedExpected > 0 &&
+      storedExpected !== pageFactoryCount
+    )
+      throw new Error('The Graph V3 poolCount conflicts with resumable progress')
 
     const rows = page.liquidityPools ?? []
     if (rows.length > PAGE_SIZE) throw new Error('The Graph returned an oversized V3 page')
 
-    let previousId = after
-    const parsed = rows.map((row) => {
+    const parseCandidate = (row: GraphPool) => {
       const id = address(row.id, 'pool id')
-      if (id <= previousId) throw new Error('The Graph V3 page is not strictly ordered by pool id')
-      previousId = id
-      if (row.inputTokens?.length !== 2)
-        throw new Error(`The Graph pool ${id} does not have exactly two input tokens`)
-      const token0 = address(row.inputTokens[0]?.id, 'pool token0')
-      const token1 = address(row.inputTokens[1]?.id, 'pool token1')
-      if (token0 >= token1) throw new Error(`The Graph pool ${id} has non-canonical token order`)
-      const tradingFees = (row.fees ?? []).filter(
-        (fee) => fee.feeType === 'FIXED_TRADING_FEE',
-      )
-      if (tradingFees.length !== 1)
-        throw new Error(`The Graph pool ${id} does not have exactly one FIXED_TRADING_FEE`)
-      const fee = feePercentageToPpm(tradingFees[0].feePercentage)
       const createdBlock = int(row.createdBlockNumber, 'pool createdBlockNumber')
       if (createdBlock < UNI_V3_START_BLOCK || createdBlock > snapshotBlock)
         throw new Error(`The Graph pool ${id} has invalid creation block`)
-      return { id, token0, token1, fee, createdBlock }
+      return { id, createdBlock }
+    }
+    let candidates = rows.map(parseCandidate)
+    for (let index = 1; index < candidates.length; index++)
+      if (candidates[index].createdBlock < candidates[index - 1].createdBlock)
+        throw new Error('The Graph V3 page is not ordered by pool creation block')
+
+    // A full creation-block page may end halfway through a busy block. Replace
+    // that partial tail with an id-paginated exact-block query so no same-block
+    // pool can be skipped when the durable block cursor advances.
+    if (rows.length === PAGE_SIZE) {
+      const tailBlock = candidates.at(-1)!.createdBlock
+      candidates = candidates.filter((row) => row.createdBlock < tailBlock)
+      let blockAfter = ZERO
+      for (;;) {
+        const blockPage = await graphQuery<PageResponse>(
+          subgraphId,
+          apiKey,
+          BLOCK_PAGE_QUERY,
+          {
+            hash: snapshotHash,
+            createdBlock: String(tailBlock),
+            after: blockAfter,
+            first: PAGE_SIZE,
+          },
+        )
+        assertMeta(blockPage._meta, snapshotBlock, snapshotHash, deployment)
+        const blockRows = blockPage.liquidityPools ?? []
+        if (blockRows.length > PAGE_SIZE)
+          throw new Error('The Graph returned an oversized V3 block page')
+        let previousId = blockAfter
+        for (const graphRow of blockRows) {
+          const row = parseCandidate(graphRow)
+          if (row.createdBlock !== tailBlock)
+            throw new Error('The Graph V3 block page escaped its creation block')
+          if (row.id <= previousId)
+            throw new Error('The Graph V3 block page is not strictly ordered by pool id')
+          previousId = row.id
+          candidates.push(row)
+        }
+        if (blockRows.length < PAGE_SIZE) break
+        blockAfter = previousId
+      }
+    }
+    candidates.sort(
+      (a, b) => a.createdBlock - b.createdBlock || a.id.localeCompare(b.id),
+    )
+    const candidateIds = new Set<string>()
+    for (const row of candidates) {
+      if (candidateIds.has(row.id))
+        throw new Error(`The Graph V3 page repeated pool ${row.id}`)
+      candidateIds.add(row.id)
+    }
+
+    // The decentralized Graph route is unreliable for this deployment's
+    // nested inputTokens relation. Graph supplies the complete ordered address
+    // directory; every executable identity field comes from the pool contract
+    // and is then round-tripped through the official factory.
+    const identityRows = await mc(
+      candidates.flatMap((row) => [
+        { abi: poolIdentityAbi, address: row.id as `0x${string}`, functionName: 'token0' },
+        { abi: poolIdentityAbi, address: row.id as `0x${string}`, functionName: 'token1' },
+        { abi: poolIdentityAbi, address: row.id as `0x${string}`, functionName: 'fee' },
+        { abi: poolIdentityAbi, address: row.id as `0x${string}`, functionName: 'tickSpacing' },
+      ]),
+    )
+    const parsed = candidates.map((row, index) => {
+      const token0 = address(ok<string>(identityRows[index * 4]), 'pool token0')
+      const token1 = address(ok<string>(identityRows[index * 4 + 1]), 'pool token1')
+      const fee = ok<number>(identityRows[index * 4 + 2])
+      const spacing = ok<number>(identityRows[index * 4 + 3])
+      if (token0 >= token1) throw new Error(`The Graph pool ${row.id} has non-canonical token order`)
+      if (fee === undefined || !Number.isSafeInteger(fee) || fee <= 0 || fee >= 1_000_000)
+        throw new Error(`official V3 pool ${row.id} returned an invalid fee tier`)
+      if (spacing === undefined || !Number.isSafeInteger(spacing) || spacing === 0)
+        throw new Error(`official V3 pool ${row.id} returned invalid tick spacing`)
+      return { ...row, token0, token1, fee, spacing }
     })
 
     const missingFees = [...new Set(parsed.map((row) => row.fee))].filter(
@@ -407,6 +581,9 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
         tickSpacingByFee.set(fee, spacing)
       })
     }
+    for (const row of parsed)
+      if (tickSpacingByFee.get(row.fee) !== row.spacing)
+        throw new Error(`official V3 pool ${row.id} tick spacing conflicts with the factory`)
 
     const factoryRows = await mc(
       parsed.map((row) => ({
@@ -422,9 +599,13 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
         throw new Error(`The Graph pool ${row.id} failed official factory verification`)
     })
 
+    const nextDownloaded = downloaded + parsed.length
+    const nextCursorBlock = parsed.length
+      ? parsed.at(-1)!.createdBlock
+      : cursorBlock
     tx(() => {
       for (const row of parsed) {
-        const spacing = tickSpacingByFee.get(row.fee)!
+        const spacing = row.spacing
         const existing = poolRow(row.id)
         if (
           existing &&
@@ -435,7 +616,7 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
             existing.tick_spacing !== spacing)
         )
           throw new Error(`existing pool ${row.id} conflicts with verified The Graph snapshot`)
-        if (existing) setPoolSnapshotGeneration(row.id, 'univ3', importGeneration)
+        if (existing) setPoolSnapshotGeneration(row.id, 'univ3', rowGeneration)
         else if (
           insertPool({
             address: row.id,
@@ -445,16 +626,18 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
             feePpm: row.fee,
             tickSpacing: spacing,
             createdBlock: row.createdBlock,
-            snapshotGeneration: importGeneration,
+            snapshotGeneration: rowGeneration,
             addedTs: 0,
           })
         )
           added++
       }
+      kvSet('v3_snapshot_import_pool_count', String(pageFactoryCount))
+      kvSet('v3_snapshot_import_cursor_block', String(nextCursorBlock))
+      kvSet('v3_snapshot_import_downloaded', String(nextDownloaded))
     })
-
-    downloaded += parsed.length
-    if (parsed.length) after = parsed.at(-1)!.id
+    downloaded = nextDownloaded
+    cursorBlock = nextCursorBlock
     if (parsed.length < PAGE_SIZE) break
   }
 
@@ -469,7 +652,7 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
   await assertCanonicalSnapshot(snapshotBlock, snapshotHash)
 
   tx(() => {
-    deletePoolsOutsideSnapshotGeneration('univ3', importGeneration)
+    deletePoolsOutsideSnapshotGeneration('univ3', rowGeneration)
     const publishedCount =
       poolCounts().find((row) => row.proto === 'univ3')?.n ?? 0
     if (publishedCount !== downloaded)
@@ -484,6 +667,11 @@ export async function importBscV3Snapshot(targetBlock: number): Promise<V3Snapsh
     kvSet('v3_snapshot_pool_count', String(downloaded))
     kvSet('v3_snapshot_complete', '1')
     kvSet('v3_snapshot_import_generation', '')
+    kvSet('v3_snapshot_import_row_generation', '')
+    kvSet('v3_snapshot_import_after', '')
+    kvSet('v3_snapshot_import_cursor_block', '')
+    kvSet('v3_snapshot_import_downloaded', '')
+    kvSet('v3_snapshot_import_pool_count', '')
     kvSet('v3_cursor', String(snapshotBlock))
   })
 

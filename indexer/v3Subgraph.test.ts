@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test, { afterEach, beforeEach, mock } from 'node:test'
 
 type McRow = { status: 'success' | 'failure'; result?: unknown }
-type Call = { functionName: string; args?: unknown[] }
+type Call = { address?: string; functionName: string; args?: unknown[] }
 
 const FACTORY = '0xdb1d10011ad0ff90774d0c6bb92e5c5c8b4461f7'
 const POOL0 = '0x0000000000000000000000000000000000000010'
@@ -35,6 +35,14 @@ mock.module('./rpc', {
     },
     mc: async (calls: Call[]): Promise<McRow[]> =>
       calls.map((call) => {
+        if (call.functionName === 'token0')
+          return { status: 'success', result: TOKEN0 }
+        if (call.functionName === 'token1')
+          return { status: 'success', result: call.address === POOL0 ? TOKEN1 : TOKEN2 }
+        if (call.functionName === 'fee')
+          return { status: 'success', result: call.address === POOL0 ? 500 : 3_000 }
+        if (call.functionName === 'tickSpacing')
+          return { status: 'success', result: call.address === POOL0 ? 10 : 60 }
         if (call.functionName === 'feeAmountTickSpacing')
           return { status: 'success', result: call.args?.[0] === 500 ? 10 : 60 }
         if (call.functionName === 'getPool') {
@@ -273,7 +281,7 @@ test('rejects a deployment outside the reviewed identity', async () => {
   assert.equal(kv.get('v3_snapshot_complete'), undefined)
 })
 
-test('rejects an incomplete Graph page without publishing snapshot provenance', async () => {
+test('checkpoints an incomplete Graph page without publishing snapshot provenance', async () => {
   process.env.THEGRAPH_API_KEY = 'server-secret'
   let n = 0
   mock.method(globalThis, 'fetch', async () => {
@@ -311,6 +319,9 @@ test('rejects an incomplete Graph page without publishing snapshot provenance', 
   await assert.rejects(importBscV3Snapshot(200), /downloaded 1\/2 pools/)
   assert.equal(kv.get('v3_snapshot_complete'), '0')
   assert.equal(kv.get('v3_cursor'), undefined)
+  assert.equal(kv.get('v3_snapshot_import_cursor_block'), '150')
+  assert.equal(kv.get('v3_snapshot_import_downloaded'), '1')
+  assert.equal(kv.get('v3_snapshot_import_pool_count'), '2')
 })
 
 test('rejects a pool that the official factory does not return', async () => {
@@ -338,7 +349,7 @@ test('rejects a pool that the official factory does not return', async () => {
         dexAmmProtocols: [{ id: FACTORY, network: 'BSC', totalPoolCount: '1' }],
         liquidityPools: [
           {
-            id: POOL1,
+            id: ORPHAN_POOL,
             inputTokens: [{ id: TOKEN0 }, { id: TOKEN1 }],
             fees: [{ feeType: 'FIXED_TRADING_FEE', feePercentage: '0.05' }],
             createdBlockNumber: '150',
@@ -489,7 +500,7 @@ test('canonical mismatch rebuild publishes only candidates observed in the new g
   assert.equal(kv.get('v3_snapshot_import_generation'), '')
 })
 
-test('rejects duplicate or out-of-order pool ids inside one page', async () => {
+test('rejects rows that are out of creation-block order inside one page', async () => {
   process.env.THEGRAPH_API_KEY = 'server-secret'
   let n = 0
   mock.method(globalThis, 'fetch', async () => {
@@ -530,7 +541,7 @@ test('rejects duplicate or out-of-order pool ids inside one page', async () => {
     })
   })
 
-  await assert.rejects(importBscV3Snapshot(200), /not strictly ordered by pool id/)
+  await assert.rejects(importBscV3Snapshot(200), /not ordered by pool creation block/)
   assert.equal(inserted.length, 0)
   assert.equal(kv.get('v3_snapshot_complete'), '0')
 })

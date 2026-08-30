@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { performance } from 'node:perf_hooks';
-import { ADDR, CHAIN, PORT, TUNE, UNI, V4, log, now } from './config';
+import { ADDR, CHAIN, INDEX_V2, PORT, TUNE, UNI, V4, log, now } from './config';
 import {
   db,
   enqueueHydrationDemand,
@@ -40,7 +40,9 @@ type Params = URLSearchParams;
 type ExactPair = readonly [string, string];
 
 const PROTOS = new Set(['univ2', 'univ3', 'pancakev2', 'pancakev3']);
-const SOLVER_PROTOCOLS = new Set([...PROTOS, 'univ4']);
+const V2_PROTOS = new Set(['univ2', 'pancakev2']);
+const ENABLED_PROTOS = new Set([...PROTOS].filter((proto) => INDEX_V2 || !V2_PROTOS.has(proto)));
+const SOLVER_PROTOCOLS = new Set([...ENABLED_PROTOS, 'univ4']);
 const HEX40 = /^0x[0-9a-f]{40}$/;
 const HEX64 = /^0x[0-9a-f]{64}$/;
 
@@ -249,7 +251,11 @@ export function poolsWhere(params: Params): {
     // the composite token-pair index for symbol-pair searches; this shape
     // materializes the small internal set once and preserves the bounded pair
     // seek on the multi-million-row public catalog.
-    clauses.push("p.address NOT IN (SELECT address FROM pools WHERE proto = 'up33cl')");
+    if (INDEX_V2) clauses.push("p.address NOT IN (SELECT address FROM pools WHERE proto = 'up33cl')");
+    else {
+      clauses.push(`p.proto IN (${[...ENABLED_PROTOS].map(() => '?').join(',')})`);
+      args.push(...ENABLED_PROTOS);
+    }
   }
 
   const minTvl = Number(params.get('min_tvl'));
@@ -310,6 +316,8 @@ function requestedProtocols(params: Params): string[] {
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   if (requestedProto.some((proto) => !PROTOS.has(proto))) throw new ApiInputError('invalid pool protocol');
+  if (requestedProto.some((proto) => !ENABLED_PROTOS.has(proto)))
+    throw new ApiInputError('pool protocol is disabled');
   return [...new Set(requestedProto)];
 }
 
@@ -491,7 +499,8 @@ function addressCatalogTotals(): Record<string, number> {
     pancakev2: 0,
     pancakev3: 0,
   };
-  for (const row of poolCounts()) if (PROTOS.has(row.proto)) totals[row.proto] = row.n;
+  for (const row of poolCounts())
+    if (ENABLED_PROTOS.has(row.proto)) totals[row.proto] = row.n;
   return totals;
 }
 
@@ -517,7 +526,7 @@ function v2CatalogCapability(supported: boolean, countKey: string, factoryCountK
  */
 function pancakeV2CatalogCapability(localCount: number) {
   const catalog = v2CatalogCapability(
-    CHAIN.id === 56,
+    INDEX_V2 && CHAIN.id === 56,
     'pancake_v2_count',
     'pancake_v2_factory_count',
     localCount,
@@ -626,7 +635,7 @@ function v3CatalogCapability(pancake: boolean, localCount: number) {
 }
 
 function addressCatalogCapabilities(totals = addressCatalogTotals()) {
-  const v2 = v2CatalogCapability(true, 'v2_count', 'v2_factory_count', totals.univ2);
+  const v2 = v2CatalogCapability(INDEX_V2, 'v2_count', 'v2_factory_count', totals.univ2);
   const v3 = v3CatalogCapability(false, totals.univ3);
   const pancakeV2 = pancakeV2CatalogCapability(totals.pancakev2);
   const pancakeV3 = v3CatalogCapability(true, totals.pancakev3);
@@ -643,7 +652,7 @@ function addressCatalogCapabilities(totals = addressCatalogTotals()) {
     lastSuccessAt: Number(kvGet('v23_tail_success_at')) || null,
     ready:
       !degraded &&
-      v2.ready &&
+      (!v2.supported || v2.ready) &&
       v3.ready &&
       (!pancakeV2.supported || pancakeV2.ready) &&
       (!pancakeV3.supported || pancakeV3.ready),
@@ -667,7 +676,11 @@ function landingCandidates(params: Params, requestedLimit: number): LandingCandi
   };
 
   const protocols = requestedProtocols(params);
-  const scopes: Array<string | null> = protocols.length ? protocols : [null];
+  const scopes: Array<string | null> = protocols.length
+    ? protocols
+    : INDEX_V2
+      ? [null]
+      : [...ENABLED_PROTOS];
   for (const proto of scopes) {
     const protoFilter = proto === null ? '' : 'proto = ? AND ';
     const protoValue = proto === null ? [] : [proto];
@@ -748,7 +761,7 @@ function fastV23Count(
   const protocols = requestedProtocols(params);
   const minTvl = Number(params.get('min_tvl'));
   if (Number.isFinite(minTvl) && minTvl > 0) {
-    const countProtocols = protocols.length ? protocols : [...PROTOS];
+    const countProtocols = protocols.length ? protocols : [...ENABLED_PROTOS];
     const protoClause = ` AND proto IN (${countProtocols.map(() => '?').join(',')})`;
     const { n } = db
       .prepare(`SELECT COUNT(*) AS n FROM pool_state WHERE tvl_usd >= ?${protoClause}`)
@@ -1577,8 +1590,8 @@ function solverConnectorScope(params: Params): SolverConnectorScope {
   if (a === b) throw new ApiInputError('solver connectors requires distinct tokens');
 
   const rawProtocols = params.getAll('protocol');
-  if (!rawProtocols.length || rawProtocols.length > PROTOS.size)
-    throw new ApiInputError(`solver connectors requires 1..${PROTOS.size} protocols`);
+  if (!rawProtocols.length || rawProtocols.length > ENABLED_PROTOS.size)
+    throw new ApiInputError(`solver connectors requires 1..${ENABLED_PROTOS.size} protocols`);
   const protocolSet = new Set<SolverV23Protocol>();
   for (const value of rawProtocols) {
     const protocol = value.trim().toLowerCase();
@@ -1588,7 +1601,7 @@ function solverConnectorScope(params: Params): SolverConnectorScope {
     // unrankable protocol is declined instead.
     if (protocol === 'univ4')
       throw new ApiInputError('solver connectors ranks v2/v3 protocols only');
-    if (!PROTOS.has(protocol)) throw new ApiInputError('invalid solver connectors protocol');
+    if (!ENABLED_PROTOS.has(protocol)) throw new ApiInputError('invalid solver connectors protocol');
     protocolSet.add(protocol as SolverV23Protocol);
   }
   const protocols = [...protocolSet].sort(
@@ -1616,7 +1629,7 @@ function solverConnectorScope(params: Params): SolverConnectorScope {
 }
 
 function protocolsFromMask(mask: number): SolverV23Protocol[] {
-  return ([...PROTOS] as SolverV23Protocol[])
+  return ([...ENABLED_PROTOS] as SolverV23Protocol[])
     .filter((protocol) => (mask & (1 << SOLVER_PROTO_RANK[protocol])) !== 0)
     .sort((x, y) => SOLVER_PROTO_RANK[x] - SOLVER_PROTO_RANK[y]);
 }
@@ -2416,6 +2429,7 @@ function originTokensSql(origin: string): { sql: string; args: string[] } {
 function groupMembersSql(origin: string): { sql: string; args: string[] } {
   const origins = originTokensSql(origin);
   const args = [...origins.args, ...origins.args, ...origins.args, ...origins.args];
+  const v23ProtocolFilter = INDEX_V2 ? '' : " AND p.proto IN ('univ3', 'pancakev3')";
   return {
     args,
     sql: `
@@ -2423,14 +2437,14 @@ function groupMembersSql(origin: string): { sql: string; args: string[] } {
              s.tvl_usd AS tvl_usd, st.vol24h_usd AS vol24h_usd,
              p.fee_ppm AS fee_ppm, 1 AS fee_usable
         FROM (${origins.sql}) o
-        JOIN pools p ON p.token0 = o.address
+        JOIN pools p ON p.token0 = o.address${v23ProtocolFilter}
         LEFT JOIN pool_state s ON s.address = p.address
         LEFT JOIN pool_stats st ON st.address = p.address
       UNION ALL
       SELECT p.token1, 'v23', p.address,
              s.tvl_usd, st.vol24h_usd, p.fee_ppm, 1
         FROM (${origins.sql}) o
-        JOIN pools p ON p.token1 = o.address
+        JOIN pools p ON p.token1 = o.address${v23ProtocolFilter}
         LEFT JOIN pool_state s ON s.address = p.address
         LEFT JOIN pool_stats st ON st.address = p.address
       UNION ALL

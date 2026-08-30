@@ -477,6 +477,7 @@ test('protocol-scoped index responses reject ignored filters and fallback only w
     assert.equal(canUseUniV3Fallback('univ2'), false)
     assert.equal(canUseUniV3Fallback('pancakev2'), false)
     assert.equal(canUseUniV3Fallback('pancakev2,pancakev3'), false)
+    assert.equal(canUseUniV3Fallback('univ3,pancakev3'), CHAIN.id === 56)
   } finally {
     globalThis.fetch = originalFetch
     if (originalLocation)

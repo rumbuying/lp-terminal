@@ -22,7 +22,10 @@ import { fetchCatalog } from './catalogFetch'
 import { clampWidth } from './format'
 
 export type V23CatalogProto = 'univ2' | 'univ3' | 'pancakev2' | 'pancakev3'
-export type V23CatalogFilter = V23CatalogProto | 'pancakev2,pancakev3'
+export type V23CatalogFilter =
+  | V23CatalogProto
+  | 'pancakev2,pancakev3'
+  | 'univ3,pancakev3'
 
 export type ApiPool23 = {
   proto: V23CatalogProto
@@ -173,9 +176,18 @@ const HEX40 = /^0x[0-9a-f]{40}$/
 const HEX64 = /^0x[0-9a-f]{64}$/
 const V23_PROTOCOLS = new Set<V23CatalogProto>(['univ2', 'univ3', 'pancakev2', 'pancakev3'])
 
-/** DexScreener's compatibility path proves only official Uniswap v3 pools. */
+/**
+ * DexScreener's compatibility path proves fee-keyed V3 candidates against
+ * their configured factories. BSC may therefore request both official
+ * Uniswap V3 and Pancake V3 while a full index is warming; no V2 protocol is
+ * ever substituted through this path.
+ */
 export function canUseUniV3Fallback(proto: V23CatalogFilter | undefined): boolean {
-  return proto === undefined || proto === 'univ3'
+  return (
+    proto === undefined ||
+    proto === 'univ3' ||
+    (proto === 'univ3,pancakev3' && CHAIN.id === 56 && !!CHAIN.slugs.dexIds.home)
+  )
 }
 
 /**

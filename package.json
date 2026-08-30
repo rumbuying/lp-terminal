@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:bsc:no-v2": "VITE_DISABLE_V2=1 vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
@@ -25,7 +26,7 @@
     "preflight:real": "tsx scripts/executor-real-preflight.ts",
     "indexer": "tsx indexer/main.ts",
     "indexer:robinhood": "CHAIN=robinhood INDEXER_PORT=8787 tsx indexer/main.ts",
-    "indexer:bsc": "CHAIN=bsc INDEXER_PORT=8788 tsx indexer/main.ts",
+    "indexer:bsc": "CHAIN=bsc INDEXER_PORT=8788 INDEXER_DISABLE_V2=1 tsx indexer/main.ts",
     "indexer:rebuild-adjacency": "tsx indexer/rebuildSolverAdjacency.ts",
     "indexer:rebuild-connectors": "tsx indexer/rebuildSolverConnectors.ts",
     "executor": "tsx executor/main.ts",

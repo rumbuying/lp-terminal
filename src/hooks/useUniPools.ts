@@ -65,7 +65,7 @@ export function useUniPools(
     refetchOnReconnect: (catalogQuery) => shouldAutoRefreshUniPoolCatalog(catalogQuery.state.data),
     initialPageParam: null as V23PageParam | null,
     queryFn: async ({ pageParam, client, queryKey, signal }): Promise<UniPoolsData> => {
-      const catalogSignal = AbortSignal.any([
+      const indexSignal = AbortSignal.any([
         signal,
         AbortSignal.timeout(CATALOG_LOAD_TIMEOUT_MS),
       ])
@@ -78,7 +78,7 @@ export function useUniPools(
         pageParam?.catalogSeq ?? null,
         pageParam?.catalogGeneration ?? null,
         false,
-        catalogSignal,
+        indexSignal,
       )
       if (idx) return { ...idx, dropped: 0, source: 'index', capped: idx.nextCursor !== null }
       // A continuation belongs to an already-proven index response. Never mix
@@ -90,7 +90,14 @@ export function useUniPools(
         throw new Error('pool indexer unavailable; showing cached catalog')
       if (!canUseUniV3Fallback(proto))
         throw new Error(`${proto ?? 'selected protocol'} requires the pool indexer`)
-      const legacy = await fetchUniBrowse(pc as PublicClient, query, catalogSignal)
+      // The index and compatibility discovery are two independent network
+      // attempts. Reusing the index deadline here can abort the fallback the
+      // instant it starts after a slow/warming sidecar response.
+      const fallbackSignal = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(CATALOG_LOAD_TIMEOUT_MS),
+      ])
+      const legacy = await fetchUniBrowse(pc as PublicClient, query, fallbackSignal)
       return {
         pools: legacy.pools,
         tokens: legacy.tokens,
