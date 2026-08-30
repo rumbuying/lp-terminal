@@ -165,6 +165,17 @@ export function rpcUrl(): string {
 }
 
 /**
+ * Public BSC endpoint used by the keyless indexer. Keep this list restricted to
+ * providers that support historical eth_getLogs: mixing a fast current-state
+ * endpoint that rejects archive reads into the rotator can make the adaptive
+ * log scanner incorrectly conclude that even a one-block request is invalid.
+ * Every endpoint is chain-id checked before the indexer is allowed to write.
+ */
+export const BSC_PUBLIC_INDEXER_RPCS = [
+  'https://rpc-bnb.blockmachine.io',
+] as const;
+
+/**
  * Ordered, de-duplicated RPCs used by the indexer (SECRET — never log them).
  *
  * `INDEXER_RPC_PRIMARY` opts into strict quota isolation: the browser-facing
@@ -185,7 +196,15 @@ export function rpcUrls(): string[] {
   const net = alchemyNet[CHAIN.id];
   const dedicated = extraKey && net ? `https://${net}.g.alchemy.com/v2/${extraKey}` : undefined;
   const secondary = process.env.INDEXER_RPC_FALLBACK?.trim();
-  const candidates = primary ? [primary, dedicated, secondary] : [dedicated, rpcUrl(), secondary];
+  const explicitShared = process.env.RPC?.trim();
+  const shared = explicitShared
+    ? [rpcUrl()]
+    : CHAIN.id === 56
+      ? [...BSC_PUBLIC_INDEXER_RPCS]
+      : [rpcUrl()];
+  const candidates = primary
+    ? [primary, dedicated, secondary]
+    : [dedicated, ...shared, secondary];
   const present = candidates.filter((url): url is string => typeof url === 'string' && url.length > 0);
   return [...new Set(present)];
 }

@@ -109,13 +109,25 @@ async function candidatesFor(query: string, signal?: AbortSignal): Promise<DsPai
   )
 }
 
+/**
+ * An empty browse is a chain-wide preview, not a wrapped-native-only search.
+ * Query each configured routing connector so stable/stable and other deep V3
+ * markets remain visible while the complete local index is still warming.
+ */
+async function browseCandidates(query: string, signal?: AbortSignal): Promise<DsPair[]> {
+  if (query.trim()) return candidatesFor(query, signal)
+  const connectors = [...new Set(CHAIN.connectors.map((address) => address.toLowerCase()))]
+  const batches = await Promise.all(connectors.map((address) => candidatesFor(address, signal)))
+  return batches.flat()
+}
+
 type McRes = { status: 'success' | 'failure'; result?: unknown }
 const ok = <T,>(r: McRes | undefined): T | undefined =>
   r && r.status === 'success' ? (r.result as T) : undefined
 
 /**
  * Discover + on-chain-verify concentrated-liquidity pools across the chain's
- * v3-shaped venues. `query` empty = the wrapped native (hub token). Returns
+ * v3-shaped venues. `query` empty = all configured routing connectors. Returns
  * ready-to-render ClPool objects, each tagged with the venue whose factory
  * vouched for it, and no gauge fields (discovery covers no ve(3,3) protocol).
  */
@@ -124,7 +136,7 @@ export async function fetchUniBrowse(
   query: string,
   signal?: AbortSignal,
 ): Promise<UniBrowse> {
-  const raw = await candidatesFor(query || ADDR.WNATIVE, signal)
+  const raw = await browseCandidates(query, signal)
   signal?.throwIfAborted()
 
   // dedupe, rank by TVL, cap

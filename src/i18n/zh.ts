@@ -568,7 +568,7 @@ export const zh: typeof en = {
     v4LoadingMore: '正在加载 V4…',
     v4LoadMoreTip: '按 PoolId 游标加载下一页；输入 * 可浏览完整索引',
     v4FallbackNote: '索引器不可用 — 已切换 The Graph 备用目录',
-    fallbackNote: '索引器离线 — 仅使用 Uniswap v3 DexScreener 兜底（前 30）',
+    fallbackNote: '索引器离线 — 使用已验证 V3 DexScreener 兜底（前 30）',
     spoofDropped: '拦截 {{n}} 个伪造池',
     thPair: '交易对',
     thPrice: '价格 / 储备',

@@ -33,7 +33,10 @@ export const bscConfig: ChainConfig = {
   nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
   wrappedSymbol: 'WBNB',
   stable: { symbol: 'USDT', decimals: 18 },
-  publicRpc: 'https://bsc-dataseed.bnbchain.org',
+  // Current-state browser reads (including the 30-pool verification batch)
+  // time out on the generic dataseed under load. PublicNode answered the same
+  // Multicall3 probe in ~1.2s; historical indexer logs use a separate endpoint.
+  publicRpc: 'https://bsc-rpc.publicnode.com',
   explorer: {
     name: 'BscScan',
     url: EXPLORER,

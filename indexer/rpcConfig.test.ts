@@ -3,6 +3,7 @@ import { basename } from 'node:path'
 import test from 'node:test'
 import {
   allowLegacyDbAdoption,
+  BSC_PUBLIC_INDEXER_RPCS,
   CHAIN,
   DB_CHAIN_TOKEN,
   DB_PATH,
@@ -192,6 +193,31 @@ test('BSC does not inherit the Robinhood-only workspace RPC', () => {
   } finally {
     if (previousRpc === undefined) delete process.env.RPC
     else process.env.RPC = previousRpc
+  }
+})
+
+test('BSC defaults to public endpoints that support historical log reads', () => {
+  if (CHAIN.key !== 'bsc') return
+  const previousExtraKey = process.env.EXTRA_ALCHEMY_RPC_KEY
+  const previousRpc = process.env.RPC
+  const previousPrimary = process.env.INDEXER_RPC_PRIMARY
+  const previousFallback = process.env.INDEXER_RPC_FALLBACK
+  try {
+    delete process.env.EXTRA_ALCHEMY_RPC_KEY
+    delete process.env.RPC
+    delete process.env.INDEXER_RPC_PRIMARY
+    delete process.env.INDEXER_RPC_FALLBACK
+    assert.deepEqual(rpcUrls(), [...BSC_PUBLIC_INDEXER_RPCS])
+    assert.equal(rpcUrls().includes(PUBLIC_RPC), false)
+  } finally {
+    if (previousExtraKey === undefined) delete process.env.EXTRA_ALCHEMY_RPC_KEY
+    else process.env.EXTRA_ALCHEMY_RPC_KEY = previousExtraKey
+    if (previousRpc === undefined) delete process.env.RPC
+    else process.env.RPC = previousRpc
+    if (previousPrimary === undefined) delete process.env.INDEXER_RPC_PRIMARY
+    else process.env.INDEXER_RPC_PRIMARY = previousPrimary
+    if (previousFallback === undefined) delete process.env.INDEXER_RPC_FALLBACK
+    else process.env.INDEXER_RPC_FALLBACK = previousFallback
   }
 })
 

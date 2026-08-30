@@ -1,5 +1,13 @@
 import { createPublicClient, defineChain, fallback, http, type PublicClient } from 'viem'
-import { CHAIN, log, PUBLIC_RPC, TUNE, rpcUrls, sleep } from './config'
+import {
+  BSC_PUBLIC_INDEXER_RPCS,
+  CHAIN,
+  log,
+  PUBLIC_RPC,
+  TUNE,
+  rpcUrls,
+  sleep,
+} from './config'
 
 // duplicated from src/config/chain.ts — that module imports src/config/env.ts
 // (import.meta.env, vite-only) so it can't be loaded under node
@@ -13,7 +21,8 @@ const indexerChain = defineChain({
 })
 
 const urls = rpcUrls()
-export const usingPrivateRpc = urls.some((url) => url !== PUBLIC_RPC)
+const knownPublicRpcs = new Set<string>([PUBLIC_RPC, ...BSC_PUBLIC_INDEXER_RPCS])
+export const usingPrivateRpc = urls.some((url) => !knownPublicRpcs.has(url))
 // timeout is deliberately tight: a healthy 400-call aggregate answers in 2-4s
 // (measured 2026-07-16); a stalled attempt should fail fast and retry, not
 // pin the whole boot for 30s. Bad chunks degrade to sub-chunks in mc().
