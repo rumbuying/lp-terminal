@@ -2943,12 +2943,15 @@ th.sortable.on { color: var(--acc); }
 .strategy-overview-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 10px; }
 .strategy-overview-kicker { color: var(--cyan); font-size: 0.72rem; letter-spacing: 1.4px; text-transform: uppercase; }
 .strategy-overview h2 { color: var(--fg); font-size: clamp(1.05rem, 1.5vw, 1.35rem); line-height: 1.1; margin: 3px 0 0; }
-.strategy-overview-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-bottom: 10px; }
-.strategy-overview-controls { align-items: center; display: flex; gap: 12px; }
+.strategy-overview-totals { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+.strategy-overview-controls { align-items: center; display: flex; gap: 12px; flex: 0 0 auto; }
+.strategy-overview-actions { align-items: center; display: flex; gap: 7px; justify-content: flex-end; margin-bottom: 10px; }
+.strategy-overview-actions .input { min-width: 92px; }
+.strategy-overview-controls .pnl-unit-control { flex: 0 0 auto; }
 .strategy-overview-totals > div { background: var(--inset); border: 1px solid var(--line); border-radius: var(--r-md); display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 8px 9px; }
 .strategy-overview-totals span { color: var(--dim); font-size: 0.68rem; letter-spacing: 0.7px; text-transform: uppercase; }
 .strategy-overview-totals strong { font-size: clamp(.88rem, 1.18vw, 1.05rem); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pnl-unit-control { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; }
+.pnl-unit-control { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 10px; letter-spacing: .6px; text-transform: uppercase; white-space: nowrap; }
 .pnl-unit-toggle { display: inline-flex; border: 1px solid var(--line-hi); border-radius: var(--r-md); background: var(--inset); overflow: hidden; }
 .pnl-unit-toggle button { border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--dim); cursor: pointer; font: inherit; letter-spacing: .4px; padding: 5px 8px; }
 .pnl-unit-toggle button:last-child { border-right: 0; }

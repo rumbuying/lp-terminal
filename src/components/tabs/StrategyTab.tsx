@@ -799,28 +799,30 @@ export function StrategyTab() {
           </div>
           <div className="strategy-overview-controls">
             <PnlUnitToggle />
-            <select
-              className="input"
-              aria-label={t('strategy.overviewWithdrawTarget')}
-              value={overviewWithdrawTarget}
-              onChange={(event) => setOverviewWithdrawTarget(event.target.value as 'USDG' | 'WETH' | 'ETH')}
-              disabled={!canManage || executorBusy}
-            >
-              <option value="USDG">{CHAIN.stable.symbol}</option>
-              <option value="WETH">{CHAIN.wrappedSymbol}</option>
-              <option value="ETH">{CHAIN.nativeCurrency.symbol}</option>
-            </select>
-            <Btn
-              onClick={() => void withdrawAllProfit(overviewWithdrawTarget)}
-              busy={executorBusy}
-              disabled={!canManage || executorPaused || withdrawableStrategies.length === 0}
-            >
-              {t('strategy.overviewWithdrawAll')}
-            </Btn>
             <Badge tone={executorPaused ? 'red' : runningStrategies.length ? 'green' : 'dim'}>
               {t('strategy.overviewRunning', { n: runningStrategies.length })}
             </Badge>
           </div>
+        </div>
+        <div className="strategy-overview-actions">
+          <select
+            className="input"
+            aria-label={t('strategy.overviewWithdrawTarget')}
+            value={overviewWithdrawTarget}
+            onChange={(event) => setOverviewWithdrawTarget(event.target.value as 'USDG' | 'WETH' | 'ETH')}
+            disabled={!canManage || executorBusy}
+          >
+            <option value="USDG">{CHAIN.stable.symbol}</option>
+            <option value="WETH">{CHAIN.wrappedSymbol}</option>
+            <option value="ETH">{CHAIN.nativeCurrency.symbol}</option>
+          </select>
+          <Btn
+            onClick={() => void withdrawAllProfit(overviewWithdrawTarget)}
+            busy={executorBusy}
+            disabled={!canManage || executorPaused || withdrawableStrategies.length === 0}
+          >
+            {t('strategy.overviewWithdrawAll')}
+          </Btn>
         </div>
         <div className="strategy-overview-totals" aria-label={t('strategy.overviewTotals')}>
           <div>
