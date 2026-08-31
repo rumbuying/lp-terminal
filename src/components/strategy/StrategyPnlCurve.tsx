@@ -1,6 +1,6 @@
 import { useId } from 'react'
 import type { ExecutorPerformance, ExecutorPnlCurvePoint } from '../../lib/executorClient'
-import { strategyPnlCurvePoints, type PnlCurveUnit } from '../../lib/pnlCurve'
+import { strategyPnlCurvePoints, type PnlCurvePoint, type PnlCurveUnit } from '../../lib/pnlCurve'
 
 const WIDTH = 720
 const HEIGHT = 132
@@ -25,8 +25,18 @@ export function StrategyPnlCurve({
   compact?: boolean
 }) {
   const points = strategyPnlCurvePoints(strategyId, rows, performance, unit)
+  const symbol = unit === 'stable' ? performance.stable?.symbol ?? 'USD' : performance.quote?.symbol ?? ''
+  return <PnlValueCurve points={points} symbol={symbol} title={title} empty={empty} compact={compact}/>
+}
+
+export function PnlValueCurve({ points, symbol, title, empty, compact = false }: {
+  points: PnlCurvePoint[]
+  symbol: string
+  title: string
+  empty: string
+  compact?: boolean
+}) {
   const gradientId = `pnl-fill-${useId().replace(/:/g, '')}`
-  const symbol = unit === 'stable' ? 'USDG' : performance.quote?.symbol ?? ''
   if (!points.length) return <div className={`strategy-pnl-curve ${compact ? 'compact' : ''}`}><div className="strategy-pnl-curve-head"><span>{title}</span></div><div className="strategy-pnl-curve-empty">{empty}</div></div>
 
   const minAt = points[0].at

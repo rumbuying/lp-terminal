@@ -682,6 +682,10 @@ CHAIN=robinhood npm run executor
 
 ## Deploy
 
+The current `newlp.coinfetcher.xyz` dual-chain production topology, server paths,
+release procedure and disaster-recovery checklist are documented in
+[docs/PRODUCTION_DEPLOYMENT.zh-CN.md](docs/PRODUCTION_DEPLOYMENT.zh-CN.md).
+
 The frontend remains a static SPA. Production adds a thin stateless Caddy/nginx
 BFF for same-origin data/RPC calls and one pool-indexer process per chain.
 Interactive writes remain browser-signed; unattended writes exist only when the

@@ -100,8 +100,11 @@ type RepriceWorkerMessage = { ok: true; result: RepriceResult } | { ok: false; e
 
 function runRepriceWorkerThread(): Promise<RepriceResult> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL(import.meta.url), {
-      workerData: { kind: REPRICE_WORKER_KIND },
+    // A Worker resolves its entry point before an inherited tsx hook is
+    // reliably active on Node 22. Start from a native module which registers
+    // tsx first, then imports this TypeScript entry point.
+    const worker = new Worker(new URL('./tsxWorker.mjs', import.meta.url), {
+      workerData: { kind: REPRICE_WORKER_KIND, entry: import.meta.url },
     });
     let settled = false;
     worker.once('message', (message: RepriceWorkerMessage) => {

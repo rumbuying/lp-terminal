@@ -27,3 +27,5 @@ graphify-out/
 !README.md
 # The contract map is on-chain fact, and the source comments cite it by path.
 !docs/up33-contract-map.md
+# Current dual-chain production host, release and disaster-recovery runbook.
+!docs/PRODUCTION_DEPLOYMENT.zh-CN.md

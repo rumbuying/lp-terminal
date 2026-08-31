@@ -828,6 +828,20 @@ type InitializeLog = {
   blockNumber: bigint
 }
 
+export class V4InitializeBehindCursorError extends Error {
+  constructor(
+    readonly poolId: string,
+    readonly createdBlock: number,
+    readonly durableCursor: number,
+    readonly currencies: readonly [string, string],
+  ) {
+    super(
+      `new PoolManager Initialize ${poolId} at block ${createdBlock} is at or behind durable cursor ${durableCursor}`,
+    )
+    this.name = 'V4InitializeBehindCursorError'
+  }
+}
+
 function storeInitialize(logRow: InitializeLog, durableCursor: number): string | null {
   if (!V4) throw new Error(`${CHAIN.key} has no configured Uniswap V4 deployment`)
   const args = logRow.args
@@ -886,8 +900,11 @@ function storeInitialize(logRow: InitializeLog, durableCursor: number): string |
   // A genuinely new row behind an already-issued block fence would mutate
   // old topology/page traversals. Overlap windows may only replay known rows.
   if (!existing && createdBlock <= durableCursor)
-    throw new Error(
-      `new PoolManager Initialize ${id} at block ${createdBlock} is at or behind durable cursor ${durableCursor}`,
+    throw new V4InitializeBehindCursorError(
+      id,
+      createdBlock,
+      durableCursor,
+      [currency0, currency1],
     )
   const added = insertV4Pool({
     poolId: id,

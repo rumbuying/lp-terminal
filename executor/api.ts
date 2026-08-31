@@ -17,6 +17,8 @@ import { recommendations } from './recommendation'
 import type { RecommendationMode, RecommendationRisk } from '../shared/recommendation/types'
 import { isTransientRecoveryFailure } from './recovery-policy'
 import { withdrawRetainedProfit } from './profit-withdrawal'
+import { getAddress } from 'viem'
+import { publicStatusRange, publicStrategyStatus } from './public-status'
 
 const JSONH = {
   'content-type': 'application/json; charset=utf-8',
@@ -27,6 +29,7 @@ const JSONH = {
   'x-lp-chain-id': String(EXECUTOR.chainId),
 }
 const importAttempts = new Map<string, number[]>()
+const publicStatusAttempts = new Map<string, number[]>()
 const accountLabel = (value: unknown): string => {
   if (typeof value !== 'string') throw new Error('account label is required')
   const label = value.trim()
@@ -114,6 +117,44 @@ function allowPrivateKeyImport(req: IncomingMessage): boolean {
   return true
 }
 
+function allowPublicStatus(req: IncomingMessage): boolean {
+  const forwarded = req.headers['x-forwarded-for']
+  const key = (Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0])?.trim()
+    || req.socket.remoteAddress
+    || 'unknown'
+  const now = Date.now()
+  const recent = (publicStatusAttempts.get(key) ?? []).filter((value) => now - value < 60_000)
+  if (recent.length >= 30) return false
+  recent.push(now)
+  publicStatusAttempts.set(key, recent)
+  if (publicStatusAttempts.size > 10_000) {
+    for (const [client, values] of publicStatusAttempts) {
+      if (!values.some((value) => now - value < 60_000)) publicStatusAttempts.delete(client)
+    }
+  }
+  return true
+}
+
+async function handlePublicStatus(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  const prefix = '/v1/public/status/'
+  if (req.method !== 'GET' || !url.pathname.startsWith(prefix)) return false
+  if (!allowPublicStatus(req)) {
+    json(res, 429, { error: 'public status rate limit exceeded' })
+    return true
+  }
+  try {
+    const raw = decodeURIComponent(url.pathname.slice(prefix.length))
+    if (!raw || raw.includes('/')) throw new Error('valid wallet address is required')
+    const owner = getAddress(raw)
+    const { from, to } = publicStatusRange(url)
+    json(res, 200, await publicStrategyStatus(owner, from, to))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'public status unavailable'
+    json(res, /address|uri malformed|P\/L curve range/i.test(message) ? 400 : 500, { error: message.slice(0, 180) })
+  }
+  return true
+}
+
 export function startApi() {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://executor')
@@ -131,6 +172,7 @@ export function startApi() {
       })
       return
     }
+    if (await handlePublicStatus(req, res, url)) return
     if (await handleWalletAuth(req, res, url)) return
     const auth = authorize(req, res)
     if (!auth) return

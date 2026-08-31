@@ -18,8 +18,9 @@ import { txlog } from './lib/txlog'
 // remembers it, so one reload would pin every first-time visitor to whatever
 // the deployment defaulted to that day and `CHAIN=` in the build environment could never
 // move them again.
-if (CHAIN_SOURCE === 'link') rememberChain(CHAIN.key)
-if (CHAIN_SOURCE !== 'build') showChainInUrl(CHAIN.key)
+const publicStatusPath = location.pathname === '/status' || location.pathname.startsWith('/status/')
+if (!publicStatusPath && CHAIN_SOURCE === 'link') rememberChain(CHAIN.key)
+if (!publicStatusPath && CHAIN_SOURCE !== 'build') showChainInUrl(CHAIN.key)
 
 // viem lazy-imports its ccip module inside EVERY eth_call error path (the
 // import happens before the OffchainLookup selector check), which made it the

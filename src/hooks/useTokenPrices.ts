@@ -1,5 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
+import { ACTIVE_IS_BUILD, CHAIN } from '../config/chains'
+import { indexerApiPath } from '../config/chains/routes'
+import { ENV } from '../config/env'
 import type { TokenUsdMap } from '../lib/apr'
 
 export type TokenPriceMark = {
@@ -19,6 +22,8 @@ type PriceResponse = {
 export async function fetchTokenPrices(addresses: string[], signal?: AbortSignal): Promise<Record<string, TokenPriceMark>> {
   const unique = [...new Set(addresses.map((address) => address.toLowerCase()))].sort()
   if (!unique.length) return {}
+  const pricesPath = indexerApiPath('prices', CHAIN.key, ENV.chainGateway, ACTIVE_IS_BUILD)
+  if (!pricesPath) return {}
 
   // Stay below common reverse-proxy request-line limits for unusually large
   // wallets while still collapsing normal position inventories to one call.
@@ -26,7 +31,7 @@ export async function fetchTokenPrices(addresses: string[], signal?: AbortSignal
   for (let i = 0; i < unique.length; i += 100) chunks.push(unique.slice(i, i + 100))
   const responses = await Promise.all(
     chunks.map(async (chunk) => {
-      const url = new URL('/api/prices', location.origin)
+      const url = new URL(pricesPath, location.origin)
       url.searchParams.set('addresses', chunk.join(','))
       const response = await fetch(url, { signal })
       if (!response.ok) throw new Error(`prices ${response.status}`)

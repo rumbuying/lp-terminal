@@ -108,6 +108,7 @@ export const clPmAbi = parseAbi([
   'function isApprovedForAll(address owner, address operator) view returns (bool)',
   'function approve(address to, uint256 tokenId)',
   'function setApprovalForAll(address operator, bool approved)',
+  'function multicall(bytes[] data) payable returns (bytes[] results)',
   'function burn(uint256 tokenId) payable',
   'event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
   'event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
@@ -129,8 +130,8 @@ export const clGaugeAbi = parseAbi([
 // ---- Uniswap v3 (official Robinhood Chain deployment; see addresses.UNI) ----
 // Same core math as Slipstream but fee-keyed: positions() carries uint24 fee
 // where Slipstream has int24 tickSpacing, and slot0 has an extra feeProtocol
-// word. increase/decrease/collect/burn are signature-identical to clPmAbi —
-// call those fragments against UNI.V3_NPM instead of duplicating them here.
+// word. The remaining NPM methods are repeated here because viem can only
+// encode or read a function that is present in the ABI supplied at that call.
 
 export const uniV3FactoryAbi = parseAbi([
   'function getPool(address, address, uint24) view returns (address)',
@@ -138,8 +139,18 @@ export const uniV3FactoryAbi = parseAbi([
 
 export const uniV3PmAbi = parseAbi([
   'function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
+  'function increaseLiquidity((uint256 tokenId, uint256 amount0Desired, uint256 amount1Desired, uint256 amount0Min, uint256 amount1Min, uint256 deadline) params) payable returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
+  'function decreaseLiquidity((uint256 tokenId, uint128 liquidity, uint256 amount0Min, uint256 amount1Min, uint256 deadline) params) payable returns (uint256 amount0, uint256 amount1)',
+  'function collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max) params) payable returns (uint256 amount0, uint256 amount1)',
   'function balanceOf(address owner) view returns (uint256)',
   'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function getApproved(uint256 tokenId) view returns (address)',
+  'function isApprovedForAll(address owner, address operator) view returns (bool)',
+  'function approve(address to, uint256 tokenId)',
+  'function setApprovalForAll(address operator, bool approved)',
+  'function multicall(bytes[] data) payable returns (bytes[] results)',
+  'function burn(uint256 tokenId) payable',
   // mint is the ONE write that differs from Slipstream (uint24 fee instead of
   // int24 tickSpacing, and no sqrtPriceX96 pool-creation field)
   'function mint((address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint256 amount0Desired, uint256 amount1Desired, uint256 amount0Min, uint256 amount1Min, address recipient, uint256 deadline) params) payable returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',

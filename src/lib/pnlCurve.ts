@@ -12,7 +12,7 @@ export function strategyPnlCurvePoints(
 ): PnlCurvePoint[] {
   if (!performance.quote) return []
   const quoteAddress = performance.quote.address.toLowerCase()
-  const decimals = unit === 'stable' ? 6 : performance.quote.decimals
+  const decimals = unit === 'stable' ? performance.stable?.decimals ?? 6 : performance.quote.decimals
   const points = rows
     .filter((row) => row.strategyId === strategyId && (unit === 'stable' || row.quote.address.toLowerCase() === quoteAddress))
     .flatMap((row) => {

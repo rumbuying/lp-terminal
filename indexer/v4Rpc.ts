@@ -31,6 +31,8 @@ import { CHAIN, INDEXER_FINALITY_BLOCKS, V4, log } from './config'
 import { pc, withRotatingRpcClient } from './rpc'
 import {
   insertLaunchpadToken,
+  isLaunchpadToken,
+  isStockToken,
   kvGet,
   kvSet,
   launchpadTokenCount,
@@ -38,7 +40,11 @@ import {
   tx,
 } from './store'
 import { v4DirectoryCore } from './v4Scope'
-import { scanV4ForToken, scanV4Windows } from './v4Subgraph'
+import {
+  scanV4ForToken,
+  scanV4Windows,
+  V4InitializeBehindCursorError,
+} from './v4Subgraph'
 
 /** UERC20Factory's launch event; the token address is its first data word. */
 const TOKEN_CREATED = toEventSelector(
@@ -262,7 +268,25 @@ export async function tailV4Rpc(): Promise<string[]> {
   // Re-read a short overlap so a row committed in a window whose cursor write
   // lost a race is still seen. storeInitialize treats a known row as a replay.
   const from = Math.max(poolGenesisBlock, cursor - 120)
-  const fresh = await scanV4Windows(from, head, cursor)
+  let fresh: string[]
+  try {
+    fresh = await scanV4Windows(from, head, cursor)
+  } catch (error) {
+    // Origin proof is persisted before its targeted historical scan. If that
+    // scan suffers a transient RPC failure, the forward overlap will later
+    // rediscover the old pool and correctly refuse to mutate behind its fence.
+    // Retry only the already-proven origin's bounded, topic-filtered history;
+    // arbitrary behind-cursor rows still fail closed above.
+    if (!(error instanceof V4InitializeBehindCursorError)) throw error
+    const origins = error.currencies.filter(
+      (currency) => isLaunchpadToken(currency) || isStockToken(currency),
+    )
+    if (!origins.length) throw error
+    for (const origin of new Set(origins))
+      await scanV4ForToken(origin, poolGenesisBlock, cursor)
+    kvSet('v4_rpc_generation', directoryGeneration())
+    fresh = await scanV4Windows(from, head, cursor)
+  }
   tx(() => {
     kvSet('v4_cursor', String(head))
     kvSet('v4_target_block', String(head))

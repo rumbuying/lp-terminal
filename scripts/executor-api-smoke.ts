@@ -30,6 +30,15 @@ try {
   assert.equal(health.headers.get('x-lp-chain-id'), String(configuredChainId))
   assert.equal((await health.json() as any).ok, true)
   assert.equal((await fetch(`${base}/v1/wallets`)).status, 401)
+  const invalidPublicStatus = await fetch(`${base}/v1/public/status/not-an-address`)
+  assert.equal(invalidPublicStatus.status, 400)
+  const emptyPublicStatus = await fetch(`${base}/v1/public/status/0x0000000000000000000000000000000000000001`)
+  assert.equal(emptyPublicStatus.status, 200)
+  const emptyPublicBody = await emptyPublicStatus.json() as any
+  assert.equal(emptyPublicBody.chain.id, configuredChainId)
+  assert.deepEqual(emptyPublicBody.strategies, [])
+  assert.deepEqual(emptyPublicBody.points, [])
+  assert.equal((await fetch(`${base}/v1/public/status/0x0000000000000000000000000000000000000001?from=1&to=${32 * 24 * 60 * 60}`)).status, 400)
   assert.equal((await fetch(`${base}/v1/wallets`, { headers: { ...auth, origin: 'https://evil.example' } })).status, 403)
   assert.equal((await fetch(`${base}/v1/wallets`, { headers: { ...auth, origin: 'http://127.0.0.1:9999' } })).status, 200)
   const paused = await fetch(`${base}/v1/pause-all`, {
@@ -89,6 +98,8 @@ try {
     method: 'PUT', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(config),
   })
   assert.equal(put.status, 200)
+  const disabledPublicStatus = await fetch(`${base}/v1/public/status/${importedBody.wallet.address}`).then((response) => response.json()) as any
+  assert.deepEqual(disabledPublicStatus.strategies, [])
   const snapshotAt = Math.floor(Date.now() / 1000)
   const { recordStrategyPnlSnapshot } = await import('../executor/store')
   recordStrategyPnlSnapshot({

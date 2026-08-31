@@ -68,6 +68,13 @@ export const zh: typeof en = {
     loadingTab: '正在加载页面…',
     reloaded: '已刷新 — 此标签页打开期间部署了新版本',
   },
+  publicStatus: {
+    kicker: '公开 · 只读 · 无需连接钱包', title: '策略状态', subtitle: '输入钱包地址即可查看 Robinhood 与 BNB 的实时策略盈亏，无需连接或签名。',
+    address: '钱包地址', view: '查看状态', invalidAddress: '请输入有效的 EVM 钱包地址。', terminal: '打开终端', wallet: '正在查看', copy: '复制链接', refresh: '刷新', loading: '正在加载实时策略状态…',
+    summary: '策略状态汇总', running: '运行中', chains: '{{n}} 条链在线', totalValue: '策略总价值', totalPnl: '累计总盈亏', usdApprox: '稳定币美元估值', lastRefresh: '最后刷新', autoRefresh: '每 30 秒自动更新',
+    pnl: '累计盈亏', value: '当前价值', position: '当前仓位', rebalances: '重平衡 {{n}} 次', range_in: '区间内', range_out: '区间外', range_unknown: '区间待更新', valuationUnavailable: '实时估值暂不可用。', updated: '更新于 {{time}}',
+    curve: '近 30 天跨链累计盈亏 · 5 分钟', curveEmpty: '生成盈亏快照后将在这里显示曲线。', empty: '这个钱包当前没有正在运行的策略。', chainUnavailable: '{{chain}} 状态暂不可用，另一条链的数据仍会显示。', allUnavailable: '两个策略服务目前均不可用。', readOnly: '公开只读策略数据 · 无需连接钱包 · 无需签名',
+  },
   net: {
     title: '切换网络',
     wallet: '钱包',

@@ -67,6 +67,13 @@ export const en = {
     loadingTab: 'Loading view…',
     reloaded: 'reloaded — a new build was deployed while this tab was open',
   },
+  publicStatus: {
+    kicker: 'PUBLIC · READ ONLY · NO WALLET REQUIRED', title: 'STRATEGY STATUS', subtitle: 'View live Robinhood and BNB strategy performance by wallet address. No connection or signature.',
+    address: 'Wallet address', view: 'VIEW STATUS', invalidAddress: 'Enter a valid EVM wallet address.', terminal: 'OPEN TERMINAL', wallet: 'VIEWING', copy: 'COPY LINK', refresh: 'REFRESH', loading: 'Loading live strategy status…',
+    summary: 'Strategy status summary', running: 'RUNNING', chains: '{{n}} CHAINS ONLINE', totalValue: 'TOTAL VALUE', totalPnl: 'TOTAL P/L', usdApprox: 'stablecoin USD estimate', lastRefresh: 'LAST REFRESH', autoRefresh: 'automatic every 30 seconds',
+    pnl: 'P/L', value: 'CURRENT VALUE', position: 'POSITION', rebalances: '{{n}} recenters', range_in: 'IN RANGE', range_out: 'OUT OF RANGE', range_unknown: 'RANGE PENDING', valuationUnavailable: 'Live valuation is temporarily unavailable.', updated: 'updated {{time}}',
+    curve: '30-DAY CROSS-CHAIN P/L · 5 MIN', curveEmpty: 'The curve will appear after P/L snapshots are recorded.', empty: 'No running strategies were found for this wallet.', chainUnavailable: '{{chain}} status is temporarily unavailable; other chain data remains visible.', allUnavailable: 'Both strategy services are temporarily unavailable.', readOnly: 'Public read-only strategy data · no wallet connection · no signing',
+  },
   // the wallet-on-another-chain dialog. Nothing here is an alarm: every read on
   // the page works as it is, and only signing needs the two sides to agree.
   net: {

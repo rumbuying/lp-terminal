@@ -17,6 +17,7 @@ import { ThemeControl } from './components/ThemeControl'
 import { THEMES, useTheme } from './lib/theme'
 import { PoolsTab } from './components/tabs/PoolsTab'
 import { Btn } from './components/ui'
+import { PublicStatusPage } from './components/PublicStatusPage'
 
 const BridgeTab = lazy(() => import('./components/tabs/BridgeTab').then(({ BridgeTab }) => ({ default: BridgeTab })))
 const LabTab = lazy(() => import('./components/tabs/LabTab').then(({ LabTab }) => ({ default: LabTab })))
@@ -28,6 +29,13 @@ const StrategyHistoryTab = lazy(() => import('./components/tabs/StrategyHistoryT
 const PnlCalendarTab = lazy(() => import('./components/tabs/PnlCalendarTab').then(({ PnlCalendarTab }) => ({ default: PnlCalendarTab })))
 
 export default function App() {
+  if (location.pathname === '/status' || location.pathname.startsWith('/status/')) {
+    return <QueryClientProvider client={queryClient}><PublicStatusPage /></QueryClientProvider>
+  }
+  return <TerminalApp />
+}
+
+function TerminalApp() {
   const theme = useTheme() // wallet modal accent follows the terminal theme
   const { i18n } = useTranslation() // wallet modal language follows too
   void i18n.language

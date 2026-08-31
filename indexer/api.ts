@@ -2915,6 +2915,51 @@ export function getTokens(params: Params) {
   return { tokens, truncated: boundedCount(matching, [prefix], TOKEN_SEARCH_CANDIDATES).capped };
 }
 
+const MAX_PRICE_ADDRESSES = 100;
+
+/** Exact-address price marks for portfolio valuation. */
+export function getPrices(params: Params) {
+  if (params.getAll('addresses').length > 1)
+    throw new ApiInputError('duplicate addresses');
+  const requested = (params.get('addresses') ?? '')
+    .split(',')
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean);
+  if (requested.length > MAX_PRICE_ADDRESSES)
+    throw new ApiInputError(`addresses exceeds ${MAX_PRICE_ADDRESSES}`);
+  if (requested.some((address) => !HEX40.test(address)))
+    throw new ApiInputError('invalid token address');
+
+  const addresses = [...new Set(requested)].sort();
+  const rows = addresses.length
+    ? db.prepare(
+        `SELECT address, price_usd, price_depth_usd, price_src, price_updated
+         FROM tokens WHERE address IN (${addresses.map(() => '?').join(',')})`,
+      ).all(...addresses) as Array<{
+        address: string;
+        price_usd: number | null;
+        price_depth_usd: number;
+        price_src: string | null;
+        price_updated: number | null;
+      }>
+    : [];
+  const byAddress = new Map(rows.map((row) => [row.address, row]));
+  return {
+    schemaVersion: 1,
+    chainId: CHAIN.id,
+    ready: kvGet('ready') === '1',
+    prices: Object.fromEntries(addresses.map((address) => {
+      const row = byAddress.get(address);
+      return [address, {
+        priceUsd: row?.price_usd ?? null,
+        depthUsd: row?.price_depth_usd ?? 0,
+        source: row?.price_src ?? null,
+        updatedAt: row?.price_updated ?? null,
+      }];
+    })),
+  };
+}
+
 export function getHealth() {
   const totals = addressCatalogTotals();
   const addressCatalogs = addressCatalogCapabilities(totals);
@@ -3260,6 +3305,10 @@ export function createApiServer(): Server {
         body = getRecommendationCandidates(url.searchParams);
         cache = 'public, max-age=30';
       } else if (url.pathname === '/api/tokens') body = getTokens(url.searchParams);
+      else if (url.pathname === '/api/prices') {
+        body = getPrices(url.searchParams);
+        cache = 'public, max-age=30';
+      }
       else if (url.pathname === '/api/health') {
         body = getHealth();
         cache = NO_STORE;

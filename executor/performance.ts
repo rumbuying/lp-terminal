@@ -6,7 +6,7 @@ import { getAmountsForLiquidity, getSqrtRatioAtTick } from '../src/lib/clmath'
 import { publicClient, readCollectableFees, readPerformanceSnapshot } from './chain'
 import { quoteRewardToQuote } from './reward'
 import { quoteWithNativeFallback } from './kyber'
-import { convertPoolAmount, quoteTurnover } from './risk'
+import { convertPoolAmount, quotePerRiskAtTick, quoteTurnover } from './risk'
 import { reconstructOriginalMintCostBasis, type OriginalMintCostBasis } from './cost-basis'
 import { db, getJobContext, setJobContext, setStrategyBaselineUsdgIfAbsent, strategyAllocationComponents, strategyAllocations, strategyBaseline, type StrategyBaseline } from './store'
 import { allocateProRata, distributionAdjustedPnl, executionShortfall } from '../shared/strategy/accounting'
@@ -392,11 +392,13 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
     ? (low(config.quoteToken) === low(referenceSnapshot.token0) ? referenceSnapshot.token0Decimals : referenceSnapshot.token1Decimals)
     : 18
   let liveError: string | undefined
+  let priceSnapshot = referenceSnapshot
   try {
     const allocations = strategyAllocations(config.id)
     const allocationComponents = strategyAllocationComponents(config.id)
     if (config.activeTokenId) {
       const snapshot = await readPerformanceSnapshot(config)
+      priceSnapshot = snapshot
       const fees = config.staking?.enabled
         ? { amount0: BigInt(snapshot.tokensOwed0), amount1: BigInt(snapshot.tokensOwed1) }
         : await readCollectableFees(config)
@@ -445,6 +447,13 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
   })))
   const quoteSymbol = await tokenSymbol(config.quoteToken)
   const riskSymbol = await tokenSymbol(config.riskToken)
+  const baselineTick = startBaseline?.tick ?? mintBasis?.tick ?? firstPrice?.tick
+  const startQuotePerRisk = baselineTick !== undefined && priceSnapshot
+    ? quotePerRiskAtTick(baselineTick, config, priceSnapshot)
+    : null
+  const currentQuotePerRisk = currentPosition.tick !== null && priceSnapshot
+    ? quotePerRiskAtTick(currentPosition.tick, config, priceSnapshot)
+    : null
   const valuationIncomplete = Boolean(liveError || rewardValuationError)
   const hasBaseline = Boolean(startBaseline || first)
   const pnl = hasBaseline && !valuationIncomplete ? distributionAdjustedPnl({ currentValue, withdrawnValue: withdrawnProfitQuote, baselineValue, gasCost: gasCostQuote }) : undefined
@@ -509,6 +518,7 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
     quote: { address: config.quoteToken, symbol: quoteSymbol, decimals: quoteDecimals },
     stable: { address: SETTLEMENT, symbol: EXECUTOR.network.settlementSymbol, decimals: EXECUTOR.network.settlementDecimals, baselineSource: stableBaselineSource },
     risk: { address: config.riskToken, symbol: riskSymbol },
+    price: { startQuotePerRisk, currentQuotePerRisk },
     summary: {
       reopens: cycles.filter((cycle) => cycle.new_token_id !== null).length,
       grossFeesQuoteRaw: grossFeesQuote.toString(),

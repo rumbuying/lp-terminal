@@ -64,7 +64,7 @@ export type ExecutorPerformance = {
   calculatedAt?: number
   state: string
   quote?: { address: string; symbol: string; decimals: number }
-  stable?: { address: string; symbol: 'USDG'; decimals: 6; baselineSource?: 'recorded_at_start' | 'historical_weth_usdg' }
+  stable?: { address: string; symbol: string; decimals: number; baselineSource?: 'recorded_at_start' | 'historical_weth_usdg' }
   risk?: { address: string; symbol: string }
   price?: { startQuotePerRisk: number | null; currentQuotePerRisk: number | null }
   summary?: {
