@@ -121,6 +121,7 @@ export function StrategyTab() {
   const [executorPreflight, setExecutorPreflight] = useState<ExecutorPreflight | null>(null)
   const [editingStrategyId, setEditingStrategyId] = useState<string | null>(null)
   const [profitTargets, setProfitTargets] = useState<Record<string, 'USDG' | 'WETH' | 'ETH'>>({})
+  const [overviewWithdrawTarget, setOverviewWithdrawTarget] = useState<'USDG' | 'WETH' | 'ETH'>('WETH')
   const performanceQuoteAddresses = useMemo(() => {
     // Most strategies retain WETH. Start its USD mark in parallel with the
     // executor performance request instead of discovering it afterwards and
@@ -736,11 +737,56 @@ export function StrategyTab() {
   const dashboardTodayIncomeTax = dashboardMetricText(dashboardCycleRows.map(({ performance, incomeTaxRaw }) => ({ performance, raw: incomeTaxRaw })))
   const dashboardUnclaimedFees = dashboardMetric('currentUncollectedFeesQuoteRaw')
   const dashboardWithdrawableProfit = dashboardMetric('profitReserveQuoteRaw')
+  const dashboardTodayGas = dashboardMetricText(dashboardTodayRows.flatMap((row) => {
+    const performance = performanceByStrategy.get(row.strategyId)
+    return performance ? [{ performance, raw: row.gasRaw }] : []
+  }))
+  const withdrawableStrategies = runningStrategies.filter(({ remote, performance }) => {
+    const available = performance?.summary?.profitReserveQuoteRaw
+    return available && BigInt(available) > 0n && !['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(remote.state)
+  })
   const canManage = executorOnline && authRole === 'admin'
 
   const executionImpact = (bps: number | null) => {
     if (bps == null) return null
     return bps < 1 ? `${bps.toFixed(2)} bp` : `${(bps / 100).toFixed(2)}%`
+  }
+
+  const withdrawAllProfit = async (target: 'USDG' | 'WETH' | 'ETH') => {
+    if (!withdrawableStrategies.length) return setExecutorError(t('strategy.profitWithdrawNone'))
+    if (!window.confirm(t('strategy.overviewWithdrawAllConfirm', {
+      count: withdrawableStrategies.length,
+      amount: dashboardWithdrawableProfit,
+      target,
+    }))) return
+    setExecutorBusy(true)
+    setExecutorError(null)
+    const succeeded: string[] = []
+    const failed: string[] = []
+    try {
+      for (const { remote } of withdrawableStrategies) {
+        try {
+          await withdrawExecutorProfit(adminToken, remote.config.id, target)
+          succeeded.push(remote.config.id)
+        } catch (error) {
+          failed.push(error instanceof Error ? error.message : 'withdrawal failed')
+        }
+      }
+      await refreshExecutor()
+      if (failed.length) {
+        setExecutorError(t('strategy.overviewWithdrawAllPartial', {
+          success: succeeded.length,
+          failed: failed.length,
+          first: failed[0],
+        }))
+      } else {
+        setExecutorError(t('strategy.overviewWithdrawAllSuccess', { count: succeeded.length, target }))
+      }
+    } catch (error) {
+      setExecutorError(error instanceof Error ? error.message : t('strategy.profitWithdrawFailed'))
+    } finally {
+      setExecutorBusy(false)
+    }
   }
 
   return (
@@ -753,6 +799,24 @@ export function StrategyTab() {
           </div>
           <div className="strategy-overview-controls">
             <PnlUnitToggle />
+            <select
+              className="input"
+              aria-label={t('strategy.overviewWithdrawTarget')}
+              value={overviewWithdrawTarget}
+              onChange={(event) => setOverviewWithdrawTarget(event.target.value as 'USDG' | 'WETH' | 'ETH')}
+              disabled={!canManage || executorBusy}
+            >
+              <option value="USDG">{CHAIN.stable.symbol}</option>
+              <option value="WETH">{CHAIN.wrappedSymbol}</option>
+              <option value="ETH">{CHAIN.nativeCurrency.symbol}</option>
+            </select>
+            <Btn
+              onClick={() => void withdrawAllProfit(overviewWithdrawTarget)}
+              busy={executorBusy}
+              disabled={!canManage || executorPaused || withdrawableStrategies.length === 0}
+            >
+              {t('strategy.overviewWithdrawAll')}
+            </Btn>
             <Badge tone={executorPaused ? 'red' : runningStrategies.length ? 'green' : 'dim'}>
               {t('strategy.overviewRunning', { n: runningStrategies.length })}
             </Badge>
@@ -776,6 +840,10 @@ export function StrategyTab() {
           <div>
             <span>{t('strategy.overviewTodayIncomeTax')}</span>
             <strong>{dashboardTodayIncomeTax}</strong>
+          </div>
+          <div>
+            <span>{t('strategy.overviewTodayGas')}</span>
+            <strong>{dashboardTodayGas}</strong>
           </div>
           <div>
             <span>{t('strategy.overviewUnclaimedFees')}</span>
