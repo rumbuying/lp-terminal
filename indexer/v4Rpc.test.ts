@@ -111,6 +111,9 @@ mock.module('./v4Subgraph', {
       tokenBackfills.push([token.toLowerCase(), from, to])
       return []
     },
+    // v4Rpc re-exports this through its own instanceof guard; the mock must
+    // provide it or the static import fails at module instantiation.
+    V4InitializeBehindCursorError: class V4InitializeBehindCursorError extends Error {},
   },
 })
 
