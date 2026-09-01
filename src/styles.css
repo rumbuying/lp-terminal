@@ -3101,7 +3101,8 @@ th.sortable.on { color: var(--acc); }
 .strategy-safeguards-brief { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
 .strategy-safeguards-brief > summary { cursor: pointer; }
 .strategy-safeguards-brief .kv { margin: 6px 0 0; }
-.strategy-safeguards-actions { margin-top: 6px; }
+.strategy-safeguards-editor { margin-top: 8px; }
+.strategy-safeguards-actions { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
 @media (max-width: 720px) {
   .pnl-calendar { gap: 2px; }

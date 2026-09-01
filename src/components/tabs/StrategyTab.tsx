@@ -59,6 +59,26 @@ import { fmtNum } from '../../lib/format'
 const ACTIVE_EXECUTOR_STATES = new Set(['planned', 'executing', 'monitoring', 'guard_wait', 'recovery', 'recovery_quarantined', 'paused_guard', 'awaiting_manual'])
 const PNL_CURVE_WINDOW_SECONDS = 30 * 24 * 60 * 60
 
+/** Quick-flow safeguard fields, in display order. `minNetAprPct` stays out: the
+ *  monitor never computes a net APR, so exposing it would be a dead control. */
+type SafeguardNumberKey = Exclude<keyof StrategyConfig['safeguards'], 'enabled' | 'minNetAprPct'>
+const SAFEGUARD_FIELDS = [
+  { key: 'minCrossingMinutes', label: 'strategy.editor.minCrossingMinutes' },
+  { key: 'maxRebalancesPerDay', label: 'strategy.editor.maxRebalancesPerDay' },
+  { key: 'maxConsecutiveLowerBreaks', label: 'strategy.editor.maxConsecutiveLowerBreaks' },
+  { key: 'maxRiskAssetPct', label: 'strategy.editor.maxRiskAssetPct' },
+  { key: 'maxSwapImpactBps', label: 'strategy.editor.maxSwapImpactBps' },
+  { key: 'volatilityWindowSeconds', label: 'strategy.editor.volatilityWindowSeconds' },
+  { key: 'maxVolatilityBps', label: 'strategy.editor.maxVolatilityBps' },
+  { key: 'maxSpotTwapDeviationBps', label: 'strategy.editor.maxSpotTwapDeviationBps' },
+  { key: 'stableMarketSeconds', label: 'strategy.editor.stableMarketSeconds' },
+  { key: 'burstWindowMinutes', label: 'strategy.editor.burstWindowMinutes' },
+  { key: 'burstTriggerCount', label: 'strategy.editor.burstTriggerCount' },
+  { key: 'burstCooldownMinutes', label: 'strategy.editor.burstCooldownMinutes' },
+  { key: 'maxSlippageBps', label: 'strategy.editor.maxSlippageBps', fallback: 100 },
+  { key: 'maxPlanAgeSeconds', label: 'strategy.editor.maxPlanAgeSeconds', fallback: 30 },
+] as const satisfies readonly { key: SafeguardNumberKey; label: string; fallback?: number }[]
+
 const savedExecutorAdminToken = () => {
   if (typeof window === 'undefined') return ''
   try { return window.localStorage.getItem(executorAdminTokenStorageKey())?.trim() ?? '' } catch { return '' }
@@ -458,6 +478,22 @@ export function StrategyTab() {
     const next: StrategyConfig = {
       ...strategy,
       safeguards: recommendedSafeguards(Math.min(strategy.range.lowerPct, strategy.range.upperPct)),
+      revision: strategy.revision + 1,
+      updatedAt: now,
+    }
+    setItems(upsertStrategy(next))
+  }
+  const setSafeguardField = (strategy: StrategyConfig, key: SafeguardNumberKey, raw: string) => {
+    const trimmed = raw.trim()
+    const numeric = trimmed === '' || !Number.isFinite(Number(trimmed)) ? undefined : Number(trimmed)
+    // Optional limits intentionally become undefined ("no limit") when cleared;
+    // the two required ones fall back to their schema default.
+    const spec = SAFEGUARD_FIELDS.find((field) => field.key === key)
+    const value = numeric ?? (spec && 'fallback' in spec ? spec.fallback : undefined)
+    const now = Math.floor(Date.now() / 1000)
+    const next: StrategyConfig = {
+      ...strategy,
+      safeguards: { ...strategy.safeguards, [key]: value },
       revision: strategy.revision + 1,
       updatedAt: now,
     }
@@ -1084,17 +1120,23 @@ export function StrategyTab() {
                   {!strategy.safeguards.enabled && <span className="amber"> · {t('strategy.safeguardsOffTag')}</span>}
                 </summary>
                 {strategy.safeguards.enabled ? (
-                  <div className="kv mono-sm">
-                    <span>{t('strategy.sbCrossing', { minutes: strategy.safeguards.minCrossingMinutes ?? '—' })}</span>
-                    <span>{t('strategy.sbDailyCap', { n: strategy.safeguards.maxRebalancesPerDay ?? '—' })}</span>
-                    <span>{t('strategy.sbLowerBreaks', { n: strategy.safeguards.maxConsecutiveLowerBreaks ?? '—' })}</span>
-                    <span>{t('strategy.sbBurst', { count: strategy.safeguards.burstTriggerCount ?? '—', window: strategy.safeguards.burstWindowMinutes ?? '—', cooldown: strategy.safeguards.burstCooldownMinutes ?? '—' })}</span>
-                    <span>{t('strategy.sbVolatility', { bps: strategy.safeguards.maxVolatilityBps ?? '—', window: strategy.safeguards.volatilityWindowSeconds ?? '—' })}</span>
-                    <span>{t('strategy.sbDeviation', { bps: strategy.safeguards.maxSpotTwapDeviationBps ?? '—' })}</span>
-                    <span>{t('strategy.sbStable', { seconds: strategy.safeguards.stableMarketSeconds ?? '—' })}</span>
-                    <span>{t('strategy.sbRiskAsset', { pct: strategy.safeguards.maxRiskAssetPct ?? '—' })}</span>
-                    <span>{t('strategy.sbSwapImpact', { bps: strategy.safeguards.maxSwapImpactBps ?? '—' })}</span>
-                  </div>
+                  <>
+                    <div className="strategy-editor-grid strategy-safeguards-editor">
+                      {SAFEGUARD_FIELDS.map((field) => (
+                        <label className="strategy-editor-field" key={field.key}>
+                          <span>{t(field.label)}</span>
+                          <NumInput
+                            value={strategy.safeguards[field.key]?.toString() ?? ''}
+                            onChange={(value) => setSafeguardField(strategy, field.key, value)}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                    <div className="strategy-safeguards-actions">
+                      <Btn tone="ghost" onClick={() => applyRecommendedSafeguards(strategy)}>{t('strategy.safeguardsReset')}</Btn>
+                      <span className="dim mono-sm">{t('strategy.safeguardsEditHint')}</span>
+                    </div>
+                  </>
                 ) : (
                   <div className="amber mono-sm">
                     {t('strategy.safeguardsOffNote')}
