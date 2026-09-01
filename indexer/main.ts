@@ -424,6 +424,8 @@ function startLoops(): void {
         throw error;
       }
     });
+  // Off the shared queue: the first replay is a long scan and must not stall
+  // the frontpage/sweep/tail work queued behind it (same reasoning as stats).
   if (HAS_V4_POSITION_INDEX)
     loop('v4-positions', TUNE.v4TailMs, async () => {
       try {
@@ -434,7 +436,7 @@ function startLoops(): void {
         recordV4PositionsTailError(safeError(error));
         throw error;
       }
-    });
+    }, false);
   loop('hot', TUNE.hotSweepMs, async () => {
     const hot = hotAddrs(progressiveCatalog ? PROGRESSIVE_TIER_LIMIT : undefined);
     await sweepState(hot);
