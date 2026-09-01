@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { parseStrategyConfig } from '../../../shared/strategy/schema'
+import { parseStrategyConfig, recommendedSafeguards } from '../../../shared/strategy/schema'
 import type { BoundaryAction, BoundaryCondition, StrategyConfig } from '../../../shared/strategy/types'
 import { Btn, NumInput } from '../ui'
 
@@ -55,7 +55,7 @@ export function StrategyEditor(props: { strategy: StrategyConfig; onSave: (strat
     trigger: { source: 'spot', pollSeconds: 4, confirmationSeconds: 0, cooldownMinutes: 0 },
     boundary: { lower: { condition: 'always', action: 'recenter' }, upper: { condition: 'always', action: 'recenter' } },
     fees: { handling: 'convert_to_quote', timing: 'on_rebalance' },
-    safeguards: { enabled: false, maxSlippageBps: 100, maxPlanAgeSeconds: 30 },
+    safeguards: recommendedSafeguards(5),
   })
 
   return (

@@ -3098,6 +3098,10 @@ th.sortable.on { color: var(--acc); }
 .strategy-account-actions { display: flex; gap: 6px; align-items: center; }
 .strategy-account-import { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 10px; }
 .strategy-account-import > summary { cursor: pointer; color: var(--amber); }
+.strategy-safeguards-brief { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.strategy-safeguards-brief > summary { cursor: pointer; }
+.strategy-safeguards-brief .kv { margin: 6px 0 0; }
+.strategy-safeguards-actions { margin-top: 6px; }
 
 @media (max-width: 720px) {
   .pnl-calendar { gap: 2px; }

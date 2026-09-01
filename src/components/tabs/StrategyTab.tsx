@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAccount } from 'wagmi'
 import { formatUnits, type Address } from 'viem'
-import { originalStrategyDraft } from '../../../shared/strategy/schema'
+import { originalStrategyDraft, recommendedSafeguards } from '../../../shared/strategy/schema'
 import { simulateStrategy } from '../../../shared/strategy/simulator'
 import { makeRebalancePlan } from '../../../shared/strategy/planner'
 import { scaledRangePcts } from '../../../shared/strategy/adaptive-range'
@@ -334,7 +334,8 @@ export function StrategyTab() {
     const wallet = walletForOwner(strategy.owner)
     if (!wallet) return setExecutorError(t('strategy.accountMissingForOwner'))
     const stakingFlow = strategy.staking?.enabled ? '系统还会先解质押并把本次领取的 UP 卖为留存 WETH，重建后重新质押。' : ''
-    if (!window.confirm(`将启动 #${strategy.activeTokenId ?? ''} 的真实自动策略。价格离开 −${strategy.range.lowerPct}% / +${strategy.range.upperPct}% 后，系统会撤出、兑换并重建仓位。${stakingFlow}继续？`)) return
+    const guardFlow = strategy.safeguards.enabled ? t('strategy.safeguardsOnNote') : t('strategy.safeguardsOffNote')
+    if (!window.confirm(`将启动 #${strategy.activeTokenId ?? ''} 的真实自动策略。价格离开 −${strategy.range.lowerPct}% / +${strategy.range.upperPct}% 后，系统会撤出、兑换并重建仓位。${stakingFlow}${guardFlow}继续？`)) return
     setExecutorBusy(true)
     setExecutorError(null)
     try {
@@ -433,18 +434,33 @@ export function StrategyTab() {
       quoteToken: token0IsWrapped ? p.pool.token0 : p.pool.token1,
       staking: p.staked ? { enabled: true, gauge: p.pool.gauge ?? undefined } : { enabled: false },
     })
-    const config = { ...draft, name: displayStrategyName(draft) }
+    const config = { ...draft, name: displayStrategyName(draft), safeguards: recommendedSafeguards(draft.range.lowerPct) }
     setItems(upsertStrategy(config))
   }
   const setSimpleBand = (strategy: StrategyConfig, pct: number) => {
     const now = Math.floor(Date.now() / 1000)
+    // A band change rescales the recommended limits with it, but a draft whose
+    // safeguards were hand-edited in the full editor keeps those edits.
+    const customized = strategy.safeguards.enabled
+      && JSON.stringify(strategy.safeguards) !== JSON.stringify(recommendedSafeguards(strategy.range.lowerPct))
     const next: StrategyConfig = {
       ...strategy,
       range: { mode: 'symmetric', lowerPct: pct, upperPct: pct },
+      safeguards: customized ? strategy.safeguards : recommendedSafeguards(pct),
       revision: strategy.revision + 1,
       updatedAt: now,
     }
     next.name = displayStrategyName(next)
+    setItems(upsertStrategy(next))
+  }
+  const applyRecommendedSafeguards = (strategy: StrategyConfig) => {
+    const now = Math.floor(Date.now() / 1000)
+    const next: StrategyConfig = {
+      ...strategy,
+      safeguards: recommendedSafeguards(Math.min(strategy.range.lowerPct, strategy.range.upperPct)),
+      revision: strategy.revision + 1,
+      updatedAt: now,
+    }
     setItems(upsertStrategy(next))
   }
   const setLowTransactionMode = async (strategy: StrategyConfig, enabled: boolean) => {
@@ -1061,6 +1077,34 @@ export function StrategyTab() {
                 </label>
               )}
             </div>
+            {!remote && (
+              <details className="strategy-safeguards-brief" open={!strategy.safeguards.enabled}>
+                <summary>
+                  {t('strategy.safeguardsBriefTitle')}
+                  {!strategy.safeguards.enabled && <span className="amber"> · {t('strategy.safeguardsOffTag')}</span>}
+                </summary>
+                {strategy.safeguards.enabled ? (
+                  <div className="kv mono-sm">
+                    <span>{t('strategy.sbCrossing', { minutes: strategy.safeguards.minCrossingMinutes ?? '—' })}</span>
+                    <span>{t('strategy.sbDailyCap', { n: strategy.safeguards.maxRebalancesPerDay ?? '—' })}</span>
+                    <span>{t('strategy.sbLowerBreaks', { n: strategy.safeguards.maxConsecutiveLowerBreaks ?? '—' })}</span>
+                    <span>{t('strategy.sbBurst', { count: strategy.safeguards.burstTriggerCount ?? '—', window: strategy.safeguards.burstWindowMinutes ?? '—', cooldown: strategy.safeguards.burstCooldownMinutes ?? '—' })}</span>
+                    <span>{t('strategy.sbVolatility', { bps: strategy.safeguards.maxVolatilityBps ?? '—', window: strategy.safeguards.volatilityWindowSeconds ?? '—' })}</span>
+                    <span>{t('strategy.sbDeviation', { bps: strategy.safeguards.maxSpotTwapDeviationBps ?? '—' })}</span>
+                    <span>{t('strategy.sbStable', { seconds: strategy.safeguards.stableMarketSeconds ?? '—' })}</span>
+                    <span>{t('strategy.sbRiskAsset', { pct: strategy.safeguards.maxRiskAssetPct ?? '—' })}</span>
+                    <span>{t('strategy.sbSwapImpact', { bps: strategy.safeguards.maxSwapImpactBps ?? '—' })}</span>
+                  </div>
+                ) : (
+                  <div className="amber mono-sm">
+                    {t('strategy.safeguardsOffNote')}
+                    <div className="strategy-safeguards-actions">
+                      <Btn onClick={() => applyRecommendedSafeguards(strategy)}>{t('strategy.safeguardsApply')}</Btn>
+                    </div>
+                  </div>
+                )}
+              </details>
+            )}
             <div className={status.tone === 'green' ? 'green mono-sm' : 'dim mono-sm'}>{status.detail}</div>
             {startPrice !== null && performance?.quote && performance.risk && (
               <div className="strategy-price-comparison mono-sm">

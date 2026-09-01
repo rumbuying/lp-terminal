@@ -3,6 +3,8 @@ dist
 .env
 .env.*
 !.env.example
+# SSH private key for the production host — must never be committed or shipped.
+LP.pem
 *.local
 .DS_Store
 indexer/data

@@ -88,6 +88,50 @@ export function originalStrategyDraft(args: {
   }
 }
 
+/**
+ * Band-scaled recommended safety limits for the quick ORIGINAL flow.
+ *
+ * Derived from the 2026-09 Robinhood Chain post-mortem: narrow bands with a
+ * zero-confirmation spot trigger churned 20-44 recenters in 48h while gas
+ * doubled, and gas alone ate 17-24% of net fees. These defaults close that
+ * failure mode: the crossing floor filters wicks, the volatility/burst guards
+ * pause churn instead of chasing it, the daily cap bounds gas spend, and the
+ * risk-asset share keeps a hard meme ceiling above the ~50/50 recenter target.
+ *
+ * `minNetAprPct` is deliberately omitted: the monitor does not compute a net
+ * APR yet, so the value would be inert (and a `fee_break_even` boundary would
+ * pause with APR_UNAVAILABLE instead of gating).
+ */
+export function recommendedSafeguards(bandPct: number): StrategyConfig['safeguards'] {
+  const band = Math.min(Math.max(Number.isFinite(bandPct) ? bandPct : 5, 0.001), 99)
+  const bandBps = Math.round(band * 100)
+  return {
+    enabled: true,
+    // A boundary crossing must persist before any recenter is planned.
+    minCrossingMinutes: 5,
+    // Hard daily recenter ceiling; narrower bands get the stricter cap.
+    maxRebalancesPerDay: Math.min(12, Math.max(4, Math.round(band * 1.6))),
+    // Stop catching a falling knife after repeated lower breaks.
+    maxConsecutiveLowerBreaks: 4,
+    // A symmetric recenter targets ~50/50; 60 keeps a hard risk-share ceiling.
+    maxRiskAssetPct: 60,
+    maxSwapImpactBps: 150,
+    // Market-quality guard: pause once the sampled window swings more than
+    // ~2x the band, or spot dislocates from the window average by ~0.6x.
+    volatilityWindowSeconds: 300,
+    maxVolatilityBps: Math.min(10_000, Math.max(1, Math.round(bandBps * 2))),
+    maxSpotTwapDeviationBps: Math.min(10_000, Math.max(100, Math.round(bandBps * 0.6))),
+    stableMarketSeconds: 600,
+    // Rapid-trigger circuit breaker: the third trigger inside an hour forces
+    // an hour-long cool-down instead of another gas-paying chase.
+    burstWindowMinutes: 60,
+    burstTriggerCount: 3,
+    burstCooldownMinutes: 60,
+    maxSlippageBps: 100,
+    maxPlanAgeSeconds: 30,
+  }
+}
+
 /** Runtime validation for local storage and executor API payloads. */
 export function parseStrategyConfig(v: unknown): StrategyConfig {
   if (!v || typeof v !== 'object') throw new StrategyError(STRATEGY_ERROR.CONFIG, 'strategy must be an object')

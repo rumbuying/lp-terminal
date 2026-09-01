@@ -1,5 +1,5 @@
 import { formatUnits } from 'viem'
-import { parseStrategyConfig } from '../shared/strategy/schema'
+import { parseStrategyConfig, recommendedSafeguards } from '../shared/strategy/schema'
 import type { StrategyConfig } from '../shared/strategy/types'
 import { preflightStrategy } from './preflight'
 import {
@@ -70,7 +70,14 @@ export async function startSimpleStrategy(input: unknown, walletId: string) {
     // Quick ORIGINAL compounds both LP fees and converted staking rewards on
     // the next ordinary recenter so the NFT principal does not steadily shrink.
     fees: { handling: 'reinvest', timing: 'on_rebalance' },
-    safeguards: { enabled: false, maxSlippageBps: 100, maxPlanAgeSeconds: 30 },
+    // Safety limits are a server-owned floor: a quick-start draft arriving
+    // without enabled safeguards gets the band-scaled recommendation, so a
+    // stale cached frontend can never relive the unguarded churn that rising
+    // gas turned into the main PnL leak. A draft carrying explicitly enabled
+    // limits (edited in the full editor) keeps them untouched.
+    safeguards: draft.safeguards.enabled
+      ? draft.safeguards
+      : recommendedSafeguards(Math.min(draft.range.lowerPct, draft.range.upperPct)),
     execution: {
       mode: 'executor_auto',
       executorId: 'local',
