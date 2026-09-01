@@ -45,6 +45,43 @@ test('adaptive log scan reports a provider that rejects one block', async () => 
   )
 })
 
+test('dense-window rejections phrased as invalid parameters halve like a range error', async () => {
+  const fetched: Array<[number, number]> = []
+  const committed: Array<[number, number]> = []
+  await scanAdaptiveLogWindows({
+    fromBlock: 10,
+    toBlock: 15,
+    maxWindowBlocks: 8,
+    fetchWindow: async (from, to) => {
+      fetched.push([from, to])
+      if (to - from + 1 > 2) throw new Error('Missing or invalid parameters.')
+      return ['ok']
+    },
+    commitWindow: ({ fromBlock, toBlock }) => {
+      committed.push([fromBlock, toBlock])
+    },
+    singleBlockError: 'one block rejected',
+  })
+  assert.deepEqual(committed, [[10, 11], [12, 13], [14, 15]])
+  assert.deepEqual(fetched.slice(0, 3), [[10, 15], [10, 13], [10, 11]])
+})
+
+test('a one-block rejection phrased as invalid parameters still fails closed', async () => {
+  await assert.rejects(
+    scanAdaptiveLogWindows({
+      fromBlock: 5,
+      toBlock: 5,
+      maxWindowBlocks: 1,
+      fetchWindow: async () => {
+        throw new Error('Invalid parameters were provided to the RPC method.')
+      },
+      commitWindow: () => assert.fail('a rejected window must not commit'),
+      singleBlockError: 'configure a logs-capable RPC',
+    }),
+    /configure a logs-capable RPC/,
+  )
+})
+
 test('concurrent log scan fetches in parallel but commits a contiguous ordered prefix', async () => {
   let active = 0
   let maxActive = 0

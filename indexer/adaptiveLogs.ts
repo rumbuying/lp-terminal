@@ -16,7 +16,13 @@ export type AdaptiveLogScanOptions<T> = {
   singleBlockError: string
 }
 
-const LOG_RANGE_ERROR = /limit|block range|range limit|too many|response size|query returned/i
+// A provider rejects a window whose estimated response is too large with a
+// range-flavoured error; the phrasing varies widely (measured on Robinhood:
+// "Missing or invalid parameters." and "Invalid parameters were provided to
+// the RPC method." for a dense Transfer window), so match the shared signal
+// rather than one vendor's wording.
+const LOG_RANGE_ERROR =
+  /limit|block range|range limit|too many|response size|query returned|invalid parameters|missing or invalid/i
 
 export function isLogRangeError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
