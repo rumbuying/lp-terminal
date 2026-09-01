@@ -72,6 +72,9 @@ export async function tailV4Positions(): Promise<number> {
     fromBlock: cursor + 1,
     toBlock: head,
     maxWindowBlocks: RPC_WINDOW_BLOCKS,
+    // The first replay is a full-history scan; parallel window fetches halve
+    // its wall time while the contiguous ordered commit keeps it exact.
+    concurrency: 3,
     fetchWindow: async (lo, hi) =>
       (await withRotatingRpcClient((client) =>
         client.request({
