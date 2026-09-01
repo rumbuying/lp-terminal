@@ -931,11 +931,16 @@ encrypted vaults, durable transaction journals and explicit operator recovery.
   wallet-level tracking works meanwhile.
 - Creating a NEW univ3 pool (`createAndInitializePoolIfNecessary`) is not
   wired up — mint into existing pools only.
-- Uniswap v4 is live on Robinhood Chain but not wired there (`uniV4: null` in
-  its chain config; the indexer's catalog model extends to v4's `Initialize`
-  events if/when wanted). The BSC build swaps, reads and writes v4.
-- BSC V3 and V4 bootstrap snapshots, V4 raw-stat refreshes and wallet-position
-  discovery use The Graph. An outage blocks a fresh V3/V4 bootstrap and hides
-  previously unseen wallet NFTs, but completed V3/V4 catalogs keep tailing over
-  RPC and the full local V4 directory remains browseable. Selected or already
-  loaded V4 positions still use on-chain reads/writes.
+- Uniswap v4 is wired on both chains. On Robinhood Chain the POOLS directory is
+  the indexer's own scoped RPC scan of `Initialize` logs (no subgraph exists),
+  and wallet-position discovery is the same indexer's replay of the
+  PositionManager's `Transfer` logs — the one question v4's non-enumerating
+  PositionManager cannot answer on-chain. The BSC build uses The Graph for both
+  the pool snapshot and position ownership.
+- BSC V3/V4 bootstrap snapshots, V4 raw-stat refreshes and BSC wallet-position
+  discovery use The Graph. An outage blocks a fresh BSC V3/V4 bootstrap and hides
+  previously unseen BSC wallet NFTs, but completed V3/V4 catalogs keep tailing
+  over RPC and the full local V4 directory remains browseable. Robinhood's V4
+  directory and position index are RPC-sourced and tail themselves, so they
+  depend on a logs-capable indexer RPC rather than The Graph. Selected or
+  already loaded V4 positions still use on-chain reads/writes.

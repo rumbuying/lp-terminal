@@ -95,11 +95,16 @@ export const robinhoodConfig: ChainConfig = {
     // nextTokenId() is 474,835, while totalSupply() and tokenOfOwnerByIndex()
     // both REVERT — the same shape as BSC, so enumeration needs an index.
     POSITION_MANAGER: '0x58daec3116aae6D93017bAAea7749052E8a04fA7' as Address,
-    // No v4 subgraph is published for this chain. Position ownership is
-    // therefore unanswerable and FEATURES.v4Positions gates that half off; the
-    // POOLS catalog falls back to the indexer's own directory. Swapping and
-    // pool discovery depend on neither index — they probe the rungs below.
+    // No v4 subgraph is published for this chain, so position OWNERSHIP comes
+    // from the indexer's own RPC replay of the PositionManager's Transfer logs
+    // (positionRpcIndex) instead of a pinned deployment. The POOLS catalog
+    // likewise falls back to the indexer's directory. Swapping and pool
+    // discovery depend on neither index — they probe the rungs below.
     positionSubgraph: null,
+    // The Transfer replay starts at the v4 pool-genesis floor. The first pool
+    // was initialised at 9,505 and no position can precede a pool, so scanning
+    // from 9,070 covers the empty prefix at negligible cost and misses nothing.
+    positionRpcIndex: { genesisBlock: 9_070 },
     poolSubgraph: null,
     // Scoped to `launchpad.tokenFactory` below — Uniswap's shared UERC20
     // factory, which every launchpad frontend on this chain mints through,

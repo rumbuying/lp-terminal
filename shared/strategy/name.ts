@@ -11,7 +11,15 @@ export function strategyRangeName(range: StrategyRange): string {
 }
 
 export function strategyProtocolName(protocol: StrategyConfig['protocol']): string {
-  return protocol === 'univ3' ? 'UNIV3' : protocol === 'pancakeswap-v3' ? 'PANCAKEV3' : 'UP33'
+  return (
+    protocol === 'univ3'
+      ? 'UNIV3'
+      : protocol === 'pancakeswap-v3'
+        ? 'PANCAKEV3'
+        : protocol === 'univ4'
+          ? 'UNIV4'
+          : 'UP33'
+  )
 }
 
 const shortAddress = (address: Address) => `${address.slice(0, 6)}…${address.slice(-4)}`

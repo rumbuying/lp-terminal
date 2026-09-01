@@ -14,7 +14,14 @@ import {
 import type { StrategyConfig, StrategyPositionSnapshot } from '../shared/strategy/types'
 
 export type ContractCall = { to: Address; data: Hex; value: bigint }
-const abiFor = (config: StrategyConfig) => (config.protocol === 'up33' ? clPmAbi : uniV3PmAbi)
+// The v3/up33 builders below must never build for a v4 strategy: v4 has no
+// `decreaseLiquidity`/`collect`/`burn`/`multicall` on its PositionManager, and
+// its liquidity writes go through `modifyLiquidities` (the v4* builders above).
+// Fail loud so a future caller cannot hand v4 a wrong-ABI transaction.
+function abiFor(config: StrategyConfig) {
+  if (config.protocol === 'univ4') throw new Error('E_V4_USE_V4_BUILDER')
+  return config.protocol === 'up33' ? clPmAbi : uniV3PmAbi
+}
 const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 20 * 60)
 
 function v4Key(snapshot: StrategyPositionSnapshot): V4PoolKey {
@@ -160,6 +167,17 @@ export function mintCall(args: {
   sqrtPriceX96?: bigint
 }): ContractCall {
   const { config, snapshot } = args
+  if (config.protocol === 'univ4') {
+    return v4MintCall({
+      config,
+      snapshot,
+      tickLower: args.tickLower,
+      tickUpper: args.tickUpper,
+      amount0Desired: args.amount0Desired,
+      amount1Desired: args.amount1Desired,
+      sqrtPriceX96: args.sqrtPriceX96 ?? BigInt(snapshot.sqrtPriceX96),
+    })
+  }
   const sqrtPriceX96 = args.sqrtPriceX96 ?? BigInt(snapshot.sqrtPriceX96)
   const sqrtA = getSqrtRatioAtTick(args.tickLower)
   const sqrtB = getSqrtRatioAtTick(args.tickUpper)

@@ -49,6 +49,7 @@ import {
 import { startApi } from './api';
 import { backfillV4, ensureV4TokenMeta, refreshV4FeaturedStats, tailV4 } from './v4Subgraph';
 import { backfillV4Rpc, tailV4Rpc } from './v4Rpc';
+import { backfillV4Positions, tailV4Positions } from './v4Positions';
 import { syncUp33Cl } from './up33';
 import { refreshRecommendationSamples } from './recommendation';
 
@@ -57,6 +58,8 @@ import { refreshRecommendationSamples } from './recommendation';
  * the scoped RPC scan that stands in where none is published.
  */
 const HAS_V4_DIRECTORY = !!(V4?.poolSubgraph || V4?.rpcDirectory);
+/** Whether this chain's v4 position OWNERSHIP is indexed by a Transfer replay. */
+const HAS_V4_POSITION_INDEX = !!V4?.positionRpcIndex;
 import { CoalescingScheduler } from './coalescingScheduler';
 
 let refreshQueue = Promise.resolve();
@@ -190,6 +193,13 @@ function recordV4TailError(error: string | null): void {
   });
 }
 
+function recordV4PositionsTailError(error: string | null): void {
+  tx(() => {
+    kvSet('v4_positions_tail_error', error ?? '');
+    kvSet('v4_positions_tail_error_at', error === null ? '' : String(now()));
+  });
+}
+
 function recordV23TailError(error: string | null): void {
   const at = String(now());
   tx(() => {
@@ -314,6 +324,22 @@ async function initialRefresh(): Promise<void> {
         .then((count) => log(`[stats] univ4 featured Graph refresh: ${count} pools`))
         .catch((error) => log('[stats] univ4 featured refresh failed:', safeError(error)));
   }
+  if (HAS_V4_POSITION_INDEX) {
+    // Ownership is a best-effort reader concern, not a catalog readiness gate:
+    // a failed replay must not block the pool catalog, and the periodic tail
+    // retries it. The endpoint answers empty until the first backfill lands.
+    try {
+      const [appliedPos, msPos] = await timed(backfillV4Positions);
+      recordV4PositionsTailError(null);
+      if (appliedPos > 0 || !kvGet('v4_positions_boot_logged')) {
+        log(`[catalog] univ4 position ownership done: ${appliedPos} transfers (${(msPos / 1000).toFixed(0)}s)`);
+        kvSet('v4_positions_boot_logged', '1');
+      }
+    } catch (error) {
+      recordV4PositionsTailError(safeError(error));
+      log('[catalog] univ4 position ownership failed (non-blocking):', safeError(error));
+    }
+  }
   const counts = poolCounts().map((c) => `${c.proto}=${c.n}`);
   if (HAS_V4_DIRECTORY) counts.push(`univ4=${v4PoolCount()}`);
   log('[catalog]', counts.join(' '));
@@ -404,6 +430,17 @@ function startLoops(): void {
         recordV4TailError(null);
       } catch (error) {
         recordV4TailError(safeError(error));
+        throw error;
+      }
+    });
+  if (HAS_V4_POSITION_INDEX)
+    loop('v4-positions', TUNE.v4TailMs, async () => {
+      try {
+        const applied = await tailV4Positions();
+        if (applied) log(`[tail] ${applied} v4 position ownership changes`);
+        recordV4PositionsTailError(null);
+      } catch (error) {
+        recordV4PositionsTailError(safeError(error));
         throw error;
       }
     });

@@ -60,10 +60,13 @@ export const FEATURES = {
   /**
    * Uniswap v4 LP positions. Needs BOTH halves: the PositionManager to read
    * from, and an index to enumerate against — v4's PositionManager implements
-   * no ERC-721 enumeration, so a chain with v4 deployed but no subgraph can
-   * read a position it is handed and can never find one.
+   * no ERC-721 enumeration, so a chain with v4 deployed but no index (pinned
+   * subgraph or the indexer's Transfer replay) can read a position it is
+   * handed and can never find one.
    */
-  v4Positions: CHAIN.uniV4 !== null && CHAIN.uniV4.positionSubgraph !== null,
+  v4Positions:
+    CHAIN.uniV4 !== null &&
+    (CHAIN.uniV4.positionSubgraph !== null || CHAIN.uniV4.positionRpcIndex !== null),
   /** the BRIDGE tab — hidden entirely where no route model exists */
   bridge: CHAIN.hasBridge,
   /**

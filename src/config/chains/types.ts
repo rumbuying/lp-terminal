@@ -219,6 +219,24 @@ export type ChainConfig = {
      */
     positionSubgraph: string | null
     /**
+     * Where position OWNERSHIP comes from when `positionSubgraph` is null: the
+     * indexer's own RPC replay of the PositionManager's ERC-721 Transfer logs,
+     * keyed by owner. On a chain that publishes no v4 position subgraph this is
+     * the only way to answer "which token ids does this wallet own" — the one
+     * question the PositionManager cannot (it implements no enumeration).
+     *
+     * Trusted with the same single question as the subgraph, and nothing else:
+     * ownership is re-read from the chain either way.
+     */
+    positionRpcIndex: {
+      /**
+       * The Transfer replay's genesis. Must be at or before the first v4 mint;
+       * starting slightly early is harmless and never misses a row, while
+       * starting late permanently hides every position minted before it.
+       */
+      genesisBlock: number
+    } | null
+    /**
      * Published The Graph subgraph id used by the POOLS catalog, or null when
      * this deployment has no browseable v4 index. Kept separate from the
      * pinned ownership deployment above: the catalog should follow compatible

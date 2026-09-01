@@ -120,14 +120,10 @@ export async function inspectRecovery(jobId: string, options?: { reconcile?: boo
   if (!job) throw new Error('E_RECOVERY_JOB')
   const { transactions, steps } = await reconcileRecoveryTransactions(jobId, options)
   const confirmedSteps = steps.filter((step) => step.state === 'confirmed').map((step) => Number(step.step_index))
-  const classified = classifyRecovery(transactions, confirmedSteps)
-  // v4 exit/mint receipts do not expose the v3 amount events used by the
-  // automated recovery ledger. A normal run is fully supported; after an
-  // interrupted confirmed mutation, fail closed for operator reconciliation
-  // instead of replaying a v3 recovery call against the v4 manager.
-  const disposition = job.config.protocol === 'univ4' && transactions.some((tx) => tx.state === 'confirmed')
-    ? 'manual_review'
-    : classified
+  // v4 recovery reconstructs exit/mint amounts from the Transfer receipt plus
+  // the persisted pre-action baseline, so every terminal action auto-replays
+  // through the same classification as v3.
+  const disposition = classifyRecovery(transactions, confirmedSteps)
   if ((job.plan as unknown as { kind?: string }).kind === 'profit_withdrawal') {
     const profitDisposition = transactions.some((tx) => tx.state === 'ambiguous')
       ? 'manual_review'

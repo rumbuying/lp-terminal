@@ -1,6 +1,9 @@
 import { zeroAddress, type Address, type Hex, type PublicClient } from 'viem'
 import { erc20Abi } from '../abi'
-import { CHAIN } from '../config/chains'
+import { CHAIN_ID } from '../config/addresses'
+import { ACTIVE_IS_BUILD, CHAIN } from '../config/chains'
+import { indexerApiPath } from '../config/chains/routes'
+import { ENV } from '../config/env'
 import { getAmountsForLiquidity, getSqrtRatioAtTick } from './clmath'
 import { clampWidth } from './format'
 import { mc, ok, type McRes } from './multicall'
@@ -36,7 +39,8 @@ import type { ClPool, ClPosition, TokenInfo } from '../types'
  */
 const V4 = CHAIN.uniV4
 
-export const HAS_V4_POSITIONS = V4 !== null && V4.positionSubgraph !== null
+export const HAS_V4_POSITIONS =
+  V4 !== null && (V4.positionSubgraph !== null || V4.positionRpcIndex !== null)
 
 /**
  * An upper bound on ids read per wallet, so one address cannot stall a refresh.
@@ -223,8 +227,51 @@ export async function verifyV4PositionMetadata(
  * Subgraph entity ids are LOWERCASE; a checksummed address here matches nothing
  * and reads exactly like a wallet holding no positions.
  */
+/** Token ids the pinned subgraph believes this wallet owns (the Graph path). */
+async function fetchSubgraphTokenIds(owner: string): Promise<bigint[]> {
+  const data = await graphQuery<{ positions: { tokenId: string }[] }>(
+    deploymentUrl(V4!.positionSubgraph!),
+    `query($owner: String!, $first: Int!) {
+      positions(
+        first: $first
+        where: { owner: $owner }
+        orderBy: createdAtTimestamp
+        orderDirection: desc
+      ) { tokenId }
+    }`,
+    { owner, first: MAX_IDS },
+  )
+  return data.positions.map((position) => BigInt(position.tokenId))
+}
+
+/**
+ * Token ids the indexer's Transfer replay believes this wallet owns (the RPC
+ * path, for a chain that publishes no position subgraph). Fail-closed on every
+ * axis: a wrong-chain response, a non-array payload and a network error all read
+ * as "no positions" for this refresh, never as someone else's.
+ */
+async function fetchRpcIndexTokenIds(owner: string): Promise<bigint[]> {
+  const path = indexerApiPath('v4/positions', CHAIN.key, ENV.chainGateway, ACTIVE_IS_BUILD)
+  if (!path) return []
+  const u = new URL(path, location.origin)
+  u.searchParams.set('owner', owner)
+  let body: unknown
+  try {
+    const response = await fetch(u.toString(), { cache: 'no-store' })
+    if (!response.ok) return []
+    body = await response.json()
+  } catch {
+    return []
+  }
+  const parsed = body as { chain?: { key?: unknown; id?: unknown }; positions?: unknown }
+  if (parsed?.chain?.key !== CHAIN.key || parsed?.chain?.id !== CHAIN_ID) return []
+  if (!Array.isArray(parsed.positions)) return []
+  return parsed.positions
+    .filter((id): id is string => typeof id === 'string' && /^\d+$/.test(id))
+    .map((id) => BigInt(id))
+}
+
 async function fetchTokenIds(user: Address): Promise<bigint[]> {
-  if (!V4?.positionSubgraph) return []
   const owner = user.toLowerCase()
   const key = walletKey(user)
   const hit = idCache.get(key)
@@ -233,19 +280,11 @@ async function fetchTokenIds(user: Address): Promise<bigint[]> {
 
   const p = (async () => {
     try {
-      const data = await graphQuery<{ positions: { tokenId: string }[] }>(
-        deploymentUrl(V4.positionSubgraph!),
-        `query($owner: String!, $first: Int!) {
-          positions(
-            first: $first
-            where: { owner: $owner }
-            orderBy: createdAtTimestamp
-            orderDirection: desc
-          ) { tokenId }
-        }`,
-        { owner, first: MAX_IDS },
-      )
-      const ids = data.positions.map((position) => BigInt(position.tokenId))
+      const ids = V4?.positionSubgraph
+        ? await fetchSubgraphTokenIds(owner)
+        : V4?.positionRpcIndex
+          ? await fetchRpcIndexTokenIds(owner)
+          : []
       idCache.set(key, ids)
       return ids
     } catch (error) {
@@ -268,7 +307,7 @@ export async function fetchV4Positions(
   user: Address,
 ): Promise<{ cl: ClPosition[]; tokens: Record<string, TokenInfo> }> {
   const none = { cl: [], tokens: {} }
-  if (!V4?.positionSubgraph) return none
+  if (!V4 || (!V4.positionSubgraph && !V4.positionRpcIndex)) return none
   const ids = await fetchTokenIds(user)
   if (ids.length === 0) return none
 

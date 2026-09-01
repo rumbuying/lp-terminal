@@ -146,6 +146,9 @@ export const bscConfig: ChainConfig = {
     // on-chain ownerOf on 200 of 200 sampled positions. Reached through the
     // same-origin /thegraph proxy so the gateway key stays server-side.
     positionSubgraph: 'QmbQBjZ1VUK42k1V6sn6PnP3BZ1vLZhUmzfDpyF9Eiwfgt',
+    // BSC's position ownership is served by the pinned subgraph above, not by
+    // an RPC replay of Transfer logs.
+    positionRpcIndex: null,
     // Published `uniswap-v4-bnb` id. As of 2026-08-02 it resolves to the
     // deployment above, is synced without indexing errors, and exposes the
     // complete Pool catalog. Discovery still verifies every PoolKey against

@@ -22,6 +22,7 @@ import {
   SOLVER_PROTO_BIT,
   SQLITE_BUSY_TIMEOUT_MS,
   v4PoolCount,
+  v4PositionIdsByOwner,
   v23CatalogClock,
 } from './store';
 import {
@@ -3272,6 +3273,32 @@ export function poolResponseCacheStats(): ReturnType<SerializedResponseCache['st
   return poolResponseCache.stats();
 }
 
+/**
+ * v4 positions for one wallet, from the RPC-sourced Transfer replay. Asked the
+ * same single question the subgraph answers — which token ids might this wallet
+ * own — and trusted with nothing: the reader re-reads ownership on-chain.
+ */
+export function getV4Positions(params: Params): {
+  schemaVersion: number
+  chainId: number
+  ready: boolean
+  chain: { key: string; id: number }
+  positions: string[]
+} {
+  const rawOwner = singleParam(params, 'owner');
+  if (rawOwner === null) throw new ApiInputError('v4 positions requires owner');
+  const owner = rawOwner.toLowerCase();
+  if (!HEX40.test(owner)) throw new ApiInputError('invalid v4 positions owner');
+  const indexReady = V4?.positionRpcIndex !== null && kvGet('v4_positions_backfilled') === '1';
+  return {
+    schemaVersion: 1,
+    chainId: CHAIN.id,
+    ready: kvGet('ready') === '1' && indexReady,
+    chain: { key: CHAIN.key, id: CHAIN.id },
+    positions: indexReady ? v4PositionIdsByOwner(owner) : [],
+  };
+}
+
 export function createApiServer(): Server {
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     const started = Date.now();
@@ -3304,7 +3331,11 @@ export function createApiServer(): Server {
       } else if (url.pathname === '/api/recommendation-candidates') {
         body = getRecommendationCandidates(url.searchParams);
         cache = 'public, max-age=30';
-      } else if (url.pathname === '/api/tokens') body = getTokens(url.searchParams);
+      } else if (url.pathname === '/api/v4/positions') {
+        body = getV4Positions(url.searchParams);
+        cache = NO_STORE;
+      }
+      else if (url.pathname === '/api/tokens') body = getTokens(url.searchParams);
       else if (url.pathname === '/api/prices') {
         body = getPrices(url.searchParams);
         cache = 'public, max-age=30';

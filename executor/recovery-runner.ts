@@ -2,11 +2,12 @@ import { formatUnits, parseUnits, zeroAddress, type Address, type TransactionRec
 import { attributeCollect, incomeTaxRetentionEntry } from '../shared/strategy/accounting'
 import type { LedgerEntry, StrategyPositionSnapshot } from '../shared/strategy/types'
 import { clPmAbi } from '../src/abi'
+import { v4PositionManagerAbi } from '../src/lib/uniV4'
 import { ADDR, NATIVE, UNI, requireGov } from '../src/config/addresses'
 import { strategyPerformance } from './performance'
 import { recordPerformanceDay } from './calendar'
 import { applySlippage } from '../src/lib/clmath'
-import { grantStrategyAllowance, revokeStrategyAllowance } from './allowance'
+import { grantStrategyAllowance, grantV4CurrencyAllowance, revokeStrategyAllowance, revokeV4CurrencyAllowance } from './allowance'
 import { publicClient, readPoolState, readStrategySnapshot, readTokenBalances } from './chain'
 import { EXECUTOR } from './config'
 import { gatedKyberTx, quoteKyber, routeAudit } from './kyber'
@@ -15,7 +16,7 @@ import { preflightStrategy } from './preflight'
 import { allocateSwapExecution, allocateSwapOutput, planCycleSwaps, type CycleFunds, type SwapIntent } from './rebalance'
 import { FEE_TAX_SELECTION_VERSION, planFeeTax, type FeeTaxPlan } from './fee-tax'
 import { inspectRecovery } from './recovery'
-import { receiptLiquidityFlows, receiptTokenDelta } from './receipts'
+import { receiptLiquidityFlows, receiptTokenDelta, receiptV4MintedTokenId, receiptV4TokenFlows } from './receipts'
 import { freshRange, quoteTurnover, riskAssetPct, swapImpactBps } from './risk'
 import { sendTracked } from './signer'
 import { burnCall, collectCall, decreaseCall, decreaseCollectCall, mintCall, v4CollectCall } from './steps'
@@ -234,7 +235,7 @@ async function normalizeWethQuoteBeforeRecovery(job: RunnableJob, disposition: s
   if (jobTransactions(job.id).some((row) => Number(row.step_index) >= 4 && row.state === 'confirmed')) throw new Error('E_RECOVERY_CONTEXT')
 
   const records = await confirmedReceipts(job.id)
-  const funds = contextFunds(job.id, records, job.plan.snapshot)
+  const funds = await contextFunds(job.id, records, job.plan.snapshot)
   const riskToken = tokens.find((token) => low(token) !== low(WRAPPED_NATIVE))!
   const now = Math.floor(Date.now() / 1000)
   const corrected = {
@@ -306,10 +307,67 @@ async function confirmedReceipts(jobId: string): Promise<{ stepIndex: number; tx
   return result
 }
 
-function contextFunds(jobId: string, receipts: { stepIndex: number; receipt: TransactionReceipt }[], snapshot: StrategyPositionSnapshot): CycleFunds {
+/**
+ * Reconstruct a v4 exit's collected amounts. ERC-20 sides are exact from the
+ * decrease receipt's own Transfers; the native side (at most one, and only ever
+ * currency0) is the wallet balance change from the persisted pre-decrease
+ * baseline, gas-adjusted — the same model the live runner already uses.
+ */
+async function v4ExitFunds(jobId: string, snapshot: StrategyPositionSnapshot, decreaseReceipt: TransactionReceipt): Promise<CycleFunds> {
+  const owner = snapshot.owner
+  const precheck = getJobContext<PrecheckContext>(jobId, 'precheck')
+  const baseline = precheck?.baseline ?? {}
+  const current = await readTokenBalances(owner, [snapshot.token0, snapshot.token1])
+  const flows = receiptV4TokenFlows(decreaseReceipt, owner, snapshot.token0, snapshot.token1)
+  const collected0 = flows.flow0 ?? receivedByWallet(BigInt(baseline[low(snapshot.token0)] ?? '0'), current[low(snapshot.token0)], decreaseReceipt, snapshot.token0)
+  const collected1 = flows.flow1 ?? receivedByWallet(BigInt(baseline[low(snapshot.token1)] ?? '0'), current[low(snapshot.token1)], decreaseReceipt, snapshot.token1)
+  return v4PrincipalFeeSplit(collected0, collected1, BigInt(snapshot.tokensOwed0), BigInt(snapshot.tokensOwed1))
+}
+
+/** v4 settles principal and fees in ONE delta; attribute only the fees proved
+ * immediately before signing, exactly as the live runner splits them. */
+export function v4PrincipalFeeSplit(collected0: bigint, collected1: bigint, owed0: bigint, owed1: bigint): CycleFunds {
+  if (collected0 < 0n || collected1 < 0n) throw new Error('E_UNSUPPORTED_TOKEN')
+  const principal0 = collected0 - (owed0 < collected0 ? owed0 : collected0)
+  const principal1 = collected1 - (owed1 < collected1 ? owed1 : collected1)
+  return { principal0, principal1, fee0: collected0 - principal0, fee1: collected1 - principal1 }
+}
+
+/** For v4 the decrease and collect are the SAME transaction, so the ledger facts
+ * both derive from the one reconstructed `funds`. */
+function v4CollectFacts(funds: CycleFunds): { decreased: { principal0: bigint; principal1: bigint }; collected: { collected0: bigint; collected1: bigint } } {
+  return {
+    decreased: { principal0: funds.principal0, principal1: funds.principal1 },
+    collected: { collected0: funds.principal0 + funds.fee0, collected1: funds.principal1 + funds.fee1 },
+  }
+}
+
+/** Reconstruct a v4 mint's token id and paid amounts. ERC-20 sides are exact
+ * (the manager pulls through Permit2 and the sweep refund nets back down); the
+ * native side is the transaction's own value, which may overstate by the swept
+ * refund and is then caught by the final wallet allocation assertion. */
+async function v4MintFacts(job: RunnableJob, mintReceipt: TransactionReceipt): Promise<{ mintedTokenId: bigint; minted0: bigint; minted1: bigint }> {
+  const snapshot = job.plan.snapshot
+  const tokenId = receiptV4MintedTokenId(mintReceipt, job.config.positionManager, job.config.owner)
+  if (!tokenId) throw new Error('E_MINT_TOKEN_ID')
+  const tx = await publicClient.getTransaction({ hash: mintReceipt.transactionHash })
+  const flows = receiptV4TokenFlows(mintReceipt, job.config.owner, snapshot.token0, snapshot.token1)
+  const minted0 = flows.flow0 === null ? tx.value : -flows.flow0
+  const minted1 = flows.flow1 === null ? tx.value : -flows.flow1
+  if (minted0 < 0n || minted1 < 0n) throw new Error('E_UNSUPPORTED_TOKEN')
+  return { mintedTokenId: tokenId, minted0, minted1 }
+}
+
+async function contextFunds(jobId: string, receipts: { stepIndex: number; receipt: TransactionReceipt }[], snapshot: StrategyPositionSnapshot): Promise<CycleFunds> {
   const stored = getJobContext<Record<keyof CycleFunds, string>>(jobId, 'funds')
   if (stored) return { principal0: BigInt(stored.principal0), principal1: BigInt(stored.principal1), fee0: BigInt(stored.fee0), fee1: BigInt(stored.fee1) }
   const decrease = receipts.find((row) => row.stepIndex === 1)?.receipt
+  if (snapshot.protocol === 'univ4') {
+    if (!decrease) throw new Error('E_RECOVERY_CONTEXT')
+    const funds = await v4ExitFunds(jobId, snapshot, decrease)
+    setJobContext(jobId, 'funds', Object.fromEntries(Object.entries(funds).map(([key, value]) => [key, value.toString()])))
+    return funds
+  }
   const collect = receipts.find((row) => row.stepIndex === 2)?.receipt ?? decrease
   if (!decrease || !collect) throw new Error('E_RECOVERY_CONTEXT')
   const decreased = receiptLiquidityFlows(decrease, snapshot.positionManager, BigInt(snapshot.tokenId))
@@ -423,7 +481,7 @@ export async function finishHoldQuote(job: RunnableJob, privateKey: `0x${string}
   const context = getJobContext<PrecheckContext>(job.id, 'precheck')
   if (!context) throw new Error('E_RECOVERY_CONTEXT')
   let records = await confirmedReceipts(job.id)
-  const funds = contextFunds(job.id, records, snapshot)
+  const funds = await contextFunds(job.id, records, snapshot)
   const tax = await ensureFeeTaxPlan(job, funds)
   const prior = Object.fromEntries(Object.entries(context.prior).map(([token, value]) => [low(token), BigInt(value)]))
   const riskIs0 = low(job.config.riskToken) === low(snapshot.token0)
@@ -536,11 +594,15 @@ export async function finishHoldQuote(job: RunnableJob, privateKey: `0x${string}
   if (riskAllocation !== 0n) throw new Error('E_ALLOCATION_MISMATCH')
 
   const decreaseReceipt = records.find((row) => row.stepIndex === 1)?.receipt
-  const collectReceipt = records.find((row) => row.stepIndex === 2)?.receipt ?? (job.config.execution.lowTransactionMode ? decreaseReceipt : undefined)
+  const collectReceipt = records.find((row) => row.stepIndex === 2)?.receipt ?? (job.config.protocol === 'univ4' || job.config.execution.lowTransactionMode ? decreaseReceipt : undefined)
   if (!decreaseReceipt || !collectReceipt) throw new Error('E_RECOVERY_CONTEXT')
   const now = Math.floor(Date.now() / 1000)
-  const decreased = receiptLiquidityFlows(decreaseReceipt, job.config.positionManager, BigInt(snapshot.tokenId))
-  const collected = receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId))
+  const { decreased, collected } = job.config.protocol === 'univ4'
+    ? v4CollectFacts(funds)
+    : {
+        decreased: receiptLiquidityFlows(decreaseReceipt, job.config.positionManager, BigInt(snapshot.tokenId)),
+        collected: receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId)),
+      }
   const ledger: LedgerEntry[] = attributeCollect({
     strategyId: job.config.id,
     cycleId: `cycle-${job.id}`,
@@ -622,8 +684,20 @@ export async function finishFeeCollection(job: RunnableJob, privateKey: `0x${str
     }
     records = await confirmedReceipts(job.id)
   }
-  if (job.config.protocol === 'univ4' && !v4Collected) throw new Error('E_V4_RECOVERY_MANUAL')
-  const collected = v4Collected ?? receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId))
+  let collected = v4Collected
+  if (!collected && job.config.protocol === 'univ4') {
+    // The collect was already confirmed before the interruption. The ERC-20
+    // sides are exact from its own receipt; the native side is the wallet
+    // balance change from the persisted pre-collect baseline.
+    const current = await readTokenBalances(job.config.owner, [snapshot.token0, snapshot.token1])
+    const flows = receiptV4TokenFlows(collectReceipt, job.config.owner, snapshot.token0, snapshot.token1)
+    collected = {
+      collected0: flows.flow0 ?? receivedByWallet(BigInt(context.baseline[low(snapshot.token0)] ?? '0'), current[low(snapshot.token0)], collectReceipt, snapshot.token0),
+      collected1: flows.flow1 ?? receivedByWallet(BigInt(context.baseline[low(snapshot.token1)] ?? '0'), current[low(snapshot.token1)], collectReceipt, snapshot.token1),
+    }
+    if (collected.collected0 < 0n || collected.collected1 < 0n) throw new Error('E_UNSUPPORTED_TOKEN')
+  }
+  if (!collected) collected = receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId))
   const collectedFunds: CycleFunds = { principal0: 0n, principal1: 0n, fee0: collected.collected0, fee1: collected.collected1 }
   const tax = await ensureFeeTaxPlan(job, collectedFunds)
   let swapPlan = getJobContext<SwapPlanContext>(job.id, 'swap_plan') ?? { swaps: [] }
@@ -795,12 +869,20 @@ async function commitFromChainFacts(job: RunnableJob, privateKey?: `0x${string}`
   if (!context) throw new Error('E_RECOVERY_CONTEXT')
   let records = await confirmedReceipts(job.id)
   const decreaseReceipt = records.find((row) => row.stepIndex === 1)?.receipt
-  const collectReceipt = records.find((row) => row.stepIndex === 2)?.receipt ?? (job.config.execution.lowTransactionMode ? decreaseReceipt : undefined)
+  const collectReceipt = records.find((row) => row.stepIndex === 2)?.receipt ?? (job.config.protocol === 'univ4' || job.config.execution.lowTransactionMode ? decreaseReceipt : undefined)
   const mintReceipt = records.find((row) => row.stepIndex === 8)?.receipt
   if (!decreaseReceipt || !collectReceipt || !mintReceipt) throw new Error('E_RECOVERY_CONTEXT')
-  const decreased = receiptLiquidityFlows(decreaseReceipt, job.config.positionManager, BigInt(snapshot.tokenId))
-  const collected = receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId))
-  const minted = receiptLiquidityFlows(mintReceipt, job.config.positionManager, 0n)
+  const isV4 = job.config.protocol === 'univ4'
+  const collectedFunds = await contextFunds(job.id, records, snapshot)
+  const { decreased, collected } = isV4
+    ? v4CollectFacts(collectedFunds)
+    : {
+        decreased: receiptLiquidityFlows(decreaseReceipt, job.config.positionManager, BigInt(snapshot.tokenId)),
+        collected: receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId)),
+      }
+  const minted = isV4
+    ? await v4MintFacts(job, mintReceipt)
+    : receiptLiquidityFlows(mintReceipt, job.config.positionManager, 0n)
   if (!minted.mintedTokenId) throw new Error('E_MINT_TOKEN_ID')
   if (job.config.staking?.enabled) {
     if (!privateKey) throw new Error('E_RECOVERY_CONTEXT')
@@ -808,14 +890,13 @@ async function commitFromChainFacts(job: RunnableJob, privateKey?: `0x${string}`
     records = await confirmedReceipts(job.id)
   }
   const receipts = records.map((row) => row.receipt)
-  const newOwner = await publicClient.readContract({ address: job.config.positionManager, abi: clPmAbi, functionName: 'ownerOf', args: [minted.mintedTokenId] })
+  const newOwner = await publicClient.readContract({ address: job.config.positionManager, abi: isV4 ? v4PositionManagerAbi : clPmAbi, functionName: 'ownerOf', args: [minted.mintedTokenId] })
   const expectedOwner = job.config.staking?.enabled ? job.config.staking.gauge! : job.config.owner
   if (low(newOwner) !== low(expectedOwner)) throw new Error('E_OWNER')
 
   const tracked = [...new Set([...context.trackedTokens.map(low), low(snapshot.token0), low(snapshot.token1), low(SETTLEMENT)])] as Address[]
   const finalBalances = await readTokenBalances(job.config.owner, tracked)
   const prior = priorComponents(context)
-  const collectedFunds = contextFunds(job.id, records, snapshot)
   const reward = stakingReward(job)
   const rewardAfterTax = stakingRewardAfterTax(job)
   const taxedCollectedFunds = applyStoredFeeTax(job.id, collectedFunds)
@@ -915,7 +996,7 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
   const context = getJobContext<PrecheckContext>(job.id, 'precheck')
   if (!context) throw new Error('E_RECOVERY_CONTEXT')
   let records = await confirmedReceipts(job.id)
-  const collectedFunds = contextFunds(job.id, records, snapshot)
+  const collectedFunds = await contextFunds(job.id, records, snapshot)
   const feeTax = await ensureFeeTaxPlan(job, collectedFunds)
   const prior = priorComponents(context)
   const deployableFunds = {
@@ -934,7 +1015,7 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
 
   let oldOwner: Address | undefined
   try {
-    oldOwner = await publicClient.readContract({ address: job.config.positionManager, abi: clPmAbi, functionName: 'ownerOf', args: [BigInt(snapshot.tokenId)] })
+    oldOwner = await publicClient.readContract({ address: job.config.positionManager, abi: job.config.protocol === 'univ4' ? v4PositionManagerAbi : clPmAbi, functionName: 'ownerOf', args: [BigInt(snapshot.tokenId)] })
   } catch {
     // A successfully burned ERC-721 no longer has an owner.
   }
@@ -942,7 +1023,10 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
     if (low(oldOwner) !== low(job.config.owner)) throw new Error('E_OWNER')
     const empty = await readStrategySnapshot(walletCustodyConfig(job))
     if (BigInt(empty.liquidity) !== 0n || BigInt(empty.tokensOwed0) !== 0n || BigInt(empty.tokensOwed1) !== 0n) throw new Error('E_POSITION_CHANGED')
-    if (job.config.execution.lowTransactionMode) {
+    if (job.config.protocol === 'univ4') {
+      // v4 has no burn: the emptied NFT is retained, exactly as the live runner.
+      markStep({ jobId: job.id, index: 3, state: 'confirmed', result: { skipped: true, retainedEmptyNft: true } })
+    } else if (job.config.execution.lowTransactionMode) {
       markStep({ jobId: job.id, index: 3, state: 'confirmed', result: { skipped: true, retainedEmptyNft: true, lowTransactionMode: true } })
     } else try {
       const burnReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 3, txIndex: nextTransactionIndex(job.id, 3), privateKey, tx: burnCall(job.config, snapshot.tokenId) })
@@ -1107,8 +1191,13 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
     activeValueQuote: capital.activeValueQuote.toString(), capitalCapQuote: capital.capitalCapQuote.toString(),
     excessValueQuote: capital.excessValueQuote.toString(), excessValueUsdg: capital.excessValueUsdg.toString(),
   })
-  await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 6, txIndexStart: nextTransactionIndex(job.id, 6), privateKey, token: snapshot.token0, spender: job.config.positionManager, amount: capital.deploy0 })
-  await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 7, txIndexStart: nextTransactionIndex(job.id, 7), privateKey, token: snapshot.token1, spender: job.config.positionManager, amount: capital.deploy1 })
+  if (job.config.protocol === 'univ4') {
+    await grantV4CurrencyAllowance({ config: job.config, jobId: job.id, stepIndex: 6, txIndexStart: nextTransactionIndex(job.id, 6), privateKey, token: snapshot.token0, amount: capital.deploy0 })
+    await grantV4CurrencyAllowance({ config: job.config, jobId: job.id, stepIndex: 7, txIndexStart: nextTransactionIndex(job.id, 7), privateKey, token: snapshot.token1, amount: capital.deploy1 })
+  } else {
+    await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 6, txIndexStart: nextTransactionIndex(job.id, 6), privateKey, token: snapshot.token0, spender: job.config.positionManager, amount: capital.deploy0 })
+    await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 7, txIndexStart: nextTransactionIndex(job.id, 7), privateKey, token: snapshot.token1, spender: job.config.positionManager, amount: capital.deploy1 })
+  }
   const mintRange = freshRange(job.config, snapshot, mintPool.tick, job.plan.triggerSide, job.plan.rangeScale ?? 1)
   const mintReceipt = await sendTracked({
     config: job.config,
@@ -1118,12 +1207,19 @@ async function finishFromWallet(job: RunnableJob, privateKey: `0x${string}`) {
     privateKey,
     tx: mintCall({ config: job.config, snapshot, tickLower: mintRange.tickLower, tickUpper: mintRange.tickUpper, amount0Desired: capital.deploy0, amount1Desired: capital.deploy1, feePpm: mintPool.feePpm, sqrtPriceX96: mintPool.sqrtPriceX96 }),
   })
-  const minted = receiptLiquidityFlows(mintReceipt, job.config.positionManager, 0n)
-  if (!minted.mintedTokenId) throw new Error('E_MINT_TOKEN_ID')
-  const owner = await publicClient.readContract({ address: job.config.positionManager, abi: clPmAbi, functionName: 'ownerOf', args: [minted.mintedTokenId] })
+  const mintedTokenId = job.config.protocol === 'univ4'
+    ? receiptV4MintedTokenId(mintReceipt, job.config.positionManager, job.config.owner)
+    : receiptLiquidityFlows(mintReceipt, job.config.positionManager, 0n).mintedTokenId
+  if (!mintedTokenId) throw new Error('E_MINT_TOKEN_ID')
+  const owner = await publicClient.readContract({ address: job.config.positionManager, abi: job.config.protocol === 'univ4' ? v4PositionManagerAbi : clPmAbi, functionName: 'ownerOf', args: [mintedTokenId] })
   if (low(owner) !== low(job.config.owner)) throw new Error('E_OWNER')
-  await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 9, txIndexStart: nextTransactionIndex(job.id, 9), privateKey, token: snapshot.token0, spender: job.config.positionManager })
-  await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 10, txIndexStart: nextTransactionIndex(job.id, 10), privateKey, token: snapshot.token1, spender: job.config.positionManager })
+  if (job.config.protocol === 'univ4') {
+    await revokeV4CurrencyAllowance({ config: job.config, jobId: job.id, stepIndex: 9, txIndexStart: nextTransactionIndex(job.id, 9), privateKey, token: snapshot.token0 })
+    await revokeV4CurrencyAllowance({ config: job.config, jobId: job.id, stepIndex: 10, txIndexStart: nextTransactionIndex(job.id, 10), privateKey, token: snapshot.token1 })
+  } else {
+    await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 9, txIndexStart: nextTransactionIndex(job.id, 9), privateKey, token: snapshot.token0, spender: job.config.positionManager })
+    await revokeStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 10, txIndexStart: nextTransactionIndex(job.id, 10), privateKey, token: snapshot.token1, spender: job.config.positionManager })
+  }
   await commitFromChainFacts(job, privateKey)
 }
 
@@ -1151,10 +1247,13 @@ async function executeRecoveryLocked(jobId: string) {
       if (job.config.staking?.enabled) await ensureUnstakedAndRewardConverted(job, unlocked.privateKey)
       const position = await readStrategySnapshot(walletCustodyConfig(job))
       if (BigInt(position.liquidity) !== 0n) throw new Error('E_POSITION_CHANGED')
-      if (job.config.execution.lowTransactionMode) markStep({ jobId, index: 2, state: 'confirmed', result: { bundledWithStep: 1, recovered: true } })
+      if (job.config.protocol === 'univ4') {
+        // v4 bundles the collect into the decrease; there is nothing to resend.
+        markStep({ jobId, index: 2, state: 'confirmed', result: { bundledWithStep: 1, recovered: true } })
+      } else if (job.config.execution.lowTransactionMode) markStep({ jobId, index: 2, state: 'confirmed', result: { bundledWithStep: 1, recovered: true } })
       else await sendTracked({ config: job.config, jobId, stepIndex: 2, txIndex: nextTransactionIndex(jobId, 2), privateKey: unlocked.privateKey, tx: collectCall(job.config, job.plan.snapshot.tokenId) })
       const records = await confirmedReceipts(jobId)
-      contextFunds(jobId, records, job.plan.snapshot)
+      await contextFunds(jobId, records, job.plan.snapshot)
       await finish(job, unlocked.privateKey)
     } else if (inspection.disposition === 'resume_staking_exit') {
       if (!job.config.staking?.enabled || job.plan.action === 'collect_fees') throw new Error('E_RECOVERY_CONTEXT')
@@ -1166,14 +1265,19 @@ async function executeRecoveryLocked(jobId: string) {
       if (job.config.execution.lowTransactionMode) markStep({ jobId, index: 2, state: 'confirmed', result: { bundledWithStep: 1, recovered: true } })
       else await sendTracked({ config: job.config, jobId, stepIndex: 2, txIndex: nextTransactionIndex(jobId, 2), privateKey: unlocked.privateKey, tx: collectCall(job.config, job.plan.snapshot.tokenId) })
       const records = await confirmedReceipts(jobId)
-      contextFunds(jobId, records, job.plan.snapshot)
+      await contextFunds(jobId, records, job.plan.snapshot)
       await finish(job, unlocked.privateKey)
     } else if (inspection.disposition === 'resume_from_wallet') {
       if (job.config.staking?.enabled) await ensureUnstakedAndRewardConverted(job, unlocked.privateKey)
       await finish(job, unlocked.privateKey)
     } else if (inspection.disposition === 'resume_revoke') {
-      await revokeStrategyAllowance({ config: job.config, jobId, stepIndex: 9, txIndexStart: nextTransactionIndex(jobId, 9), privateKey: unlocked.privateKey, token: job.plan.snapshot.token0, spender: job.config.positionManager })
-      await revokeStrategyAllowance({ config: job.config, jobId, stepIndex: 10, txIndexStart: nextTransactionIndex(jobId, 10), privateKey: unlocked.privateKey, token: job.plan.snapshot.token1, spender: job.config.positionManager })
+      if (job.config.protocol === 'univ4') {
+        await revokeV4CurrencyAllowance({ config: job.config, jobId, stepIndex: 9, txIndexStart: nextTransactionIndex(jobId, 9), privateKey: unlocked.privateKey, token: job.plan.snapshot.token0 })
+        await revokeV4CurrencyAllowance({ config: job.config, jobId, stepIndex: 10, txIndexStart: nextTransactionIndex(jobId, 10), privateKey: unlocked.privateKey, token: job.plan.snapshot.token1 })
+      } else {
+        await revokeStrategyAllowance({ config: job.config, jobId, stepIndex: 9, txIndexStart: nextTransactionIndex(jobId, 9), privateKey: unlocked.privateKey, token: job.plan.snapshot.token0, spender: job.config.positionManager })
+        await revokeStrategyAllowance({ config: job.config, jobId, stepIndex: 10, txIndexStart: nextTransactionIndex(jobId, 10), privateKey: unlocked.privateKey, token: job.plan.snapshot.token1, spender: job.config.positionManager })
+      }
       await commitFromChainFacts(job, unlocked.privateKey)
     } else {
       await commitFromChainFacts(job, unlocked.privateKey)
@@ -1251,7 +1355,7 @@ export async function stopAndArchiveStrategy(strategyId: string) {
       const context = getJobContext<PrecheckContext>(job.id, 'precheck')
       if (!context) throw new Error('E_RECOVERY_CONTEXT')
       const records = await confirmedReceipts(job.id)
-      const funds = contextFunds(job.id, records, job.plan.snapshot)
+      const funds = await contextFunds(job.id, records, job.plan.snapshot)
       const state = applyExecutedSwaps({ job, funds: applyStoredFeeTax(job.id, funds), receipts: records })
       const prior = Object.fromEntries(Object.entries(context.prior).map(([token, amount]) => [low(token), BigInt(amount)]))
       allocations = {

@@ -3,7 +3,9 @@ import test from 'node:test'
 import { zeroAddress, type Address, type PublicClient } from 'viem'
 import { HAS_UNI_V4, decodeV4PositionInfo, v4FeesOwed, v4PoolId, v4PoolIdMatches, v4PositionKey } from './uniV4'
 import type { V4PoolKey } from './uniV4'
+import { CHAIN } from '../config/chains'
 import {
+  fetchV4Positions,
   finalizeV4PositionMetadata,
   mergeTokenInfoWithVerifiedV4,
   resetV4PositionMetadataCache,
@@ -278,4 +280,84 @@ v4Test('fee growth that has wrapped past 2^256 still gives the real amount', () 
   const now = 0n // exactly one unit later, having wrapped
   const { fees0 } = v4FeesOwed(1000n, now, 0n, last, 0n)
   assert.equal(fees0, 1000n)
+})
+
+// The RPC-index discovery path exists only on a chain that publishes no v4
+// position subgraph (Robinhood). The reader must fail CLOSED: a wrong-chain or
+// malformed response reads as "no positions for this refresh", never as
+// someone else's, and a network error is the same empty answer.
+const rpcIndexTest = CHAIN.uniV4?.positionRpcIndex ? test : test.skip
+
+async function withLocation<T>(run: () => Promise<T>): Promise<T> {
+  const originalLocation = globalThis.location
+  Object.defineProperty(globalThis, 'location', {
+    configurable: true,
+    value: { origin: 'https://terminal.example' },
+  })
+  try {
+    return await run()
+  } finally {
+    if (originalLocation) Object.defineProperty(globalThis, 'location', { configurable: true, value: originalLocation })
+    else Reflect.deleteProperty(globalThis, 'location')
+  }
+}
+
+async function withFetch<T>(respond: (url: string) => Response, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch
+  globalThis.fetch = ((input: unknown) => Promise.resolve(respond(String(input)))) as typeof fetch
+  try {
+    return await run()
+  } finally {
+    if (original) globalThis.fetch = original
+    else Reflect.deleteProperty(globalThis, 'fetch')
+  }
+}
+
+const OWNER = '0x00000000000000000000000000000000000000a1' as Address
+const emptyRead = { cl: [], tokens: {} }
+
+rpcIndexTest('RPC-index discovery asks the same-origin endpoint for the owner', async () => {
+  let seen = ''
+  await withLocation(() =>
+    withFetch((url) => {
+      seen = url
+      return new Response(JSON.stringify({ chain: { key: CHAIN.key, id: CHAIN.id }, positions: [] }), { status: 200 })
+    }, async () => {
+      assert.deepEqual(await fetchV4Positions({} as PublicClient, OWNER), emptyRead)
+    }),
+  )
+  assert.ok(seen.includes('/v4/positions'), seen)
+  assert.ok(seen.includes(`owner=${OWNER.toLowerCase()}`), seen)
+})
+
+rpcIndexTest('RPC-index discovery fails closed on a wrong-chain response', async () => {
+  await withLocation(() =>
+    withFetch(
+      () => new Response(JSON.stringify({ chain: { key: 'bsc', id: 56 }, positions: ['1'] }), { status: 200 }),
+      async () => {
+        assert.deepEqual(await fetchV4Positions({} as PublicClient, OWNER), emptyRead)
+      },
+    ),
+  )
+})
+
+rpcIndexTest('RPC-index discovery fails closed on a non-array positions payload', async () => {
+  await withLocation(() =>
+    withFetch(
+      () => new Response(JSON.stringify({ chain: { key: CHAIN.key, id: CHAIN.id }, positions: 'nope' }), { status: 200 }),
+      async () => {
+        assert.deepEqual(await fetchV4Positions({} as PublicClient, OWNER), emptyRead)
+      },
+    ),
+  )
+})
+
+rpcIndexTest('RPC-index discovery fails closed on a network error', async () => {
+  await withLocation(() =>
+    withFetch(() => {
+      throw new Error('offline')
+    }, async () => {
+      assert.deepEqual(await fetchV4Positions({} as PublicClient, OWNER), emptyRead)
+    }),
+  )
 })

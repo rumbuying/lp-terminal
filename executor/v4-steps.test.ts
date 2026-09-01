@@ -4,7 +4,7 @@ import { decodeFunctionData, zeroAddress } from 'viem'
 import { v4Deployment } from '../src/config/networks'
 import { v4PoolId, v4PositionManagerAbi, type V4PoolKey } from '../src/lib/uniV4'
 import type { StrategyConfig, StrategyPositionSnapshot } from '../shared/strategy/types'
-import { v4DecreaseCall, v4MintCall } from './steps'
+import { decreaseCall, mintCall, v4DecreaseCall, v4MintCall } from './steps'
 
 const token = '0x0000000000000000000000000000000000000002' as const
 const owner = '0x0000000000000000000000000000000000000003' as const
@@ -38,6 +38,26 @@ test('v4 executor exits through modifyLiquidities rather than a v3 ABI', () => {
 test('v4 native mint carries only the declared native ceiling as msg.value', () => {
   const amount0 = 10n ** 15n
   const call = v4MintCall({
+    config,
+    snapshot,
+    tickLower: -120,
+    tickUpper: 120,
+    amount0Desired: amount0,
+    amount1Desired: 10n ** 15n,
+    sqrtPriceX96: 1n << 96n,
+  })
+  const decoded = decodeFunctionData({ abi: v4PositionManagerAbi, data: call.data })
+  assert.equal(call.value, amount0)
+  assert.equal(decoded.functionName, 'modifyLiquidities')
+})
+
+test('the v3 decrease builder refuses a v4 strategy instead of building a wrong ABI', () => {
+  assert.throws(() => decreaseCall(config, snapshot), /E_V4_USE_V4_BUILDER/)
+})
+
+test('the generic mint builder routes a v4 strategy to modifyLiquidities', () => {
+  const amount0 = 10n ** 15n
+  const call = mintCall({
     config,
     snapshot,
     tickLower: -120,

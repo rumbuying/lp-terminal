@@ -223,6 +223,20 @@ CREATE INDEX IF NOT EXISTS idx_v4_pools_pair
   ON v4_pools(currency0, currency1, pool_id);
 CREATE INDEX IF NOT EXISTS idx_v4_pools_created ON v4_pools(created_block);
 
+-- v4 position OWNERSHIP for a chain with no position subgraph. One row per
+-- currently-held tokenId, derived by replaying the PositionManager's ERC-721
+-- Transfer logs: mint (0x0 -> owner) inserts, burn (owner -> 0x0) deletes, and
+-- a transfer moves the row to the new owner. The reader asks only "which ids
+-- might this wallet own" and re-reads ownership from the chain, so a stale row
+-- can only waste a call, never show a position someone else holds.
+CREATE TABLE IF NOT EXISTS v4_position_owners (
+  token_id      INTEGER PRIMARY KEY,       -- the ERC-721 id
+  owner         TEXT NOT NULL,             -- lowercase address
+  updated_block INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v4_position_owner
+  ON v4_position_owners(owner, token_id);
+
 -- V4 Graph metadata is isolated from the chain-verified v2/v3 token table.
 -- It is display metadata only; transaction identity is independently proven
 -- from PoolKey + StateView in the browser before a row becomes executable.
@@ -1820,6 +1834,38 @@ export const isLaunchpadToken = (address: string): boolean =>
 
 export const launchpadTokenCount = (): number =>
   (db.prepare('SELECT COUNT(*) AS n FROM v4_launchpad_tokens').get() as { n: number }).n;
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+const applyV4TransferQ = db.prepare(`
+  INSERT INTO v4_position_owners(token_id, owner, updated_block) VALUES (?, ?, ?)
+  ON CONFLICT(token_id) DO UPDATE SET owner = excluded.owner, updated_block = excluded.updated_block`);
+const deleteV4TransferQ = db.prepare('DELETE FROM v4_position_owners WHERE token_id = ?');
+
+/**
+ * Apply one PositionManager Transfer. `to` is the recipient: the zero address
+ * means the tokenId was burned, so it leaves the owned set; anything else makes
+ * it (or keeps it) owned by `to`. `from` is irrelevant — only the recipient
+ * decides current ownership.
+ */
+export function applyV4Transfer(tokenId: number, to: string, block: number): void {
+  const owner = to.toLowerCase()
+  if (owner === ZERO_ADDRESS) void deleteV4TransferQ.run(tokenId)
+  else applyV4TransferQ.run(tokenId, owner, block)
+}
+
+const v4PositionIdsByOwnerQ = db.prepare(
+  'SELECT token_id FROM v4_position_owners WHERE owner = ? ORDER BY token_id ASC',
+);
+/** Token ids this wallet currently owns, as decimal strings (newest-last order). */
+export function v4PositionIdsByOwner(owner: string): string[] {
+  return (v4PositionIdsByOwnerQ.all(owner.toLowerCase()) as { token_id: number }[]).map((row) =>
+    String(row.token_id),
+  )
+}
+
+export const v4PositionOwnerCount = (): number =>
+  (db.prepare('SELECT COUNT(*) AS n FROM v4_position_owners').get() as { n: number }).n;
 
 const recordStockTokenQ = db.prepare(`
   INSERT INTO stock_tokens (address, issuer, updated) VALUES (?, ?, ?)

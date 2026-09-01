@@ -1,4 +1,4 @@
-import { parseEventLogs, type Address, type TransactionReceipt } from 'viem'
+import { parseEventLogs, zeroAddress, type Address, type TransactionReceipt } from 'viem'
 import { clPmAbi, erc20Abi } from '../src/abi'
 import { v4PositionManagerAbi } from '../src/lib/uniV4'
 
@@ -51,4 +51,33 @@ export function receiptTokenDelta(receipt: TransactionReceipt, token: Address, o
     if (log.args.to?.toLowerCase() === owner.toLowerCase()) delta += log.args.value ?? 0n
   }
   return delta
+}
+
+/**
+ * The per-currency net wallet flows of a v4 `modifyLiquidities` receipt, for the
+ * two sides of its pool.
+ *
+ * v4 emits no amount event: an exit's principal and fees settle in one opaque
+ * delta, and a mint is just the position manager pulling through Permit2. What
+ * the receipt CAN prove exactly is each ERC-20 side — the manager settles it
+ * through the token's own `Transfer`, so `receiptTokenDelta` nets the owner's
+ * real movement (positive = received, negative = paid), immune to any outside
+ * wallet activity in between.
+ *
+ * What it CANNOT prove is the native (`address(0)`) side: a native deposit rides
+ * in as `msg.value` (part of which `SWEEP` may refund), and a native payout is
+ * an unwrap that leaves no log. A `null` flow is therefore not "zero" — it is
+ * "unprovable from this receipt", and the caller must reconstruct it from the
+ * persisted pre-action balance (the runner's `receivedByWallet` model) or, for a
+ * pure mint, the transaction's own value.
+ */
+export function receiptV4TokenFlows(
+  receipt: TransactionReceipt,
+  owner: Address,
+  token0: Address,
+  token1: Address,
+): { flow0: bigint | null; flow1: bigint | null } {
+  const delta = (token: Address): bigint | null =>
+    token.toLowerCase() === zeroAddress ? null : receiptTokenDelta(receipt, token, owner)
+  return { flow0: delta(token0), flow1: delta(token1) }
 }
