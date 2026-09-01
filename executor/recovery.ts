@@ -4,6 +4,7 @@ import { confirmedTransactionsAtNonce, jobSteps, jobTransactions, reconcileJobTr
 import { publicClient } from './chain'
 import { receiptLiquidityFlows, receiptV4MintedTokenId } from './receipts'
 import { v4PositionManagerAbi } from '../src/lib/uniV4'
+import { classifyMissingTransactionNonce } from './recovery-nonce'
 
 export type RecoveryTxState = 'confirmed' | 'reverted' | 'pending' | 'absent' | 'ambiguous'
 export type RecoveryTxFact = {
@@ -91,8 +92,12 @@ async function transactionFact(row: Record<string, unknown>, owner: `0x${string}
           publicClient.getTransactionCount({ address: owner, blockTag: 'latest' }),
           publicClient.getTransactionCount({ address: owner, blockTag: 'pending' }),
         ])
-        if (latest <= nonce && pending <= nonce) return { ...base, state: 'absent' }
-        return { ...base, state: await hasConfirmedLocalReplacement(row, owner, nonce) ? 'absent' : 'ambiguous' }
+        const latestNonce = BigInt(latest)
+        const pendingNonce = BigInt(pending)
+        const replacement = latestNonce <= nonce && pendingNonce > nonce
+          ? await hasConfirmedLocalReplacement(row, owner, nonce)
+          : false
+        return { ...base, state: classifyMissingTransactionNonce({ nonce, latest: latestNonce, pending: pendingNonce, hasConfirmedLocalReplacement: replacement }) }
       }
     }
   }
@@ -102,13 +107,12 @@ async function transactionFact(row: Record<string, unknown>, owner: `0x${string}
     publicClient.getTransactionCount({ address: owner, blockTag: 'latest' }),
     publicClient.getTransactionCount({ address: owner, blockTag: 'pending' }),
   ])
-  if (latest <= nonce && pending <= nonce) return { ...base, state: 'absent' }
-
-  // A later local job can legitimately reuse a nonce after this transaction
-  // was rejected before mempool admission. Unknown/external nonce consumption
-  // remains manual-review only.
-  if (await hasConfirmedLocalReplacement(row, owner, nonce)) return { ...base, state: 'absent' }
-  return { ...base, state: 'ambiguous' }
+  const latestNonce = BigInt(latest)
+  const pendingNonce = BigInt(pending)
+  const replacement = latestNonce <= nonce && pendingNonce > nonce
+    ? await hasConfirmedLocalReplacement(row, owner, nonce)
+    : false
+  return { ...base, state: classifyMissingTransactionNonce({ nonce, latest: latestNonce, pending: pendingNonce, hasConfirmedLocalReplacement: replacement }) }
 }
 
 export async function inspectRecovery(jobId: string, options?: { reconcile?: boolean }) {
