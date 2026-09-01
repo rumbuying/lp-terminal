@@ -134,6 +134,11 @@ test('the bootstrap publishes the readiness the API gates on', async () => {
   assert.equal(kv.get('v4_position_cursor'), String(head))
 })
 
+test('the tail also marks the replay backfilled once it reaches the head', async () => {
+  await tailV4Positions()
+  assert.equal(kv.get('v4_positions_backfilled'), '1')
+})
+
 test('a second run resumes rather than rebuilding', async () => {
   await backfillV4Positions()
   head += 400

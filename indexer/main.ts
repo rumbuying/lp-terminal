@@ -49,7 +49,7 @@ import {
 import { startApi } from './api';
 import { backfillV4, ensureV4TokenMeta, refreshV4FeaturedStats, tailV4 } from './v4Subgraph';
 import { backfillV4Rpc, tailV4Rpc } from './v4Rpc';
-import { backfillV4Positions, tailV4Positions } from './v4Positions';
+import { tailV4Positions } from './v4Positions';
 import { syncUp33Cl } from './up33';
 import { refreshRecommendationSamples } from './recommendation';
 
@@ -325,20 +325,11 @@ async function initialRefresh(): Promise<void> {
         .catch((error) => log('[stats] univ4 featured refresh failed:', safeError(error)));
   }
   if (HAS_V4_POSITION_INDEX) {
-    // Ownership is a best-effort reader concern, not a catalog readiness gate:
-    // a failed replay must not block the pool catalog, and the periodic tail
-    // retries it. The endpoint answers empty until the first backfill lands.
-    try {
-      const [appliedPos, msPos] = await timed(backfillV4Positions);
-      recordV4PositionsTailError(null);
-      if (appliedPos > 0 || !kvGet('v4_positions_boot_logged')) {
-        log(`[catalog] univ4 position ownership done: ${appliedPos} transfers (${(msPos / 1000).toFixed(0)}s)`);
-        kvSet('v4_positions_boot_logged', '1');
-      }
-    } catch (error) {
-      recordV4PositionsTailError(safeError(error));
-      log('[catalog] univ4 position ownership failed (non-blocking):', safeError(error));
-    }
+    // Ownership is a best-effort reader concern, never a catalog readiness gate:
+    // the first full Transfer replay is a long scan, so it must not block boot.
+    // The periodic `v4-positions` tail owns the scan; the endpoint answers empty
+    // until the replay is caught up.
+    log('[catalog] univ4 position ownership index enabled; backfill runs on the v4-positions tail');
   }
   const counts = poolCounts().map((c) => `${c.proto}=${c.n}`);
   if (HAS_V4_DIRECTORY) counts.push(`univ4=${v4PoolCount()}`);

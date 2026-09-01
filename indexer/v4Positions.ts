@@ -106,6 +106,10 @@ export async function tailV4Positions(): Promise<number> {
     singleBlockError:
       'RPC rejects even a one-block v4 PositionManager eth_getLogs request; configure a logs-capable indexer RPC',
   })
+  // A completed scan to the finalized head means the replay is caught up. This
+  // flag is what the API's readiness gate reads, so the tail sets it too — not
+  // just the boot backfill.
+  kvSet('v4_positions_backfilled', '1')
   return applied
 }
 
