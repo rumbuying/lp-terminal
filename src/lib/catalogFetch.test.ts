@@ -20,6 +20,12 @@ test('catalog task preserves a transport failure before the deadline', async () 
 })
 
 test('catalog fetch aborts a transport that never returns', async (t) => {
+  // AbortSignal.timeout deliberately does not keep the event loop alive. In an
+  // otherwise quiet test run the loop can drain before the deadline fires,
+  // leaving these promises pending — the runner then cancels the file with
+  // ERR_TEST_FAILURE. Hold the loop until the assertions are done.
+  const keepAlive = setInterval(() => {}, 100)
+  t.after(() => clearInterval(keepAlive))
   t.mock.method(
     globalThis,
     'fetch',
@@ -40,6 +46,8 @@ test('catalog fetch aborts a transport that never returns', async (t) => {
 })
 
 test('catalog fetch consumes caller cancellation', async (t) => {
+  const keepAlive = setInterval(() => {}, 100)
+  t.after(() => clearInterval(keepAlive))
   t.mock.method(
     globalThis,
     'fetch',
