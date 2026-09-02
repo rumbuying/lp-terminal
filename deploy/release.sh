@@ -183,14 +183,16 @@ if [[ $target == indexer || $target == both ]]; then
 
   log "install dependencies (as $IDX_USER, production node)"
   r "sudo chown -R $IDX_USER:$IDX_USER $IDX_ROOT/releases/$ts"
-  r "IDX=$IDX_ROOT/releases/$ts NODE_BIN=$NODE_BIN IDX_USER=$IDX_USER bash -s" <<'REMOTE' | tail -2
+  # The releases parent is not traversable by the ssh user — run the script as
+  # root and drop to $IDX_USER only for npm itself (the manual-deploy lesson).
+  r "IDX=$IDX_ROOT/releases/$ts NODE_BIN=$NODE_BIN IDX_USER=$IDX_USER sudo -n bash -s" <<'REMOTE' | tail -2 || on_fail "indexer npm ci"
 set -euo pipefail
 cd "$IDX"
 sudo -u "$IDX_USER" env HOME=/opt/lp-terminal-indexer PATH="$NODE_BIN:/usr/bin:/bin" "$NODE_BIN/npm" ci --no-audit --no-fund
 REMOTE
 
   log "module smoke (throws away its temp db)"
-  r "REL=$IDX_ROOT/releases/$ts NODE_BIN=$NODE_BIN IDX_USER=$IDX_USER bash -s" <<'REMOTE'
+  r "REL=$IDX_ROOT/releases/$ts NODE_BIN=$NODE_BIN IDX_USER=$IDX_USER sudo -n bash -s" <<'REMOTE' || on_fail "indexer module smoke"
 set -euo pipefail
 printf 'await import("%s/indexer/api.ts")\nconsole.log("IMPORT_OK")\n' "$REL" > /tmp/rel-smoke.mjs
 cd "$REL"
