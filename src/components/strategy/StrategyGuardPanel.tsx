@@ -33,7 +33,7 @@ const conditionLabel = (c: GuardCondition, t: Translate) => {
   }
 }
 
-const conditionValue = (c: GuardCondition, remaining: number | undefined, t: Translate) => {
+const conditionValue = (c: GuardCondition, remaining: number | undefined, now: number, t: Translate) => {
   switch (c.id) {
     case 'sample_history':
       return t('strategy.guardValueSamples', { count: c.sampleCount ?? 0, threshold: c.threshold ?? 2 })
@@ -42,10 +42,13 @@ const conditionValue = (c: GuardCondition, remaining: number | undefined, t: Tra
       return c.measured === undefined
         ? t('strategy.guardValueUnevaluated')
         : t('strategy.guardValueBps', { measured: c.measured, threshold: c.threshold ?? '?' })
-    case 'guard_recovery_stability':
-      if (c.status === 'fail') return t('strategy.guardValueStillUnstable')
-      if (c.status === 'wait' && remaining !== undefined) return t('strategy.guardValueRemaining', { time: clock(remaining) })
+    case 'guard_recovery_stability': {
+      // wait + countdown = hold in progress; wait/fail without one = the
+      // market is still violating a metric, so the hold has not started.
+      if (c.status === 'wait' && c.waitUntil !== undefined) return t('strategy.guardValueRemaining', { time: clock(c.waitUntil - now) })
+      if (c.status !== 'pass') return t('strategy.guardValueStillUnstable')
       return t('strategy.guardValueStable')
+    }
     case 'burst_throttle': {
       const base = t('strategy.guardValueBurst', { measured: c.measured ?? 0, threshold: c.threshold ?? '?' })
       return c.status === 'wait' && remaining !== undefined && remaining > 0 ? `${base} · ${t('strategy.guardValueRemaining', { time: clock(remaining) })}` : base
@@ -110,7 +113,7 @@ export function StrategyGuardPanel({ report }: { report: GuardReport }) {
             <li key={c.id} className={`strategy-guard-row ${c.status}`} data-blocking={report.blocking.includes(c.id) || undefined}>
               <span className="strategy-guard-icon" aria-hidden>{c.status === 'pass' ? '✓' : c.status === 'fail' ? '✕' : '⏳'}</span>
               <span className="strategy-guard-label">{conditionLabel(c, t)}</span>
-              <span className="strategy-guard-value">{conditionValue(c, remaining, t)}</span>
+              <span className="strategy-guard-value">{conditionValue(c, remaining, now, t)}</span>
               {pct !== undefined && <span className="strategy-guard-bar"><i style={{ width: `${pct}%` }} /></span>}
             </li>
           )

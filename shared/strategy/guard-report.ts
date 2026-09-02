@@ -140,8 +140,10 @@ export function buildGuardReport(args: {
       const remaining = Math.max(0, stableSince + stableSeconds - args.now)
       const healthy = marketHealthy !== false && ready
       if (!healthy) {
-        blocking.add('guard_recovery_stability')
-        conditions.push({ id: 'guard_recovery_stability', status: 'fail', totalSeconds: stableSeconds, remainingSeconds: stableSeconds })
+        // A metric above already carries the fail for this market problem.
+        // Report the hold as pending, not as a second failure: the summary
+        // must count root causes, not echoes of the same cause.
+        conditions.push({ id: 'guard_recovery_stability', status: 'wait', totalSeconds: stableSeconds })
       } else if (remaining > 0) {
         blocking.add('guard_recovery_stability')
         conditions.push({ id: 'guard_recovery_stability', status: 'wait', waitUntil: stableSince + stableSeconds, remainingSeconds: remaining, totalSeconds: stableSeconds })

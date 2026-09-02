@@ -71,6 +71,20 @@ test('a recovering guard holds on the stability window with a live deadline', ()
   assert.ok(report.blocking.includes('guard_recovery_stability'))
 })
 
+test('a stability hold while the market still violates a metric is not a second failure', () => {
+  const report = buildGuardReport(args({
+    guardReason: 'market_volatility',
+    marketStats: { count: 10, firstTs: NOW - 300, lastTs: NOW - 30, tick: 0, minTick: -350, maxTick: 350 },
+  }))
+  const volatility = report.conditions.find((c) => c.id === 'market_volatility')
+  assert.equal(volatility?.status, 'fail')
+  const stability = report.conditions.find((c) => c.id === 'guard_recovery_stability')
+  assert.equal(stability?.status, 'wait')
+  assert.equal(stability?.waitUntil, undefined)
+  // exactly one root cause blocks; the hold echo must not inflate the count
+  assert.deepEqual(report.blocking, ['market_volatility'])
+})
+
 test('an active burst wait reports the countdown and window usage', () => {
   const report = buildGuardReport(args({
     burstWaitUntil: NOW + 120,
