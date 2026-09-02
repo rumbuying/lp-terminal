@@ -1,8 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { parseStrategyConfig } from '../shared/strategy/schema'
+import { buildGuardReport, type GuardReport } from '../shared/strategy/guard-report'
+import type { StrategyConfig } from '../shared/strategy/types'
 import { EXECUTOR } from './config'
-import { addWallet, audit, clearRecoverySchedule, compoundHeldAllocations, createPlannedJob, executorPaused, jobSteps, jobTransactions, jobsForRecovery, latestJobSummary, listArchivedStrategies, listStrategies, listWallets, reactivateRecoveryJob, scheduleRecoveryRetry, setExecutorPaused, setStrategyBaselineIfAbsent, setStrategyState, strategyById, updateWalletLabel, walletByAddress, walletById, upsertStrategy } from './store'
+import { addWallet, audit, clearRecoverySchedule, compoundHeldAllocations, completedCyclesSince, createPlannedJob, executorPaused, jobSteps, jobTransactions, jobsForRecovery, latestJobSummary, latestStrategyPause, listArchivedStrategies, listStrategies, listWallets, monitorState, reactivateRecoveryJob, sampledTickStats, scheduleRecoveryRetry, setExecutorPaused, setStrategyBaselineIfAbsent, setStrategyState, strategyById, updateWalletLabel, walletByAddress, walletById, upsertStrategy } from './store'
 import { importPrivateKey, privateKeyAddress, tokenMatches, unlockPrivateKey } from './vault'
 import { inspectRecovery } from './recovery'
 import { executeRecovery, stopAndArchiveStrategy } from './recovery-runner'
@@ -40,6 +42,49 @@ const accountLabel = (value: unknown): string => {
 const json = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, JSONH)
   res.end(JSON.stringify(body))
+}
+
+/**
+ * Read-only mirror of the monitor's guard evaluation, recomputed from stored
+ * samples at request time. Pure SQLite reads: no chain calls on the API path.
+ */
+const guardReportFor = (config: StrategyConfig, state: string): GuardReport => {
+  const now = Math.floor(Date.now() / 1000)
+  const ms = monitorState(config.id)
+  const windowSeconds = config.safeguards.enabled ? config.safeguards.volatilityWindowSeconds : undefined
+  const marketGuardActive = windowSeconds !== undefined
+    && (config.safeguards.maxVolatilityBps !== undefined || config.safeguards.maxSpotTwapDeviationBps !== undefined)
+  const marketStats = marketGuardActive && windowSeconds !== undefined
+    ? sampledTickStats(config.id, now - windowSeconds) ?? undefined
+    : undefined
+  const confirmationSeconds = Math.max(
+    config.trigger.confirmationSeconds,
+    config.safeguards.enabled ? (config.safeguards.minCrossingMinutes ?? 0) * 60 : 0,
+  )
+  const burstConfigured = config.safeguards.enabled
+    && config.safeguards.burstWindowMinutes !== undefined
+    && config.safeguards.burstTriggerCount !== undefined
+    && config.safeguards.burstCooldownMinutes !== undefined
+  const burstSince = burstConfigured
+    ? Math.max(now - (config.safeguards.burstWindowMinutes ?? 0) * 60, ms?.burstResetAt ?? 0)
+    : 0
+  return buildGuardReport({
+    state,
+    now,
+    safeguards: config.safeguards,
+    pollSeconds: config.trigger.pollSeconds,
+    confirmationSeconds,
+    guardReason: ms?.guardReason,
+    guardStableSince: ms?.guardStableSince,
+    burstWaitUntil: ms?.burstWaitUntil,
+    cooldownUntil: ms?.cooldownUntil,
+    outSide: ms?.outSide,
+    outSince: ms?.outSince,
+    spotTick: ms?.lastTick,
+    marketStats,
+    recentCompletedCycles: burstConfigured ? completedCyclesSince(config.id, burstSince) : undefined,
+    pause: state === 'paused_guard' || state === 'awaiting_manual' ? latestStrategyPause(config.id) : undefined,
+  })
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -246,7 +291,7 @@ export function startApi() {
           .filter((row) => ownedBy(auth, row.config.owner))
           .map((row) => row.config.id)
         json(res, 200, {
-          strategies: strategies.map((row) => ({ ...row, latestJob: latestJobSummary(row.config.id) })),
+          strategies: strategies.map((row) => ({ ...row, latestJob: latestJobSummary(row.config.id), guard: guardReportFor(row.config, row.state) })),
           archivedStrategyIds,
         })
         return

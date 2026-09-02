@@ -50,6 +50,7 @@ import {
 import { Badge, Btn, NumInput } from '../ui'
 import { StrategyEditor } from '../strategy/StrategyEditor'
 import { StrategyPnlCurve } from '../strategy/StrategyPnlCurve'
+import { StrategyGuardPanel, guardBlockingText } from '../strategy/StrategyGuardPanel'
 import { PnlUnitToggle } from '../PnlUnitToggle'
 import { mergePnlCurveSnapshots } from '../../lib/pnlCurve'
 import { dailyCycleTotals, weightedDailyReturnPct } from '../../lib/strategyOverview'
@@ -628,10 +629,23 @@ export function StrategyTab() {
       title: t('strategy.simpleRecoveryQuarantined'),
       detail: `${job?.recoveryLastError ? `${job.recoveryLastError} · ` : ''}${t('strategy.simpleRecoveryQuarantinedDetail')}`,
     }
-    if (remote.state === 'guard_wait' || remote.state === 'paused_guard') return {
+    if (remote.state === 'guard_wait' || remote.state === 'paused_guard') {
+      const guard = remote.guard
+      const detail = guard?.conditions.length
+        ? guard.needsManualResume
+          ? t('strategy.guardBlockingManual', { list: guardBlockingText(guard, t) })
+          : guard.blocking.length
+            ? t('strategy.guardBlocking', { list: guardBlockingText(guard, t) })
+            : t('strategy.simpleSafetyPausedDetail')
+        : t('strategy.simpleSafetyPausedDetail')
+      return { tone: 'amber' as const, title: t('strategy.simpleSafetyPaused'), detail }
+    }
+    if (remote.state === 'awaiting_manual') return {
       tone: 'amber' as const,
-      title: t('strategy.simpleSafetyPaused'),
-      detail: t('strategy.simpleSafetyPausedDetail'),
+      title: t('strategy.simpleAwaitManual'),
+      detail: remote.guard?.conditions.length
+        ? t('strategy.guardBlockingManual', { list: guardBlockingText(remote.guard, t) })
+        : t('strategy.simpleAwaitManualDetail'),
     }
     if (remote.config.execution.dryRun) return {
       tone: 'amber' as const,
@@ -1148,6 +1162,9 @@ export function StrategyTab() {
               </details>
             )}
             <div className={status.tone === 'green' ? 'green mono-sm' : 'dim mono-sm'}>{status.detail}</div>
+            {remote?.guard && ['guard_wait', 'paused_guard', 'awaiting_manual'].includes(remote.state) && (
+              <StrategyGuardPanel report={remote.guard} />
+            )}
             {startPrice !== null && performance?.quote && performance.risk && (
               <div className="strategy-price-comparison mono-sm">
                 <span className="strategy-price-pair">{performance.risk.symbol}/{performance.quote.symbol}</span>

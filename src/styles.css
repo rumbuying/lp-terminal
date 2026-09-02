@@ -3103,6 +3103,32 @@ th.sortable.on { color: var(--acc); }
 .strategy-safeguards-brief .kv { margin: 6px 0 0; }
 .strategy-safeguards-editor { margin-top: 8px; }
 .strategy-safeguards-actions { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.strategy-guard-panel { margin-top: 10px; border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: var(--r-md); background: var(--inset); padding: 10px 12px; display: grid; gap: 8px; }
+.strategy-guard-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.strategy-guard-head strong { font-size: .78rem; letter-spacing: .8px; text-transform: uppercase; }
+.strategy-guard-summary { display: inline-flex; gap: 8px; font-size: .82rem; }
+.strategy-guard-summary i { font-style: normal; }
+.strategy-guard-summary .pass { color: var(--green); }
+.strategy-guard-summary .fail { color: var(--red); }
+.strategy-guard-summary .wait { color: var(--amber); }
+.strategy-guard-note { color: var(--dim); font-size: .78rem; flex-basis: 100%; }
+.strategy-guard-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.strategy-guard-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 2px 8px; align-items: baseline; padding: 5px 8px; border-radius: 6px; }
+.strategy-guard-row.fail { background: rgba(255, 99, 99, .08); }
+.strategy-guard-row.wait[data-blocking] { background: rgba(255, 193, 7, .08); }
+.strategy-guard-row.pass { opacity: .82; }
+.strategy-guard-icon { text-align: center; }
+.strategy-guard-row.pass .strategy-guard-icon { color: var(--green); }
+.strategy-guard-row.fail .strategy-guard-icon { color: var(--red); }
+.strategy-guard-row.wait .strategy-guard-icon { color: var(--amber); }
+.strategy-guard-label { min-width: 0; overflow-wrap: anywhere; }
+.strategy-guard-row.fail .strategy-guard-label { color: var(--red); }
+.strategy-guard-row.wait[data-blocking] .strategy-guard-label { color: var(--amber); }
+.strategy-guard-value { color: var(--dim); font-size: .85em; white-space: nowrap; }
+.strategy-guard-bar { grid-column: 2 / -1; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.strategy-guard-bar i { display: block; height: 100%; background: var(--amber); transition: width .6s linear; }
+.strategy-guard-row.fail .strategy-guard-bar i { background: var(--red); }
+.strategy-guard-checked { color: var(--dim); border-top: 1px dashed var(--line); padding-top: 6px; }
 
 @media (max-width: 720px) {
   .pnl-calendar { gap: 2px; }

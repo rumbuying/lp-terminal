@@ -1062,6 +1062,19 @@ export function updateMonitorState(strategyId: string, state: MonitorState) {
   )
 }
 
+/** Latest `strategy_paused` audit event, used to explain a `paused_guard` state. */
+export function latestStrategyPause(strategyId: string): { code?: string; reason?: string; side?: string; at: number } | undefined {
+  const row = db.prepare(`SELECT ts,detail_json FROM audit_events WHERE action='strategy_paused' AND target_type='strategy' AND target_id=? ORDER BY id DESC LIMIT 1`)
+    .get(strategyId) as { ts: number; detail_json: string } | undefined
+  if (!row) return undefined
+  try {
+    const detail = JSON.parse(row.detail_json) as { code?: string; detail?: { reason?: string; side?: string } }
+    return { code: detail.code, reason: detail.detail?.reason, side: detail.detail?.side, at: row.ts }
+  } catch {
+    return { at: row.ts }
+  }
+}
+
 export function recordPriceSample(strategyId: string, timestamp: number, tick: number, blockNumber: string) {
   db.prepare('INSERT OR REPLACE INTO price_samples(strategy_id,ts,tick,block_number) VALUES(?,?,?,?)').run(strategyId, timestamp, tick, blockNumber)
   db.prepare('DELETE FROM price_samples WHERE strategy_id=? AND ts<?').run(strategyId, timestamp - 86_400)

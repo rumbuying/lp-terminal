@@ -22,7 +22,26 @@ export type LatestJobSummary = {
   recoveryNextAt?: number
   recoveryQuarantinedAt?: number
 }
-export type ExecutorStrategy = { config: StrategyConfig; state: string; updatedAt: number; latestJob?: LatestJobSummary }
+export type GuardCondition = {
+  id: string
+  status: 'pass' | 'fail' | 'wait'
+  measured?: number
+  threshold?: number
+  sampleCount?: number
+  waitUntil?: number
+  remainingSeconds?: number
+  totalSeconds?: number
+  side?: 'lower' | 'upper'
+  at?: number
+}
+export type GuardReport = {
+  waiting: boolean
+  needsManualResume: boolean
+  blocking: string[]
+  conditions: GuardCondition[]
+  checkedAt: number
+}
+export type ExecutorStrategy = { config: StrategyConfig; state: string; updatedAt: number; latestJob?: LatestJobSummary; guard?: GuardReport }
 export type RecoveryJob = {
   id: string; strategyId: string; state: string; createdAt: number; updatedAt: number
   recoveryAttempts: number; recoveryErrorStreak: number; recoveryLastError?: string; recoveryNextAt?: number; recoveryQuarantinedAt?: number
