@@ -75,6 +75,7 @@ export const en = {
     coverageTip: 'Fee APR ÷ (annualized σ²/8): the hedged-rebalancer benchmark. Below 1 a passive in-range LP loses to hedged flow before costs; the ratio is a property of the pool, not of your position',
     coverageValueTip: 'coverage ×{{value}} — concentrated positions scale fees and LVR together, so this holds at any range width',
     emitAprTip: 'Staked emission APR at the live post-cap gauge rate. Staking forgoes ALL fees to voters — fee APR and stake APR are alternatives',
+    stakeSub: 'stake {{apr}}',
     stakedShareTip: '{{share}} of pool liquidity is staked',
     trendTip: 'Recent-week volume vs lifetime average — farming-driven volume fades',
     legend: 'net fee APR (after UP33 levy) · LVR COV ≥ 1 green · ↗ volume accelerating, ↘ fading',

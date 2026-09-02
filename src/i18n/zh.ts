@@ -76,6 +76,7 @@ export const zh: typeof en = {
     coverageTip: '费收APR ÷ (年化σ²/8)：对冲再平衡基准。低于 1 意味着被动区间内做市在扣除成本前就跑不赢对冲资金流；该比值是池子本身的属性，与你的仓位宽窄无关',
     coverageValueTip: '覆盖倍数 ×{{value}} — 集中流动性的费收和 LVR 同比例放大，所以任何区间宽度下这个判据都成立',
     emitAprTip: '按实时 gauge 排放率（cap 后真值）计算的质押排放 APR。质押会把全部手续费让给投票者 — 费收 APR 和质押 APR 二选一',
+    stakeSub: '质押 {{apr}}',
     stakedShareTip: '池内 {{share}} 的流动性已质押',
     trendTip: '近 7 天成交相对生命周期均值 — 挖矿驱动的成交量会衰退',
     legend: '费收APR 为未质押净额（已扣 UP33 抽成）· LVR覆盖 ≥ 1 绿色 · ↗ 量能加速 ↘ 衰退',

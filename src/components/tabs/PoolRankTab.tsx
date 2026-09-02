@@ -1,10 +1,9 @@
 import { useTranslation } from 'react-i18next'
+import { fmtCompact, fmtUsd } from '../../lib/format'
 import { usePoolRank, type PoolRankRow } from '../../hooks/usePoolRank'
 import { Btn } from '../ui'
 
 const pct = (x: number, digits = 0) => `${(x * 100).toFixed(digits)}%`
-const usd = (x: number) =>
-  new Intl.NumberFormat(undefined, { notation: x >= 100_000 ? 'compact' : 'standard', maximumFractionDigits: x >= 100_000 ? 1 : 0 }).format(Math.round(x))
 const venueLabel = (venue: PoolRankRow['venue']): string => (venue === 'up33-cl' ? 'UP33 CL' : 'Uni v3')
 
 function TrendMark({ value }: { value: number }) {
@@ -13,11 +12,24 @@ function TrendMark({ value }: { value: number }) {
   return <span className="dim" title={`×${value.toFixed(2)}`}>→</span>
 }
 
+/** venue · tick spacing · fee — the identity line under the symbols on phones,
+ * inline after them on wider screens. */
+function VenueTag({ row }: { row: PoolRankRow }) {
+  const ts = row.tickSpacing !== null ? ` ts${row.tickSpacing}` : ''
+  return (
+    <>
+      <span className="dim mono-sm hide-m"> · {venueLabel(row.venue)}{ts}</span>
+      <span className="cell-sub show-m">{venueLabel(row.venue)}{ts} · {row.feeBps < 1 ? row.feeBps.toFixed(2) : row.feeBps}bp</span>
+    </>
+  )
+}
+
 export function PoolRankTab() {
   const { t } = useTranslation()
   const query = usePoolRank()
   const data = query.data
   const generated = data?.generatedAt ? new Date(data.generatedAt * 1000) : null
+  const hasEmissions = data?.rows.some((r) => r.emitApr !== null) ?? false
   return (
     <div className="panel">
       <div className="panel-head">
@@ -44,15 +56,15 @@ export function PoolRankTab() {
             <table className="tbl">
               <thead>
                 <tr>
-                  <th>#</th>
+                  <th className="hide-m">#</th>
                   <th>{t('poolRank.pair')}</th>
-                  <th className="num">{t('poolRank.fee')}</th>
+                  <th className="num hide-m">{t('poolRank.fee')}</th>
                   <th className="num">{t('poolRank.tvl')}</th>
-                  <th className="num hide-t">{t('poolRank.volDay')}</th>
+                  <th className="num hide-m">{t('poolRank.volDay')}</th>
                   <th className="num" title={t('poolRank.feeAprTip')}>{t('poolRank.feeApr')}</th>
                   <th className="num hide-m" title={t('poolRank.sigmaTip')}>{t('poolRank.sigma')}</th>
                   <th className="num" title={t('poolRank.coverageTip')}>{t('poolRank.coverage')}</th>
-                  {data.rows.some((r) => r.emitApr !== null) && (
+                  {hasEmissions && (
                     <th className="num hide-t" title={t('poolRank.emitAprTip')}>{t('poolRank.emitApr')}</th>
                   )}
                   <th className="hide-m" title={t('poolRank.trendTip')}>{t('poolRank.trend')}</th>
@@ -61,20 +73,33 @@ export function PoolRankTab() {
               <tbody>
                 {data.rows.map((row, index) => (
                   <tr key={`${row.venue}-${row.address}`}>
-                    <td className="dim mono-sm">{index + 1}</td>
+                    <td className="dim mono-sm hide-m">{index + 1}</td>
                     <td>
                       <span className="mono-sm">{row.pool}</span>
-                      <span className="dim mono-sm"> · {venueLabel(row.venue)}{row.tickSpacing !== null ? ` ts${row.tickSpacing}` : ''}</span>
+                      <VenueTag row={row} />
                     </td>
-                    <td className="num mono-sm">{row.feeBps < 1 ? row.feeBps.toFixed(2) : row.feeBps}bp</td>
-                    <td className="num mono-sm">${usd(row.tvlUsd)}</td>
-                    <td className="num mono-sm hide-t">${usd(row.volDayUsd)}</td>
-                    <td className="num mono-sm" title={t('poolRank.feeAprValueTip', { gross: pct(row.feeApr) })}>{pct(row.netFeeApr)}</td>
+                    <td className="num mono-sm hide-m">{row.feeBps < 1 ? row.feeBps.toFixed(2) : row.feeBps}bp</td>
+                    <td className="num mono-sm">
+                      <span className="hide-m">{fmtUsd(row.tvlUsd)}</span>
+                      <span className="show-m">${fmtCompact(row.tvlUsd)}</span>
+                      {/* phones lose the VOL/DAY + trend columns — they ride here */}
+                      <span className="cell-sub show-m">
+                        ${fmtCompact(row.volDayUsd)} <TrendMark value={row.volumePersistence} />
+                      </span>
+                    </td>
+                    <td className="num mono-sm hide-m">{fmtUsd(row.volDayUsd)}</td>
+                    <td className="num mono-sm" title={t('poolRank.feeAprValueTip', { gross: pct(row.feeApr) })}>
+                      {pct(row.netFeeApr)}
+                      {/* phones lose the STAKE APR column — the alternative yield rides here */}
+                      {row.emitApr !== null && <span className="cell-sub show-m">{t('poolRank.stakeSub', { apr: pct(row.emitApr) })}</span>}
+                    </td>
                     <td className="num mono-sm hide-m">{pct(row.sigmaDaily, 2)}</td>
                     <td className={`num mono-sm ${row.coverage >= 1 ? 'green' : 'red'}`} title={t('poolRank.coverageValueTip', { value: row.coverage.toFixed(1) })}>
                       {row.coverage >= 100 ? Math.round(row.coverage) : row.coverage.toFixed(1)}
+                      {/* phones lose the σ/DAY column — the risk number rides here */}
+                      <span className="cell-sub show-m">σ {pct(row.sigmaDaily, 2)}</span>
                     </td>
-                    {data.rows.some((r) => r.emitApr !== null) && (
+                    {hasEmissions && (
                       <td className="num mono-sm hide-t">
                         {row.emitApr !== null ? (
                           <span title={row.stakedShare !== null ? t('poolRank.stakedShareTip', { share: pct(row.stakedShare) }) : undefined}>
