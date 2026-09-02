@@ -146,6 +146,12 @@ Master Key、API Token 和 RPC 文件必须至少包含 32 字节并保持 `0600
 
 ## 6. 前端构建与发布
 
+> **脚本化（2026-09-02）**：常规发布用 `deploy/release.sh`（`npm run release` / `release:web` / `release:indexer` /
+> `release:status`）。脚本按本文 §6/§7 的顺序执行：typecheck + 全量测试 → 生产 env 构建 → dist 秘密扫描 →
+> 上传新 release → 原子切软链 → 重启双链索引器并等待 ready → 公网 health 检查 → release 保留清理；
+> 失败时打印回滚命令，另有 `rollback web|indexer <timestamp>` 子命令。executor 仍按 §7.1 手工发布。
+> 以下手工步骤保留为脚本背后的依据与兜底。
+
 当前一个静态包同时包含两条链；`CHAIN=bsc` 只决定默认链，`VITE_CHAIN_GATEWAY_HOST` 启用当前域名的双链同源路由。
 
 ```bash
