@@ -82,6 +82,7 @@ import {
   takeRecommendationPrefill,
   type RecommendationPrefill,
 } from "../../lib/recommendationPrefill";
+import { takePoolJump } from "../../lib/poolJump";
 import { tradePanelTab, type TradeTab } from "../../lib/tradePanelPref";
 import { shouldDiscoverPositionsInPools } from "../../lib/positionLifecycle";
 import {
@@ -287,12 +288,14 @@ export function PoolsTab() {
   // Recommendations cross a top-level tab boundary. Consume the one-shot
   // handoff exactly once when POOLS mounts, then use the canonical pool
   // identity (PoolId for v4, contract address otherwise) for both catalog
-  // lookup and selection.
+  // lookup and selection. The POOL RANK tab hands over the same way — just an
+  // address, no strategy payload.
+  const [poolJump] = useState<string | null>(() => takePoolJump());
   const [recommendation] = useState<RecommendationPrefill | null>(() =>
     takeRecommendationPrefill(),
   );
   const recommendationId = (
-    recommendation?.poolId ?? recommendation?.pool ?? ""
+    recommendation?.poolId ?? recommendation?.pool ?? poolJump ?? ""
   ).toLowerCase();
   const [q, setQ] = useState(recommendationId); // one input: filters home locally + queries both catalogs
   // The row the trade panel is pointed at, by pool identity rather than by
@@ -311,7 +314,7 @@ export function PoolsTab() {
   });
   const [market, setMarketState] = useState<MarketFilter>(rememberedMarket);
   const [uniQuery, setUniQuery] = useState(recommendationId); // '' = useful catalog front pages; text/address/id = indexed search
-  const [hideDust, setHideDust] = useState(!recommendation); // most long-tail factory catalogs are <$1k dust
+  const [hideDust, setHideDust] = useState(!recommendation && !poolJump); // most long-tail factory catalogs are <$1k dust
   // Pools whose token wears a name belonging to another contract. Hidden by
   // default because a landing page sorted by volume is exactly where a
   // "USDC/WBNB" row that is not USDC does its work — but only hidden, never

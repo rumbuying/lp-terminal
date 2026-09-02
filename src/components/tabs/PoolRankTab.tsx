@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import { fmtCompact, fmtUsd } from '../../lib/format'
 import { usePoolRank, type PoolRankRow } from '../../hooks/usePoolRank'
+import { queuePoolJump } from '../../lib/poolJump'
 import { Btn } from '../ui'
 
 const pct = (x: number, digits = 0) => `${(x * 100).toFixed(digits)}%`
@@ -24,12 +25,16 @@ function VenueTag({ row }: { row: PoolRankRow }) {
   )
 }
 
-export function PoolRankTab() {
+export function PoolRankTab(props: { onOpenPool: () => void }) {
   const { t } = useTranslation()
   const query = usePoolRank()
   const data = query.data
   const generated = data?.generatedAt ? new Date(data.generatedAt * 1000) : null
   const hasEmissions = data?.rows.some((r) => r.emitApr !== null) ?? false
+  const openInPools = (address: string) => {
+    queuePoolJump(address)
+    props.onOpenPool()
+  }
   return (
     <div className="panel">
       <div className="panel-head">
@@ -75,7 +80,14 @@ export function PoolRankTab() {
                   <tr key={`${row.venue}-${row.address}`}>
                     <td className="dim mono-sm hide-m">{index + 1}</td>
                     <td>
-                      <span className="mono-sm">{row.pool}</span>
+                      <button
+                        className="pr-open"
+                        onClick={() => openInPools(row.address)}
+                        title={t('poolRank.openTip')}
+                      >
+                        <span className="mono-sm">{row.pool}</span>
+                        <span className="pr-arrow" aria-hidden="true">↗</span>
+                      </button>
                       <VenueTag row={row} />
                     </td>
                     <td className="num mono-sm hide-m">{row.feeBps < 1 ? row.feeBps.toFixed(2) : row.feeBps}bp</td>
