@@ -132,6 +132,18 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
           triggerTick = average.tick
         }
 
+        // The crossing clock is wall-clock truth and must run during guard
+        // waits: the market gate suspends EXECUTION, not OBSERVATION. Tracking
+        // outSide/outSince here — before the guard short-circuits — lets a
+        // crossing that happened (and persisted) during a guard wait fire
+        // immediately once the gate reopens, instead of restarting its
+        // confirmation from zero after the wait.
+        const side = rangeSide(triggerTick, snapshot.tickLower, snapshot.tickUpper)
+        const latestRange = latestCompletedCycleRange(config.id)
+        const positionStartedAt = latestRange?.completedAt ?? strategyBaseline(config.id)?.observedAt ?? config.createdAt
+        const reset = !previous || previous.revision !== config.revision || previous.lastTokenId !== snapshot.tokenId
+        const outSince = side === 'in' ? undefined : reset || previous.outSide !== side ? now : previous.outSince ?? now
+
         const volatilityWindowSeconds = config.safeguards.enabled ? config.safeguards.volatilityWindowSeconds : undefined
         if (volatilityWindowSeconds && (config.safeguards.maxVolatilityBps !== undefined || config.safeguards.maxSpotTwapDeviationBps !== undefined)) {
           marketStats = sampledTickStats(config.id, now - volatilityWindowSeconds)
@@ -139,6 +151,8 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
             updateMonitorState(config.id, {
               revision: config.revision,
               guardReason: previous?.guardReason,
+              outSide: side === 'in' ? undefined : side,
+              outSince,
               lastTick: snapshot.tick,
               lastLiquidity: snapshot.liquidity,
               lastTokenId: snapshot.tokenId,
@@ -159,6 +173,8 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
             updateMonitorState(config.id, {
               revision: config.revision,
               guardReason: quality.reason,
+              outSide: side === 'in' ? undefined : side,
+              outSince,
               burstWaitUntil: previous?.burstWaitUntil,
               burstResetAt: previous?.burstResetAt,
               lastTick: snapshot.tick,
@@ -180,6 +196,8 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
                 revision: config.revision,
                 guardReason: previous.guardReason,
                 guardStableSince: stableSince,
+                outSide: side === 'in' ? undefined : side,
+                outSince,
                 burstWaitUntil: previous.burstWaitUntil,
                 burstResetAt: previous.burstResetAt,
                 lastTick: snapshot.tick,
@@ -196,11 +214,6 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
           }
         }
 
-        const side = rangeSide(triggerTick, snapshot.tickLower, snapshot.tickUpper)
-        const latestRange = latestCompletedCycleRange(config.id)
-        const positionStartedAt = latestRange?.completedAt ?? strategyBaseline(config.id)?.observedAt ?? config.createdAt
-        const reset = !previous || previous.revision !== config.revision || previous.lastTokenId !== snapshot.tokenId
-        const outSince = side === 'in' ? undefined : reset || previous.outSide !== side ? now : previous.outSince ?? now
         const latestCompleted = latestCompletedCycleAt(config.id)
         const cooldownUntil = latestCompleted && config.trigger.cooldownMinutes > 0 ? latestCompleted + config.trigger.cooldownMinutes * 60 : undefined
         const confirmationSeconds = Math.max(
