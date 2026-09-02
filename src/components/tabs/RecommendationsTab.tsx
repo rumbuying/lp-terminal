@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAccount } from 'wagmi'
+import { CHAIN } from '../../config/chains'
 import { useExecutorWalletAuth } from '../../hooks/useExecutorWalletAuth'
 import { executorRecommendations, savedExecutorAccessToken } from '../../lib/executorClient'
 import { fmtUsd } from '../../lib/format'
 import { recommendationDisplayItems, type RecommendationObservationReason } from '../../lib/recommendationDisplay'
 import { queueRecommendationPrefill } from '../../lib/recommendationPrefill'
+import { takeRecFocus } from '../../lib/recFocus'
+import { saveRecInputs } from '../../lib/recInputs'
 import type { RecommendationItem, RecommendationMode, RecommendationResponse, RecommendationRisk } from '../../../shared/recommendation/types'
 import { ProtoBadge } from '../ProtoBadge'
 import { Btn, NumInput } from '../ui'
@@ -35,6 +38,27 @@ export function RecommendationsTab(props: { onOpenPool: () => void }) {
     ? MODES.flatMap((mode) => freshData(mode)?.items ?? [])
       .sort((a, b) => b.projection24h.riskAdjustedNetUsd - a.projection24h.riskAdjustedNetUsd)[0]
     : undefined
+
+  // POOL RANK → recommender handoff: remember which pool to land on; the
+  // scroll/flash runs once the cards matching it have loaded (and re-runs if
+  // the response arrives after the jump).
+  const [focusPool, setFocusPool] = useState<string | null>(() => takeRecFocus())
+  useEffect(() => {
+    if (!focusPool) return
+    const el = document.querySelector<HTMLElement>(`[data-rec-pool="${focusPool}"]`)
+    if (!el) return
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    el.classList.add('rec-focus')
+    const timer = window.setTimeout(() => el.classList.remove('rec-focus'), 4_000)
+    return () => { window.clearTimeout(timer); el.classList.remove('rec-focus') }
+  }, [focusPool, data.fees, data.rewards])
+
+  // keep the rank tab's badge basis in step with what is on screen here
+  useEffect(() => {
+    if (Number.isFinite(requestedCapitalUsd) && requestedCapitalUsd >= 10) {
+      saveRecInputs(CHAIN.key, { capitalUsd: requestedCapitalUsd, risk })
+    }
+  }, [requestedCapitalUsd, risk])
 
   useEffect(() => {
     if (!token) return
@@ -154,9 +178,20 @@ function RecommendationModeSection(props: {
       if (reason === 'excessive_reopens') return t('pools.recObservedReopens')
       if (reason === 'insufficient_tick_history') return t('pools.recObservedHistory')
       if (reason === 'unanchored_quote_risk') return t('pools.recObservedQuoteRisk')
+      if (reason === 'pool_below_lvr_floor') return t('pools.recObservedLvrFloor')
       return t('pools.recObservedRiskNet')
     })
     return t('pools.recObservedReason', { reason: labels.join(' · ') || t('pools.recObservedBelowCutoff') })
+  }
+  const sigmaPct = (value: number) => `${(value * 100).toFixed(2)}%`
+  // Only the signals with no home elsewhere on the card — the volume-spike and
+  // slowing codes already surface through the lookback reason line.
+  const warningLabel = (code: string): string | null => {
+    if (code === 'below_lvr_floor') return t('pools.recWarnLvrFloor')
+    if (code === 'volume_above_baseline') return t('pools.recWarnVolumeBaseline')
+    if (code === 'emit_apr_divergence') return t('pools.recWarnEmitApr')
+    if (code === 'cost_default') return t('pools.recWarnCostDefault')
+    return null
   }
 
   return (
@@ -183,17 +218,29 @@ function RecommendationModeSection(props: {
           )}
           <div className="recommender-grid">
             {displayed.map(({ item, status, observationReasons }, index) => (
-              <article className={`recommendation-card ${status}`} key={`${item.poolId ?? item.pool}:${item.mode}`}>
+              <article className={`recommendation-card ${status}`} key={`${item.poolId ?? item.pool}:${item.mode}`} data-rec-pool={item.pool.toLowerCase()}>
                 <div className="recommendation-card-head">
                   <span className="rec-rank">#{index + 1}</span><strong>{item.pair}</strong><ProtoBadge proto={terminalProtocolFor(item.protocol)} mini />
                   <span className={`rec-status ${status}`}>{status === 'recommended' ? t('pools.recRecommended') : t('pools.recObserved')}</span>
                   <span className={`rec-confidence ${item.confidence.level}`}>{confidence(item.confidence.level)} {Math.round(item.confidence.score * 100)}%</span>
                 </div>
+                {item.poolRank && (
+                  <div
+                    className={`rec-prior mono-sm ${item.poolRank.coverage < 1 ? 'amber' : 'dim'}`}
+                    title={t('pools.recPriorTip')}
+                  >
+                    {t('pools.recPrior', { coverage: item.poolRank.coverage.toFixed(1), sigma: sigmaPct(item.poolRank.sigmaDaily) })}
+                  </div>
+                )}
                 <div className="recommendation-main">
                   <div><span>{t('pools.recWindow')}</span><b>{item.lookback.window.toUpperCase()}</b><small>{windowReason(item)}</small></div>
                   <div><span>{t('pools.recRange')}</span><b>±{item.range.lowerPct}%</b><small>{item.range.tickLower} → {item.range.tickUpper}</small></div>
                   <div><span>{t('pools.recNet24h')}</span><b className={item.projection24h.netUsd >= 0 ? 'green' : 'red'}>{fmtUsd(item.projection24h.netUsd)}</b><small>{item.projection24h.reopens.toFixed(1)} {t('pools.recReopens')}</small></div>
                 </div>
+                {(() => {
+                  const extraWarnings = item.warnings.map(warningLabel).filter((label): label is string => label !== null)
+                  return extraWarnings.length > 0 ? <div className="rec-warnings amber mono-sm">{extraWarnings.join(' · ')}</div> : null
+                })()}
                 {status === 'observed' && <div className="rec-observation-reason">{observationReason(observationReasons)}</div>}
                 <details>
                   <summary>{t('pools.recExplain')}</summary>

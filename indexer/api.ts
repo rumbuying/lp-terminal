@@ -33,7 +33,7 @@ import {
   BSC_UNI_V3_SUBGRAPH_DEPLOYMENT,
   BSC_UNI_V3_SUBGRAPH_ID,
 } from './v3Subgraph';
-import { getPoolRankApi } from './poolRank';
+import { getPoolRankApi, getPoolRankSnapshot, POOL_RANK_ENABLED, type PoolRankRow } from './poolRank';
 import { SerializedResponseCache, type SerializedResponse } from './responseCache';
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8' };
@@ -3053,6 +3053,48 @@ type RecommendationRow = Record<string, string | number | null>;
 
 /** Raw, explainable inputs for the executor-side recommendation model. The
  * indexer never turns these observations into financial advice or calldata. */
+/**
+ * The pool-rank prior index for the recommendation candidates: one entry per
+ * ranked pool, keyed by lowercase address, only while the snapshot is fresh.
+ * The rank table is a half-day reference; once it is more than two cycles old
+ * it stops being a prior and becomes misinformation, so it is dropped whole —
+ * the recommender degrades to its own observations instead of anchoring on a
+ * stale LVR floor. Null when the rank pipeline is off (other chains) or has
+ * never produced a snapshot.
+ */
+function rankPriorIndex(): { generatedAt: number; byAddress: Map<string, PoolRankRow> } | null {
+  if (!POOL_RANK_ENABLED) return null;
+  const snapshot = getPoolRankSnapshot();
+  if (!snapshot) return null;
+  if (now() - snapshot.generatedAt > 2 * (TUNE.poolRankMs / 1000)) return null;
+  const byAddress = new Map<string, PoolRankRow>();
+  for (const row of snapshot.rows) byAddress.set(row.address.toLowerCase(), row);
+  return { generatedAt: snapshot.generatedAt, byAddress };
+}
+
+/**
+ * How many of the rank table's best-coverage pools get a second chance at the
+ * candidate universe. The volume×fee/TVL ordering that picks the main cohort is
+ * a yield proxy the rank table deliberately is not: a deep, quiet, well-covered
+ * pool can sit below a hot shallow one on that proxy while being the better LP
+ * market over the rank's 45-day window. Coverage top-20, and the pool must
+ * still clear the same min TVL/volume bars as everyone else — seeding widens
+ * WHO is evaluated, never lowers the bar.
+ */
+const RANK_SEED_CAP = 20;
+
+/** The rank table's best-coverage pool addresses, best first, capped. Empty
+ * whenever the priors are absent (rank off, no snapshot, stale) — the seed
+ * entry closes with exactly the same key as the prior attach does. */
+export function rankSeedIdentities(): string[] {
+  const index = rankPriorIndex();
+  if (!index) return [];
+  return [...index.byAddress.values()]
+    .sort((a, b) => b.coverage - a.coverage)
+    .slice(0, RANK_SEED_CAP)
+    .map((row) => row.address.toLowerCase());
+}
+
 export function getRecommendationCandidates(params: Params) {
   const rawLimit = params.get('limit');
   const limit = Math.min(Math.max(Number(rawLimit) || 50, 1), 80);
@@ -3128,8 +3170,26 @@ export function getRecommendationCandidates(params: Params) {
       '0x0000000000000000000000000000000000000000',
       ADDR.WNATIVE.toLowerCase(), minTvl, minVolume, limit,
     ) as RecommendationRow[] : [];
-  const rows = [...new Map([...addressRows, ...rewardRows, ...v4Rows]
-    .map((row) => [String(row.identity), row])).values()];
+  // Merge, first writer wins: the volume×fee/TVL cohort, the rewards cohort and
+  // v4 keep their place; only pools NONE of them took can enter via the rank
+  // seeds, and those carry rankSeeded so the model (and any debugging) can tell
+  // which candidates the coverage table vouched in.
+  const merged = new Map<string, RecommendationRow>();
+  for (const row of [...addressRows, ...rewardRows, ...v4Rows]) merged.set(String(row.identity), row);
+  const seededIdentities = new Set<string>();
+  const seedAddresses = rankSeedIdentities();
+  if (seedAddresses.length) {
+    const placeholders = seedAddresses.map(() => '?').join(',');
+    const seededRows = db.prepare(`${addressSelect} AND LOWER(p.address) IN (${placeholders})`)
+      .all(minTvl, minVolume, ...seedAddresses) as RecommendationRow[];
+    for (const row of seededRows) {
+      const identity = String(row.identity);
+      if (merged.has(identity)) continue;
+      merged.set(identity, row);
+      seededIdentities.add(identity);
+    }
+  }
+  const rows = [...merged.values()];
   const marketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
       AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,
       AVG(vol24h_usd) AS vol24hUsd
@@ -3149,6 +3209,7 @@ export function getRecommendationCandidates(params: Params) {
     : undefined;
   const stable = ADDR.STABLE.toLowerCase();
   const wrapped = ADDR.WNATIVE.toLowerCase();
+  const rankPriors = rankPriorIndex();
   return {
     ready: kvGet('ready') === '1',
     chainId: CHAIN.id,
@@ -3158,6 +3219,8 @@ export function getRecommendationCandidates(params: Params) {
       const token0 = String(row.token0);
       const token1 = String(row.token1);
       const proto = String(row.proto);
+      const rankPrior = rankPriors?.byAddress.get(String(row.pool).toLowerCase());
+      const rankSeeded = seededIdentities.has(identity);
       return {
         pool: String(row.pool),
         ...(row.pool_id ? { poolId: String(row.pool_id) } : {}),
@@ -3188,6 +3251,20 @@ export function getRecommendationCandidates(params: Params) {
           ...historicTickQ.all(identity, tickSince, timestamp - 30 * 3_600, identity),
           ...recentTickQ.all(identity, timestamp - 30 * 3_600),
         ],
+        ...(rankPrior
+          ? {
+              poolRank: {
+                generatedAt: rankPriors!.generatedAt,
+                coverage: rankPrior.coverage,
+                sigmaDaily: rankPrior.sigmaDaily,
+                sigmaAnnual: rankPrior.sigmaAnnual,
+                feeApr7d: rankPrior.feeApr,
+                volDayUsd: rankPrior.volDayUsd,
+                emitApr: rankPrior.emitApr,
+              },
+            }
+          : {}),
+        ...(rankSeeded ? { rankSeeded: true } : {}),
       };
     }),
   };

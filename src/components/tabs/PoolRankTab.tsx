@@ -1,6 +1,9 @@
 import { useTranslation } from 'react-i18next'
 import { fmtCompact, fmtUsd } from '../../lib/format'
 import { usePoolRank, type PoolRankRow } from '../../hooks/usePoolRank'
+import { useRecStatusByPool, type RecStatusData } from '../../hooks/useRecStatusByPool'
+import type { RecStatusEntry } from '../../lib/recStatus'
+import { queueRecFocus } from '../../lib/recFocus'
 import { queuePoolJump } from '../../lib/poolJump'
 import { Btn } from '../ui'
 
@@ -25,10 +28,34 @@ function VenueTag({ row }: { row: PoolRankRow }) {
   )
 }
 
-export function PoolRankTab(props: { onOpenPool: () => void }) {
+/** Where this pool stands in the recommender's current output — the rank says
+ * the pool pays its volatility, this says whether the model would fund it
+ * today. Clicking hands off to the recommender page with the card focused. */
+function RecBadge(props: { address: string; entry: RecStatusEntry; inputs: RecStatusData['inputs'] | undefined; onOpen: () => void }) {
+  const { t } = useTranslation()
+  const title = props.inputs
+    ? t('poolRank.recBadgeTip', { capital: props.inputs.capitalUsd, risk: props.inputs.risk })
+    : t('poolRank.recColTip')
+  return (
+    <button
+      className={`pr-rec ${props.entry.status}`}
+      onClick={() => { queueRecFocus(props.address); props.onOpen() }}
+      title={title}
+    >
+      {props.entry.status === 'recommended'
+        ? t('poolRank.recBadge', { net: fmtUsd(props.entry.net24h) })
+        : props.entry.gateReasons.length > 0 ? t('poolRank.recGated') : t('poolRank.recWatch')}
+    </button>
+  )
+}
+
+export function PoolRankTab(props: { onOpenPool: () => void; onOpenRecommendations: () => void }) {
   const { t } = useTranslation()
   const query = usePoolRank()
   const data = query.data
+  const recStatus = useRecStatusByPool()
+  const recByPool = recStatus.data?.byPool
+  const hasRec = (recByPool?.size ?? 0) > 0
   const generated = data?.generatedAt ? new Date(data.generatedAt * 1000) : null
   const hasEmissions = data?.rows.some((r) => r.emitApr !== null) ?? false
   const openInPools = (address: string) => {
@@ -73,6 +100,7 @@ export function PoolRankTab(props: { onOpenPool: () => void }) {
                     <th className="num hide-t" title={t('poolRank.emitAprTip')}>{t('poolRank.emitApr')}</th>
                   )}
                   <th className="hide-m" title={t('poolRank.trendTip')}>{t('poolRank.trend')}</th>
+                  {hasRec && <th className="hide-m" title={t('poolRank.recColTip')}>{t('poolRank.recCol')}</th>}
                 </tr>
               </thead>
               <tbody>
@@ -123,6 +151,16 @@ export function PoolRankTab(props: { onOpenPool: () => void }) {
                       </td>
                     )}
                     <td className="hide-m"><TrendMark value={row.volumePersistence} /></td>
+                    {hasRec && (
+                      <td className="hide-m">
+                        {(() => {
+                          const entry = recByPool?.get(row.address.toLowerCase())
+                          return entry
+                            ? <RecBadge address={row.address} entry={entry} inputs={recStatus.data?.inputs} onOpen={props.onOpenRecommendations} />
+                            : <span className="dim">—</span>
+                        })()}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

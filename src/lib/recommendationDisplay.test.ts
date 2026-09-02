@@ -38,3 +38,10 @@ test('does not duplicate a promoted pool from the observed list', () => {
   assert.equal(displayed.length, 1)
   assert.equal(displayed[0].status, 'recommended')
 })
+
+test('the rank-table LVR floor gate surfaces as an observation reason', () => {
+  const gated = item('0xD', 1, 'medium', 3)
+  gated.gateReasons = ['pool_below_lvr_floor']
+  const displayed = recommendationDisplayItems({ items: [], observed: [gated] })
+  assert.deepEqual(displayed[0].observationReasons, ['pool_below_lvr_floor'])
+})

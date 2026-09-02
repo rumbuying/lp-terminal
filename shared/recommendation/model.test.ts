@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { chooseLookback, rankRecommendations, replayRange, scoreCandidate } from './model'
-import type { RecommendationCandidate, RecommendationItem } from './types'
+import type { RecommendationCandidate, RecommendationItem, RecommendationMode, RecommendationRankPrior, RecommendationRisk } from './types'
 
 const now = 1_800_000_000
 const candidate = (overrides: Partial<RecommendationCandidate> = {}): RecommendationCandidate => ({
@@ -14,6 +14,23 @@ const candidate = (overrides: Partial<RecommendationCandidate> = {}): Recommenda
   statsUpdatedAt: now, stateUpdatedAt: now, gaugeAlive: false, rewardRate: '0', periodFinish: 0, upUsd: null,
   marketHistory: [], tickHistory: [], ...overrides,
 })
+
+const COST = { protocol: 'univ3' as const, gasUsdPerCycle: 0.05, executionBpsPerCycle: 10, cycleSeconds: 45, sampleCycles: 20, source: 'protocol' as const }
+/** 24h of 5-minute samples oscillating ±250 ticks (≈±2.5%): inside ±5%, across ±1%. */
+const CALM_TICKS = Array.from({ length: 24 * 12 + 1 }, (_, index) => ({
+  ts: now - (24 * 12 - index) * 300,
+  tick: 100_000 + (index % 2 === 0 ? -250 : 250),
+}))
+const rankPrior = (overrides: Partial<RecommendationRankPrior> = {}): RecommendationRankPrior => ({
+  generatedAt: now - 3_600, coverage: 2, sigmaDaily: 0.03, sigmaAnnual: 0.572,
+  feeApr7d: 0.2, volDayUsd: 24_000, emitApr: null, ...overrides,
+})
+const scoreWide = (overrides: Partial<RecommendationCandidate> = {}, risk: RecommendationRisk = 'balanced', mode: RecommendationMode = 'fees') => {
+  const items = scoreCandidate({ candidate: candidate({ tickHistory: CALM_TICKS, ...overrides }), capitalUsd: 1_000, mode, risk, now, cost: COST })
+  const wide = items.find((item) => item.range.lowerPct === 5)
+  assert.ok(wide, '±5% band should be scored')
+  return wide
+}
 
 test('bootstrap chooses 6h and recognizes a short spike', () => {
   assert.equal(chooseLookback(candidate(), now)?.reason, 'stable_intraday')
@@ -131,4 +148,56 @@ test('ranking uses a wider eligible band when the highest-net narrow band fails 
   const ranked = rankRecommendations([base, wider])
   assert.equal(ranked.observed[0].range.lowerPct, 1)
   assert.equal(ranked.items[0].range.lowerPct, 5)
+})
+
+test('a rank prior below the LVR floor gates conservative but only warns balanced', () => {
+  const belowFloor = rankPrior({ coverage: 0.8 })
+  const conservative = scoreWide({ poolRank: belowFloor }, 'conservative')
+  assert.ok(conservative.gateReasons.includes('pool_below_lvr_floor'))
+  const balanced = scoreWide({ poolRank: belowFloor }, 'balanced')
+  assert.ok(!balanced.gateReasons.includes('pool_below_lvr_floor'))
+  assert.ok(balanced.warnings.includes('below_lvr_floor'))
+})
+
+test('a rank prior at or above the LVR floor leaves gates and warnings untouched', () => {
+  const wide = scoreWide({ poolRank: rankPrior({ coverage: 1.4 }) })
+  assert.ok(!wide.gateReasons.includes('pool_below_lvr_floor'))
+  assert.ok(!wide.warnings.includes('below_lvr_floor'))
+})
+
+test('a projection far above the 7-day volume baseline warns, a baseline-priced one does not', () => {
+  // projected daily volume = 1_000/h × 24 = 24_000
+  const spiky = scoreWide({ poolRank: rankPrior({ volDayUsd: 4_000 }) })
+  assert.ok(spiky.warnings.includes('volume_above_baseline'))
+  const priced = scoreWide({ poolRank: rankPrior({ volDayUsd: 24_000 }) })
+  assert.ok(!priced.warnings.includes('volume_above_baseline'))
+})
+
+test('rewards projections reconcile against the rank snapshot emission APR', () => {
+  // live gauge: 1 UP/s over a pool with half its TVL staked → live APR ≈ 631
+  const rewardsPool = (emitApr: number | null) => ({
+    protocol: 'up33' as const, gaugeAlive: true, periodFinish: now + 86_400, upUsd: 1,
+    rewardRate: '1000000000000000000',
+    stakedLiquidity: '50000000000000000000',
+    poolRank: rankPrior({ emitApr }),
+  })
+  const divergent = scoreWide(rewardsPool(0.05), 'balanced', 'rewards')
+  assert.ok(divergent.warnings.includes('emit_apr_divergence'))
+  const consistent = scoreWide(rewardsPool(650), 'balanced', 'rewards')
+  assert.ok(!consistent.warnings.includes('emit_apr_divergence'))
+})
+
+test('a missing or malformed rank prior changes nothing', () => {
+  const absent = scoreWide()
+  assert.equal(absent.poolRank, undefined)
+  assert.ok(!absent.warnings.some((w) => ['below_lvr_floor', 'volume_above_baseline', 'emit_apr_divergence'].includes(w)))
+  const malformed = scoreWide({ poolRank: { ...rankPrior(), coverage: Number.NaN } as unknown as RecommendationRankPrior })
+  assert.ok(!malformed.gateReasons.includes('pool_below_lvr_floor'))
+  assert.ok(!malformed.warnings.includes('below_lvr_floor'))
+})
+
+test('a fresh prior rides along on the scored item for the UI', () => {
+  const prior = rankPrior({ coverage: 2.5 })
+  const wide = scoreWide({ poolRank: prior })
+  assert.deepEqual(wide.poolRank, prior)
 })

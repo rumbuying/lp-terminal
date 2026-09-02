@@ -7,6 +7,7 @@ export type RecommendationGateReason =
   | 'insufficient_tick_history'
   | 'non_positive_risk_adjusted_net'
   | 'unanchored_quote_risk'
+  | 'pool_below_lvr_floor'
 
 export type RecommendationMarketSnapshot = {
   ts: number
@@ -53,6 +54,11 @@ export type RecommendationCandidate = {
   upUsd: number | null
   marketHistory: RecommendationMarketSnapshot[]
   tickHistory: RecommendationTickSample[]
+  /** present only while the indexer's rank snapshot is fresh */
+  poolRank?: RecommendationRankPrior
+  /** true when the pool entered the universe only through the rank table's
+   * coverage seeds (docs: the candidate universe's second entry) */
+  rankSeeded?: boolean
 }
 
 export type RecommendationCostProfile = {
@@ -62,6 +68,27 @@ export type RecommendationCostProfile = {
   cycleSeconds: number
   sampleCycles: number
   source: 'pool' | 'protocol' | 'default'
+}
+
+/**
+ * The indexer's pool-rank prior for this pool, attached by the candidates
+ * endpoint only while the snapshot is fresh. It is the POOL-level truth the
+ * 24h projection cannot see: the LVR coverage floor, the volatility the range
+ * must survive, and the 7-day volume baseline that tempers a short spike.
+ */
+export type RecommendationRankPrior = {
+  /** snapshot generation time (seconds); stale priors are never attached */
+  generatedAt: number
+  /** feeApr ÷ (σ_annual²/8); below 1 a passive LP loses to a hedged rebalancer */
+  coverage: number
+  sigmaDaily: number
+  sigmaAnnual: number
+  /** 7-day-mean gross fee APR the rank table measured */
+  feeApr7d: number
+  /** 7-day-mean daily volume in USD — the stability baseline */
+  volDayUsd: number
+  /** staked-side emission APR at the post-cap gauge rate; null when ungauged */
+  emitApr: number | null
 }
 
 export type WindowDecision = {
@@ -117,10 +144,12 @@ export type RecommendationItem = {
   /** Hard opening gates. Non-empty items remain visible as observations only. */
   gateReasons: RecommendationGateReason[]
   warnings: string[]
+  /** the pool-rank prior this projection was scored against, when fresh */
+  poolRank?: RecommendationRankPrior
 }
 
 export type RecommendationResponse = {
-  modelVersion: 'lp-rec-v2'
+  modelVersion: 'lp-rec-v3'
   generatedAt: number
   marketAsOf: number
   capitalUsd: number

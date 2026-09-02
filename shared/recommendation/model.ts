@@ -7,15 +7,39 @@ import type {
   RecommendationCostProfile,
   RecommendationItem,
   RecommendationMode,
+  RecommendationRankPrior,
   RecommendationRisk,
   RecommendationTickSample,
   WindowDecision,
 } from './types'
 
-export const RECOMMENDATION_MODEL_VERSION = 'lp-rec-v2' as const
+export const RECOMMENDATION_MODEL_VERSION = 'lp-rec-v3' as const
 export const RECOMMENDATION_BANDS = [1, 2, 3, 5, 8, 10] as const
+/**
+ * How the indexer's pool-rank table enters the projection, in one sentence:
+ * the rank answers whether the POOL pays its volatility at all, and these
+ * thresholds decide what that answer does to a 24h position recommendation.
+ *
+ * LVR_FLOOR — below coverage 1 a passive in-range LP cannot beat a hedged
+ * rebalancer before costs, whatever the band (see indexer/poolRank.ts). That
+ * is a property of the pool over the rank's ~45-day window, not of this 24h
+ * projection, so it hard-gates only the conservative profile and warns
+ * elsewhere: a short-window edge can exist, but a capital-preservation user
+ * should never be shown one that sits below the long-run floor.
+ *
+ * VOLUME_BASELINE_MULTIPLE — the walk-forward lookback is responsive by
+ * design; the rank's 7-day mean volume is the stability baseline. A projection
+ * running several multiples above the baseline is priced off a spike.
+ */
+export const LVR_FLOOR = 1
+export const VOLUME_BASELINE_MULTIPLE = 3
+/** The two emission readings (live gauge vs rank's post-cap snapshot) disagree past this ratio. */
+const REWARDS_APR_DIVERGENCE = 2
+/** Below this the emission reconciliation is noise around zero, not a signal. */
+const MIN_RECONCILED_EMIT_APR = 0.005
 const HOUR = 3_600
 const DAY = 86_400
+const YEAR_DAYS = 365
 const VALIDATION_STEP = HOUR
 const EPS = 1e-9
 
@@ -289,6 +313,38 @@ function cvar95(values: number[], capitalUsd: number): number {
 const riskWeight: Record<RecommendationRisk, number> = { conservative: 1, balanced: 0.5, aggressive: 0.2 }
 const maxDailyReopens: Record<RecommendationRisk, number> = { conservative: 2, balanced: 6, aggressive: 12 }
 
+/** The indexer drops stale priors before serving; this guard is for payloads
+ * that crossed HTTP — a malformed prior must never poison scoring. */
+function validRankPrior(prior: RecommendationCandidate['poolRank']): RecommendationRankPrior | null {
+  if (!prior) return null
+  const finitePrior = finite(prior.generatedAt) && finite(prior.coverage) && finite(prior.sigmaDaily)
+    && finite(prior.sigmaAnnual) && finite(prior.feeApr7d) && finite(prior.volDayUsd)
+    && (prior.emitApr === null || finite(prior.emitApr))
+  return finitePrior ? prior : null
+}
+
+/** Pool-average emission APR implied by the LIVE gauge state — the same
+ * quantity the rank table measures from its post-cap rewardRate snapshot, so
+ * a large divergence means one of the two readings is wrong (epoch boundary,
+ * UP price mark, cap change). */
+function liveEmitApr(candidate: RecommendationCandidate): number | null {
+  const up = candidate.upUsd
+  const liquidity = Number(BigInt(candidate.liquidity))
+  const staked = Number(BigInt(candidate.stakedLiquidity))
+  if (!up || !(liquidity > 0) || !(staked > 0)) return null
+  const stakedTvlUsd = candidate.tvlUsd * staked / liquidity
+  if (!(stakedTvlUsd > 0)) return null
+  const emissionUsdPerDay = Number(BigInt(candidate.rewardRate)) / 1e18 * DAY * up
+  return emissionUsdPerDay * YEAR_DAYS / stakedTvlUsd
+}
+
+function emitAprMismatch(candidate: RecommendationCandidate, prior: RecommendationRankPrior): boolean {
+  if (prior.emitApr === null || prior.emitApr < MIN_RECONCILED_EMIT_APR) return false
+  const live = liveEmitApr(candidate)
+  if (live === null) return false
+  return live > prior.emitApr * REWARDS_APR_DIVERGENCE || prior.emitApr > live * REWARDS_APR_DIVERGENCE
+}
+
 export function scoreCandidate(args: {
   candidate: RecommendationCandidate
   capitalUsd: number
@@ -302,6 +358,11 @@ export function scoreCandidate(args: {
   if (mode === 'rewards' && (candidate.protocol !== 'up33' || !candidate.gaugeAlive || candidate.periodFinish <= now || !candidate.upUsd)) return []
   const lookback = chooseLookback(candidate, now)
   if (!lookback) return []
+  const prior = validRankPrior(candidate.poolRank)
+  const belowLvrFloor = prior !== null && prior.coverage < LVR_FLOOR
+  const aboveBaseline = prior !== null && prior.volDayUsd > 0
+    && lookback.hourlyVolumeUsd * 24 > prior.volDayUsd * VOLUME_BASELINE_MULTIPLE
+  const emitMismatch = mode === 'rewards' && prior !== null && emitAprMismatch(candidate, prior)
   const recentTicks = candidate.tickHistory.filter((row) => row.ts >= now - DAY)
   return RECOMMENDATION_BANDS.map((pct) => {
     const replay = replayRange(candidate, pct, recentTicks)
@@ -339,12 +400,19 @@ export function scoreCandidate(args: {
       ...(lookback.reason === 'slowing' ? ['volume_slowing'] : []),
       ...(cost.source === 'default' ? ['cost_default'] : []),
       ...(mode === 'rewards' ? ['reward_committed_until_period_finish'] : []),
+      // The rank prior never silently disappears: below the floor on a
+      // non-conservative profile it must stay visible as a warning, and a
+      // spike-priced projection advertises its own fragility.
+      ...(belowLvrFloor && risk !== 'conservative' ? ['below_lvr_floor'] : []),
+      ...(aboveBaseline ? ['volume_above_baseline'] : []),
+      ...(emitMismatch ? ['emit_apr_divergence'] : []),
     ]
     const gateReasons = [
       ...(replay.reopens > maxDailyReopens[risk] ? ['excessive_reopens' as const] : []),
       ...(replay.coverageHours < 20 ? ['insufficient_tick_history' as const] : []),
       ...(riskAdjustedNetUsd <= 0 ? ['non_positive_risk_adjusted_net' as const] : []),
       ...(!candidate.hasStableQuote ? ['unanchored_quote_risk' as const] : []),
+      ...(belowLvrFloor && risk === 'conservative' ? ['pool_below_lvr_floor' as const] : []),
     ]
     return {
       rank: 0,
@@ -388,6 +456,7 @@ export function scoreCandidate(args: {
       cost,
       gateReasons,
       warnings,
+      ...(prior ? { poolRank: prior } : {}),
     } satisfies RecommendationItem
   })
 }

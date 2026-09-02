@@ -154,7 +154,7 @@ function Shell() {
           {tab === 'strategy' && <StrategyTab />}
           {tab === 'strategy-history' && <StrategyHistoryTab />}
           {tab === 'pnl-calendar' && <PnlCalendarTab />}
-          {tab === 'pool-rank' && <PoolRankTab onOpenPool={() => setTab('pools')} />}
+          {tab === 'pool-rank' && <PoolRankTab onOpenPool={() => setTab('pools')} onOpenRecommendations={() => setTab('recommendations')} />}
         </Suspense>
       </div>
       <div className="footer">

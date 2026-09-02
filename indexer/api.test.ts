@@ -258,6 +258,139 @@ test('recommendation candidates expose fresh v3 state without changing the publi
   }
 });
 
+test('fresh rank snapshots ride on recommendation candidates; stale ones do not', { skip: CHAIN.key !== 'robinhood' }, () => {
+  const pool = address(0xd004);
+  store.insertPool({
+    address: pool,
+    proto: 'up33cl',
+    token0,
+    token1,
+    feePpm: 3_000,
+    unstakedFeePpm: 100_000,
+    tickSpacing: 60,
+  });
+  try {
+    store.upsertState(pool, {
+      sqrtPrice: 1n << 96n,
+      tick: 0,
+      liquidity: 1_000_000n,
+      reserve0: 1_000n,
+      reserve1: 1_000n,
+    });
+    store.setTvl(pool, 100_000, false);
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 100_000, 'test');
+
+    const rankRow = {
+      venue: 'up33-cl', pool: 'AAA/BBB', address: pool, feeBps: 30, tickSpacing: 60,
+      tvlUsd: 100_000, volDayUsd: 24_000, feeApr: 0.5, netFeeApr: 0.45,
+      sigmaDaily: 0.03, sigmaAnnual: 0.572, coverage: 1.2, stakedShare: 0.5,
+      emitApr: 0.1, volumePersistence: 1.1, daysActive: 40,
+    };
+    const secondsNow = Math.floor(Date.now() / 1_000);
+    const snapshot = (generatedAt: number) => JSON.stringify({
+      generatedAt, durationMs: 1_000, windowDays: 45, upPriceUsd: 1, rows: [rankRow], dropped: [],
+    });
+    const candidatesOf = () =>
+      api.getRecommendationCandidates(new URLSearchParams({ limit: '10' })).candidates;
+
+    store.kvSet('pool_rank_snapshot', snapshot(secondsNow));
+    const fresh = candidatesOf().find((row) => row.pool === pool);
+    assert.ok(fresh?.poolRank, 'a fresh snapshot must attach a prior');
+    assert.equal(fresh.poolRank.coverage, 1.2);
+    assert.equal(fresh.poolRank.volDayUsd, 24_000);
+    assert.equal(fresh.poolRank.emitApr, 0.1);
+    // pools the rank table never ranked carry no prior
+    const rankedAddresses = new Set([pool.toLowerCase()]);
+    const unranked = candidatesOf().find((row) => row.pool !== pool && !rankedAddresses.has(String(row.pool).toLowerCase()));
+    if (unranked) assert.equal(unranked.poolRank, undefined);
+
+    // older than two rank cycles: the prior stops being a prior
+    store.kvSet('pool_rank_snapshot', snapshot(secondsNow - 3 * 43_200));
+    const stale = candidatesOf().find((row) => row.pool === pool);
+    assert.equal(stale?.poolRank, undefined);
+  } finally {
+    store.kvSet('pool_rank_snapshot', '');
+    store.db.prepare('DELETE FROM pools WHERE address = ?').run(pool);
+  }
+});
+
+test('rank seeds give a high-coverage pool a second entry past the volume ordering', { skip: CHAIN.key !== 'robinhood' }, () => {
+  // A prices into the volume×fee/TVL top; B is deep and quiet — the ordering the
+  // main cohort uses buries it, and the coverage table is the only way in.
+  const topPool = address(0xd011);
+  const seedPool = address(0xd012);
+  for (const [pool, tvl] of [[topPool, 100_000], [seedPool, 1_000_000]] as const) {
+    store.insertPool({ address: pool, proto: 'up33cl', token0, token1, feePpm: 3_000, unstakedFeePpm: 100_000, tickSpacing: 60 });
+    store.upsertState(pool, { sqrtPrice: 1n << 96n, tick: 0, liquidity: 1_000_000n, reserve0: 1_000n, reserve1: 1_000n });
+    store.setTvl(pool, tvl, false);
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, tvl, 'test');
+  }
+  try {
+    const rankRow = (pool: string, coverage: number) => ({
+      venue: 'up33-cl', pool: 'AAA/BBB', address: pool, feeBps: 30, tickSpacing: 60,
+      tvlUsd: 100_000, volDayUsd: 24_000, feeApr: 0.5, netFeeApr: 0.45,
+      sigmaDaily: 0.03, sigmaAnnual: 0.572, coverage, stakedShare: null,
+      emitApr: null, volumePersistence: 1, daysActive: 40,
+    });
+    const secondsNow = Math.floor(Date.now() / 1_000);
+    store.kvSet('pool_rank_snapshot', JSON.stringify({
+      generatedAt: secondsNow, durationMs: 1_000, windowDays: 45, upPriceUsd: 1,
+      rows: [rankRow(topPool, 1.2), rankRow(seedPool, 3.0)], dropped: [],
+    }));
+
+    // limit=1: the volume cohort holds only the top pool, so the seed pool can
+    // only be present through the rank entry
+    const candidates = api.getRecommendationCandidates(new URLSearchParams({ limit: '1' })).candidates;
+    const seeded = candidates.find((row) => row.pool === seedPool);
+    assert.ok(seeded, 'rank seed must open a second entry');
+    assert.equal(seeded.rankSeeded, true);
+    assert.equal(seeded.poolRank?.coverage, 3.0);
+    const top = candidates.find((row) => row.pool === topPool);
+    assert.ok(top);
+    assert.equal(top.rankSeeded, undefined, 'a pool the volume cohort already took is not rank-seeded');
+
+    // stale snapshot: the seed entry closes and the pool leaves the universe
+    store.kvSet('pool_rank_snapshot', JSON.stringify({
+      generatedAt: secondsNow - 3 * 43_200, durationMs: 1_000, windowDays: 45, upPriceUsd: 1,
+      rows: [rankRow(topPool, 1.2), rankRow(seedPool, 3.0)], dropped: [],
+    }));
+    const staleCandidates = api.getRecommendationCandidates(new URLSearchParams({ limit: '1' })).candidates;
+    assert.equal(staleCandidates.some((row) => row.pool === seedPool), false);
+    assert.ok(staleCandidates.some((row) => row.pool === topPool));
+  } finally {
+    store.kvSet('pool_rank_snapshot', '');
+    store.db.prepare('DELETE FROM pools WHERE address = ?').run(topPool);
+    store.db.prepare('DELETE FROM pools WHERE address = ?').run(seedPool);
+  }
+});
+
+test('rankSeedIdentities caps at the coverage top, best first, and closes when stale', { skip: CHAIN.key !== 'robinhood' }, () => {
+  const secondsNow = Math.floor(Date.now() / 1_000);
+  const rankRow = (n: number, coverage: number) => ({
+    venue: 'univ3', pool: `P${n}`, address: address(0xee00 + n), feeBps: 30, tickSpacing: null,
+    tvlUsd: 100_000, volDayUsd: 24_000, feeApr: 0.5, netFeeApr: 0.5,
+    sigmaDaily: 0.03, sigmaAnnual: 0.572, coverage, stakedShare: null,
+    emitApr: null, volumePersistence: 1, daysActive: 40,
+  });
+  store.kvSet('pool_rank_snapshot', JSON.stringify({
+    generatedAt: secondsNow, durationMs: 1, windowDays: 45, upPriceUsd: 1,
+    rows: Array.from({ length: 25 }, (_, i) => rankRow(i, 1 + i)), dropped: [],
+  }));
+  const seeds = api.rankSeedIdentities();
+  assert.equal(seeds.length, 20);
+  assert.equal(seeds[0], address(0xee00 + 24));
+  assert.equal(seeds[19], address(0xee00 + 5));
+
+  store.kvSet('pool_rank_snapshot', JSON.stringify({
+    generatedAt: secondsNow - 3 * 43_200, durationMs: 1, windowDays: 45, upPriceUsd: 1,
+    rows: Array.from({ length: 25 }, (_, i) => rankRow(i, 1 + i)), dropped: [],
+  }));
+  assert.deepEqual(api.rankSeedIdentities(), []);
+
+  store.kvSet('pool_rank_snapshot', '');
+  assert.deepEqual(api.rankSeedIdentities(), []);
+});
+
 test('Robinhood recommendation candidates retain UP33 fee and reward identity', { skip: !CHAIN.gov }, () => {
   const pool = address(0xd002);
   store.insertPool({

@@ -7,6 +7,7 @@ export type RecommendationObservationReason =
   | 'insufficient_tick_history'
   | 'non_positive_risk_adjusted_net'
   | 'unanchored_quote_risk'
+  | 'pool_below_lvr_floor'
 
 export type RecommendationDisplayItem = {
   item: RecommendationItem
