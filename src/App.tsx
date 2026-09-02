@@ -27,6 +27,7 @@ const SwapTab = lazy(() => import('./components/tabs/SwapTab').then(({ SwapTab }
 const StrategyTab = lazy(() => import('./components/tabs/StrategyTab').then(({ StrategyTab }) => ({ default: StrategyTab })))
 const StrategyHistoryTab = lazy(() => import('./components/tabs/StrategyHistoryTab').then(({ StrategyHistoryTab }) => ({ default: StrategyHistoryTab })))
 const PnlCalendarTab = lazy(() => import('./components/tabs/PnlCalendarTab').then(({ PnlCalendarTab }) => ({ default: PnlCalendarTab })))
+const PoolRankTab = lazy(() => import('./components/tabs/PoolRankTab').then(({ PoolRankTab }) => ({ default: PoolRankTab })))
 
 export default function App() {
   if (location.pathname === '/status' || location.pathname.startsWith('/status/')) {
@@ -68,6 +69,7 @@ const KEYS: Record<string, TabId> = {
   '2': 'swap',
   '3': 'positions',
   ...(FEATURES.bridge ? { '5': 'bridge' as TabId } : {}),
+  '4': 'pool-rank',
   '6': 'strategy',
   '7': 'strategy-history',
   '8': 'pnl-calendar',
@@ -78,7 +80,8 @@ const validTab = (h: string): TabId | null => {
   if (h === 'limit') return 'swap' // LIMIT mode is a sub-view of the swap tab
   if (h === 'lab') return 'pools' // hidden component lab rides the pools slot
   if (h === 'bridge' && !FEATURES.bridge) return null
-  return (['pools', 'recommendations', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar'] as const).includes(h as TabId) ? (h as TabId) : null
+  if (h === 'pool-rank' && !FEATURES.poolRank) return null
+  return (['pools', 'recommendations', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar', 'pool-rank'] as const).includes(h as TabId) ? (h as TabId) : null
 }
 
 function Shell() {
@@ -151,6 +154,7 @@ function Shell() {
           {tab === 'strategy' && <StrategyTab />}
           {tab === 'strategy-history' && <StrategyHistoryTab />}
           {tab === 'pnl-calendar' && <PnlCalendarTab />}
+          {tab === 'pool-rank' && <PoolRankTab />}
         </Suspense>
       </div>
       <div className="footer">

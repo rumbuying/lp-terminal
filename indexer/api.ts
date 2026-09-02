@@ -33,6 +33,7 @@ import {
   BSC_UNI_V3_SUBGRAPH_DEPLOYMENT,
   BSC_UNI_V3_SUBGRAPH_ID,
 } from './v3Subgraph';
+import { getPoolRankApi } from './poolRank';
 import { SerializedResponseCache, type SerializedResponse } from './responseCache';
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8' };
@@ -3331,6 +3332,9 @@ export function createApiServer(): Server {
       } else if (url.pathname === '/api/recommendation-candidates') {
         body = getRecommendationCandidates(url.searchParams);
         cache = 'public, max-age=30';
+      } else if (url.pathname === '/api/pool-rank') {
+        body = getPoolRankApi();
+        cache = 'public, max-age=300';
       } else if (url.pathname === '/api/v4/positions') {
         body = getV4Positions(url.searchParams);
         cache = NO_STORE;

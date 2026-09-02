@@ -99,6 +99,10 @@ export const TUNE = {
   // One Graph request refreshes only the featured v4 landing set. The pinned
   // 162k-row identity directory is never re-downloaded on this cadence.
   v4StatsMs: envMs('V4_STATS_MS', 600_000),
+  // Pool ranking reference table. Half-day cadence on purpose: the table is a
+  // quality ranking, not a market feed, and each cycle spends ~30 paced
+  // GeckoTerminal OHLCV calls. Served from kv, so restarts keep the last table.
+  poolRankMs: envMs('POOL_RANK_MS', 43_200_000),
   // Proving where a token came from. A brisk cadence and a wide batch because
   // this is a BACKFILL that ends: every answer is recorded, so the candidate
   // set drains (387 tokens on the BSC catalog — two ticks) and the steady state

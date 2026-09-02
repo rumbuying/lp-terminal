@@ -51,6 +51,7 @@ import { backfillV4, ensureV4TokenMeta, refreshV4FeaturedStats, tailV4 } from '.
 import { backfillV4Rpc, tailV4Rpc } from './v4Rpc';
 import { tailV4Positions } from './v4Positions';
 import { syncUp33Cl } from './up33';
+import { POOL_RANK_ENABLED, runPoolRankCycle } from './poolRank';
 import { refreshRecommendationSamples } from './recommendation';
 
 /**
@@ -509,6 +510,23 @@ function startLoops(): void {
   // issuer, rather than present and answering "nobody" about everything.
   if (CHAIN.stockIssuers.length)
     loop('stock', TUNE.stockOriginMs, () => runStockOriginSweep(TUNE.stockOriginN).then(), false);
+  // Pool ranking reference table: fixed half-day cadence, off the RPC queue
+  // (its own budget is ~30 paced GT OHLCV calls plus two small multicalls).
+  // The first pass lands shortly after READY so a fresh deployment does not
+  // serve an empty ranking for half a day; a run that overlaps the boot's own
+  // work is harmless — the cycle guards itself against concurrent execution.
+  if (POOL_RANK_ENABLED) {
+    const cycle = async (): Promise<void> => {
+      try {
+        await runPoolRankCycle();
+      } catch (e) {
+        // runPoolRankCycle records its error in kv; log only.
+        log('[pool-rank] cycle failed:', safeError(e));
+      }
+    };
+    setTimeout(() => void cycle(), 120_000);
+    loop('pool-rank', TUNE.poolRankMs, cycle, false);
+  }
 }
 
 async function boot(): Promise<void> {

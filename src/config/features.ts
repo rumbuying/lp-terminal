@@ -76,4 +76,12 @@ export const FEATURES = {
    * truthfully exposed on BSC.
    */
   rangeOrders: CHAIN.gov !== null,
+  /**
+   * The POOL RANK reference tab. The ranking pipeline is pinned to Robinhood
+   * Chain's data sources — the UP33 Slipstream subgraph for CL day history,
+   * the UP33 gauge set for emissions, and this chain's GT v3 listing for the
+   * official Uniswap pools — so the flag opens only there until another chain
+   * has an equivalent pipeline, not merely an indexer.
+   */
+  poolRank: CHAIN.key === 'robinhood',
 } as const
