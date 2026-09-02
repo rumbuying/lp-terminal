@@ -185,7 +185,10 @@ export const robinhoodConfig: ChainConfig = {
   gasBuffer: 1_000_000_000_000_000n, // 0.001 ETH
   labels: { home: 'UP33', homeCl: 'UP33 CL', homeV2: 'UP33 v2' },
   week: 604800,
-  hasBridge: true,
+  // The route model exists and works, but the surface is disabled: this
+  // deployment never bridges. FEATURES.bridge hides the tab, the [5] key and
+  // the footer hint together — flip to true to bring the whole thing back.
+  hasBridge: false,
   solverUrl: 'https://lp-terminal.xyz/_chain/robinhood/solver',
   solverAllowanceTarget: '0x0000000000001fF3684f28c67538d4D072C22734' as Address,
   // Robinhood's own tokenized stocks — the assets this chain exists to carry.
