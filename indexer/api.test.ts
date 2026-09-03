@@ -417,16 +417,52 @@ test('candidate history and responses are cached; a clear restores freshness', (
     const futureTs = Math.floor(Date.now() / 1_000) + 120;
     store.upsertState(pool, { sqrtPrice: (1n << 96n) * 4n, tick: 13_863, liquidity: 1_000_000n, reserve0: 1_000n, reserve1: 1_000n });
     store.captureAddressTickSamples([pool], '456', futureTs);
-    const third = api.getRecommendationCandidatesCached(params);
-    const held = third.candidates.find((row) => row.pool === pool);
+    const held = JSON.parse(api.getRecommendationCandidatesCached(params))
+      .candidates.find((row: { pool: string }) => row.pool === pool);
     assert.ok(held);
     assert.equal(held.tickHistory.at(-1)?.tick, 0, 'memoized history does not tear mid-TTL');
 
     api.clearRecommendationCaches();
-    const fourth = api.getRecommendationCandidatesCached(params);
-    const fresh = fourth.candidates.find((row) => row.pool === pool);
+    const fresh = JSON.parse(api.getRecommendationCandidatesCached(params))
+      .candidates.find((row: { pool: string }) => row.pool === pool);
     assert.ok(fresh);
     assert.equal(fresh.tickHistory.at(-1)?.tick, 13_863, 'a clear drops the memo so the new sample shows');
+  } finally {
+    api.clearRecommendationCaches();
+    store.db.prepare('DELETE FROM pool_tick_samples WHERE pool = ?').run(pool);
+    store.db.prepare('DELETE FROM pools WHERE address = ?').run(pool);
+  }
+});
+
+test('the canonical snapshot builds in a worker thread and serves the route instantly', async () => {
+  api.clearRecommendationCaches();
+  const pool = address(0xd031);
+  store.insertPool({
+    address: pool,
+    proto: CHAIN.id === 56 ? 'pancakev3' : 'univ3',
+    token0,
+    token1,
+    feePpm: 3_000,
+    tickSpacing: 60,
+  });
+  try {
+    store.upsertState(pool, { sqrtPrice: 1n << 96n, tick: 0, liquidity: 1_000_000n, reserve0: 1_000n, reserve1: 1_000n });
+    store.setTvl(pool, 100_000, false);
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 100_000, 'test');
+    store.captureAddressTickSamples([pool], '123');
+
+    await api.refreshRecommendationSnapshotInBackground();
+    const canonical = api.getRecommendationCandidatesCached(
+      new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' }),
+    );
+    const parsed = JSON.parse(canonical);
+    assert.ok(Array.isArray(parsed.candidates));
+    assert.ok(parsed.candidates.some((row: { pool: string }) => row.pool === pool),
+      'the worker-built snapshot includes fresh pools');
+    // serving again is the same ready-made string — no recompute path
+    assert.equal(api.getRecommendationCandidatesCached(
+      new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' }),
+    ), canonical);
   } finally {
     api.clearRecommendationCaches();
     store.db.prepare('DELETE FROM pool_tick_samples WHERE pool = ?').run(pool);

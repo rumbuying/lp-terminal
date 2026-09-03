@@ -103,6 +103,12 @@ export const TUNE = {
   // quality ranking, not a market feed, and each cycle spends ~30 paced
   // GeckoTerminal OHLCV calls. Served from kv, so restarts keep the last table.
   poolRankMs: envMs('POOL_RANK_MS', 43_200_000),
+  // Recommendation candidates snapshot. The payload is computed OFF the API
+  // event loop in a worker thread and served as a ready-made body; the sync
+  // handler costs ~30s at steady state and used to freeze every endpoint
+  // behind it when it ran per-request. The executor re-scores on a 5-minute
+  // cache, so a 2-minute snapshot is strictly fresher than what it consumed.
+  recommendationCandidatesMs: envMs('RECOMMENDATION_CANDIDATES_MS', 120_000),
   // Proving where a token came from. A brisk cadence and a wide batch because
   // this is a BACKFILL that ends: every answer is recorded, so the candidate
   // set drains (387 tokens on the BSC catalog — two ticks) and the steady state

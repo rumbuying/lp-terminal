@@ -46,7 +46,7 @@ import {
   tx,
   v4PoolCount,
 } from './store';
-import { startApi } from './api';
+import { refreshRecommendationSnapshotInBackground, startApi } from './api';
 import { backfillV4, ensureV4TokenMeta, refreshV4FeaturedStats, tailV4 } from './v4Subgraph';
 import { backfillV4Rpc, tailV4Rpc } from './v4Rpc';
 import { tailV4Positions } from './v4Positions';
@@ -527,6 +527,16 @@ function startLoops(): void {
     setTimeout(() => void cycle(), 120_000);
     loop('pool-rank', TUNE.poolRankMs, cycle, false);
   }
+
+  // The candidates snapshot builds in a worker thread, so the API route only
+  // ever serves a ready-made body. First build shortly after boot (the API is
+  // already up — a canonical request landing before it seeds the snapshot
+  // falls back to one on-demand compute), then every 2 minutes.
+  setTimeout(() => {
+    refreshRecommendationSnapshotInBackground().catch((e) =>
+      log('[recommendation-snapshot] build failed:', safeError(e)));
+  }, 5_000);
+  loop('recommendation-candidates', TUNE.recommendationCandidatesMs, () => refreshRecommendationSnapshotInBackground(), false);
 }
 
 async function boot(): Promise<void> {

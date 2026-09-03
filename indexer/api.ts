@@ -5,7 +5,9 @@
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { performance } from 'node:perf_hooks';
+import { isMainThread, parentPort, workerData, Worker } from 'node:worker_threads';
 import { ADDR, CHAIN, INDEX_V2, PORT, TUNE, UNI, V4, log, now } from './config';
+import { safeError } from './rpc';
 import {
   db,
   enqueueHydrationDemand,
@@ -3095,28 +3097,36 @@ export function rankSeedIdentities(): string[] {
     .map((row) => row.address.toLowerCase());
 }
 
-// ── recommendation candidates: bounded caches ──────────────────────────────
-// The candidates handler is SYNCHRONOUS on the shared API event loop. One
-// uncached run costs O(candidates) range queries over the sample tables —
-// ~30s at steady-state data volume, minutes on a cold page cache — and FREEZES
-// every other endpoint for its duration: pool-rank, health and the catalog all
-// starve behind it, which is how the rank page ends up claiming no snapshot
-// exists while the recommender spins. Two bounded caches keep the loop free:
-//   history memo — per-pool market/tick history, the expensive part, 4min TTL.
-//   response cache — finished bodies, 60s TTL, the freshness the CDN is told.
-// History bounded at 4 minutes is honest: the executor re-scores on its own
-// 5-minute cache, so a fresher history never reached the model anyway — while
-// a 60s TTL would force a full recompute every minute and keep the event loop
-// half-blinded to the rest of the API.
+// ── recommendation candidates: off-loop snapshot + bounded caches ──────────
+// The candidates handler is SYNCHRONOUS, and at steady-state sample volume one
+// run costs ~30s of range queries (minutes on a cold page cache). On the API's
+// single event loop that froze EVERY endpoint for its duration — pool-rank and
+// health starved behind it, which surfaced to users as "no rank snapshot"
+// while the recommender spun forever. Two layers fix it:
+//
+//   snapshot (worker thread) — the canonical executor payload (limit=80,
+//     min_tvl=10000, min_volume=10000) is computed in a WORKER on a 2-minute
+//     cadence and stored as a ready-to-send string; the route never computes
+//     while one exists. node:sqlite opens a per-thread reader connection, so
+//     WAL keeps the worker concurrent with the main thread's writes.
+//   response cache (60s TTL) — non-canonical parameter combinations, which
+//     only internal callers use.
+//
+// The boot window falls back to one on-demand compute that seeds the snapshot.
 
-const RECOMMENDATION_HISTORY_TTL_MS = 240_000;
+const RECOMMENDATION_SNAPSHOT_WORKER_KIND = 'lp-terminal-recommendation-snapshot';
+const RECOMMENDATION_CANONICAL_PARAMS = new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' });
+const RECOMMENDATION_CANONICAL_KEY = '80|10000|10000';
+const RECOMMENDATION_HISTORY_TTL_MS = 60_000;
 const RECOMMENDATION_RESPONSE_TTL_MS = 60_000;
 const RECOMMENDATION_HISTORY_MEMO_CAP = 512;
 
 type RecommendationHistoryRow = Record<string, unknown>;
 type RecommendationHistory = { marketHistory: RecommendationHistoryRow[]; tickHistory: RecommendationHistoryRow[]; at: number };
 const recommendationHistoryMemo = new Map<string, RecommendationHistory>();
-const recommendationResponseCache = new Map<string, { at: number; body: ReturnType<typeof getRecommendationCandidates> }>();
+const recommendationResponseCache = new Map<string, { at: number; body: string }>();
+let recommendationSnapshot: { at: number; body: string } | null = null;
+let recommendationSnapshotWorkerRunning = false;
 
 const recommendationMarketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
     AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,
@@ -3153,14 +3163,53 @@ function recommendationHistoryFor(identity: string, timestamp: number): Recommen
   return entry;
 }
 
-/** Route entry: serves finished bodies for 60s so concurrent and repeated
- * polls cost one computation per TTL window instead of one per request. The
- * endpoint's parameter space is two knobs, so a small map is a complete key. */
-export function getRecommendationCandidatesCached(params: Params) {
+/** The canonical executor payload, built OFF the API event loop in a worker
+ * thread and stored as a ready-to-send string. Skips when a build is already
+ * in flight — overlapping runs would only contend for the same rows. */
+export function refreshRecommendationSnapshotInBackground(): Promise<void> {
+  if (recommendationSnapshotWorkerRunning) return Promise.resolve();
+  recommendationSnapshotWorkerRunning = true;
+  return new Promise((resolve, reject) => {
+    // Same tsx bootstrap as the reprice worker: a native module registers tsx
+    // first, then imports this TypeScript module, whose bottom half detects
+    // the worker kind, computes, and posts the ready-to-send body back.
+    const worker = new Worker(new URL('./tsxWorker.mjs', import.meta.url), {
+      workerData: { kind: RECOMMENDATION_SNAPSHOT_WORKER_KIND, entry: new URL('./api.ts', import.meta.url).href },
+    });
+    let settled = false;
+    worker.once('message', (message: { ok: true; body: string } | { ok: false; error: string }) => {
+      settled = true;
+      recommendationSnapshotWorkerRunning = false;
+      if (message.ok) {
+        recommendationSnapshot = { at: Date.now(), body: message.body };
+        resolve();
+      } else reject(new Error(message.error));
+    });
+    worker.once('error', (error) => {
+      if (!settled) { settled = true; recommendationSnapshotWorkerRunning = false; reject(error); }
+    });
+    worker.once('exit', (code) => {
+      if (!settled) { settled = true; recommendationSnapshotWorkerRunning = false; reject(new Error(`recommendation snapshot worker exited before publishing a result (code ${code})`)); }
+    });
+  });
+}
+
+/** Route entry: the canonical executor parameters are served from the
+ * worker-built snapshot (no compute on the request path); any other
+ * parameter combination computes on demand behind a 60s response cache. */
+export function getRecommendationCandidatesCached(params: Params): string {
   const key = `${params.get('limit') ?? ''}|${params.get('min_tvl') ?? ''}|${params.get('min_volume') ?? ''}`;
+  if (key === RECOMMENDATION_CANONICAL_KEY) {
+    if (recommendationSnapshot) return recommendationSnapshot.body;
+    // Boot window: the first canonical request pays one on-demand compute and
+    // seeds the snapshot, so everything behind it is instant.
+    const seeded = JSON.stringify(getRecommendationCandidates(params));
+    recommendationSnapshot = { at: Date.now(), body: seeded };
+    return seeded;
+  }
   const hit = recommendationResponseCache.get(key);
   if (hit && Date.now() - hit.at < RECOMMENDATION_RESPONSE_TTL_MS) return hit.body;
-  const body = getRecommendationCandidates(params);
+  const body = JSON.stringify(getRecommendationCandidates(params));
   recommendationResponseCache.set(key, { at: Date.now(), body });
   if (recommendationResponseCache.size > 16) recommendationResponseCache.clear();
   return body;
@@ -3168,8 +3217,9 @@ export function getRecommendationCandidatesCached(params: Params) {
 
 /** Test/operational hook; normal expiry is bounded and automatic. */
 export function clearRecommendationCaches(): void {
-  recommendationHistoryMemo.clear();
+  recommendationSnapshot = null;
   recommendationResponseCache.clear();
+  recommendationHistoryMemo.clear();
 }
 
 export function getRecommendationCandidates(params: Params) {
@@ -3466,8 +3516,10 @@ export function createApiServer(): Server {
         if (Date.now() - started > 500) log(`[api] slow ${url.pathname} ${Date.now() - started}ms`);
         return;
       } else if (url.pathname === '/api/recommendation-candidates') {
-        body = getRecommendationCandidatesCached(url.searchParams);
-        cache = 'public, max-age=60';
+        res.writeHead(200, { ...JSONH, 'cache-control': 'public, max-age=60' });
+        res.end(getRecommendationCandidatesCached(url.searchParams));
+        if (Date.now() - started > 500) log(`[api] slow ${url.pathname} ${Date.now() - started}ms`);
+        return;
       } else if (url.pathname === '/api/pool-rank') {
         body = getPoolRankApi();
         cache = 'public, max-age=300';
@@ -3511,4 +3563,17 @@ export function startApi(): Server {
   const srv = createApiServer();
   srv.listen(PORT, () => log(`[api] listening on :${PORT}`));
   return srv;
+}
+
+if (!isMainThread && (workerData as { kind?: string } | null)?.kind === RECOMMENDATION_SNAPSHOT_WORKER_KIND) {
+  // The tsxWorker bootstrap imported this module inside the worker thread:
+  // compute the whole payload HERE — off the API's event loop — and hand back
+  // the ready-to-send body. node:sqlite opens a per-thread reader connection,
+  // so WAL keeps this concurrent with the main thread's writes.
+  try {
+    const body = JSON.stringify(getRecommendationCandidates(RECOMMENDATION_CANONICAL_PARAMS));
+    parentPort!.postMessage({ ok: true, body });
+  } catch (e) {
+    parentPort!.postMessage({ ok: false, error: safeError(e) });
+  }
 }
