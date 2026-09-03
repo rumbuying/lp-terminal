@@ -463,6 +463,17 @@ test('the canonical snapshot builds in a worker thread and serves the route inst
     assert.equal(api.getRecommendationCandidatesCached(
       new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' }),
     ), canonical);
+
+    // with the snapshot cleared, the canonical route fails fast instead of
+    // computing inline — an inline compute on the shared event loop is the
+    // freeze this architecture exists to prevent
+    api.clearRecommendationCaches();
+    assert.throws(
+      () => api.getRecommendationCandidatesCached(
+        new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' }),
+      ),
+      /warming/,
+    );
   } finally {
     api.clearRecommendationCaches();
     store.db.prepare('DELETE FROM pool_tick_samples WHERE pool = ?').run(pool);

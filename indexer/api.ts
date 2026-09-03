@@ -3126,6 +3126,7 @@ type RecommendationHistory = { marketHistory: RecommendationHistoryRow[]; tickHi
 const recommendationHistoryMemo = new Map<string, RecommendationHistory>();
 const recommendationResponseCache = new Map<string, { at: number; body: string }>();
 let recommendationSnapshot: { at: number; body: string } | null = null;
+let recommendationSnapshotRequestedAt: number | null = null;
 let recommendationSnapshotWorkerRunning = false;
 
 const recommendationMarketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
@@ -3169,6 +3170,8 @@ function recommendationHistoryFor(identity: string, timestamp: number): Recommen
 export function refreshRecommendationSnapshotInBackground(): Promise<void> {
   if (recommendationSnapshotWorkerRunning) return Promise.resolve();
   recommendationSnapshotWorkerRunning = true;
+  if (recommendationSnapshotRequestedAt === null) recommendationSnapshotRequestedAt = Date.now();
+  const startedMs = Date.now();
   return new Promise((resolve, reject) => {
     // Same tsx bootstrap as the reprice worker: a native module registers tsx
     // first, then imports this TypeScript module, whose bottom half detects
@@ -3182,6 +3185,7 @@ export function refreshRecommendationSnapshotInBackground(): Promise<void> {
       recommendationSnapshotWorkerRunning = false;
       if (message.ok) {
         recommendationSnapshot = { at: Date.now(), body: message.body };
+        log(`[recommendation-snapshot] built in ${((Date.now() - startedMs) / 1000).toFixed(1)}s (${Math.round(message.body.length / 1024)}KB)`);
         resolve();
       } else reject(new Error(message.error));
     });
@@ -3195,20 +3199,27 @@ export function refreshRecommendationSnapshotInBackground(): Promise<void> {
 }
 
 /** Route entry: the canonical executor parameters are served from the
- * worker-built snapshot (no compute on the request path); any other
- * parameter combination computes on demand behind a 60s response cache. */
+ * worker-built snapshot — NO compute on the request path, ever. Before the
+ * first build lands the route fails fast with 503: a fallback compute here is
+ * exactly the event-loop freeze this whole section exists to prevent (an
+ * executor poll arrives seconds after a restart, blocks the loop for the
+ * compute's full duration, and every other endpoint starves behind it). The
+ * executor already treats a non-ok response as a transient warming error. */
 export function getRecommendationCandidatesCached(params: Params): string {
   const key = `${params.get('limit') ?? ''}|${params.get('min_tvl') ?? ''}|${params.get('min_volume') ?? ''}`;
   if (key === RECOMMENDATION_CANONICAL_KEY) {
-    if (recommendationSnapshot) return recommendationSnapshot.body;
-    // Boot window: the first canonical request pays one on-demand compute and
-    // seeds the snapshot, so everything behind it is instant.
-    const seeded = JSON.stringify(getRecommendationCandidates(params));
-    recommendationSnapshot = { at: Date.now(), body: seeded };
-    return seeded;
+    if (!recommendationSnapshot) {
+      const age = recommendationSnapshotRequestedAt === null
+        ? 'first build queued'
+        : `first build running for ${Math.round((Date.now() - recommendationSnapshotRequestedAt) / 1000)}s`;
+      throw new ApiCapacityError(`recommendation candidates snapshot is warming up (${age})`);
+    }
+    return recommendationSnapshot.body;
   }
   const hit = recommendationResponseCache.get(key);
   if (hit && Date.now() - hit.at < RECOMMENDATION_RESPONSE_TTL_MS) return hit.body;
+  // Non-canonical combinations are internal-only and rare; a bounded 60s
+  // response cache keeps even those from recomputing per request.
   const body = JSON.stringify(getRecommendationCandidates(params));
   recommendationResponseCache.set(key, { at: Date.now(), body });
   if (recommendationResponseCache.size > 16) recommendationResponseCache.clear();
