@@ -246,6 +246,8 @@ export function parseStrategyConfig(v: unknown): StrategyConfig {
       enabled: x.safeguards.enabled,
       minCrossingMinutes: optionalFinite(x.safeguards.minCrossingMinutes, 'minCrossingMinutes', 0, 10080),
       minNetAprPct: optionalFinite(x.safeguards.minNetAprPct, 'minNetAprPct', 0, 1_000_000),
+      minCycleFeeCoverage: optionalFinite(x.safeguards.minCycleFeeCoverage, 'minCycleFeeCoverage', 0, 100),
+      economicsHoldMinutes: optionalFinite(x.safeguards.economicsHoldMinutes, 'economicsHoldMinutes', 1, 1440),
       maxRebalancesPerDay: optionalFinite(x.safeguards.maxRebalancesPerDay, 'maxRebalancesPerDay', 1, 1000),
       maxConsecutiveLowerBreaks: optionalFinite(x.safeguards.maxConsecutiveLowerBreaks, 'maxConsecutiveLowerBreaks', 1, 1000),
       maxRiskAssetPct: optionalFinite(x.safeguards.maxRiskAssetPct, 'maxRiskAssetPct', 0, 100),

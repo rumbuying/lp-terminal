@@ -94,6 +94,10 @@ export type StrategyConfig = {
     enabled: boolean
     minCrossingMinutes?: number
     minNetAprPct?: number
+    /** Defer a boundary recenter while collectable fees are below this multiple of the last cycle's cost. 0/undefined disables the gate. */
+    minCycleFeeCoverage?: number
+    /** Maximum seconds a gated recenter may keep waiting before the escape executes it anyway. */
+    economicsHoldMinutes?: number
     maxRebalancesPerDay?: number
     maxConsecutiveLowerBreaks?: number
     maxRiskAssetPct?: number

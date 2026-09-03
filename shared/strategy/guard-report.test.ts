@@ -169,3 +169,39 @@ test('a guard wait with no violated condition falls back to the recheck loop', (
   assert.deepEqual(report.blocking, ['monitor_recheck'])
   assert.equal(report.conditions.find((c) => c.id === 'monitor_recheck')?.status, 'wait')
 })
+
+test('an active economics gate blocks with fees vs required cost and a countdown', () => {
+  const report = buildGuardReport(args({
+    recentCompletedCycles: 0,
+    marketStats: { count: 10, firstTs: NOW - 300, lastTs: NOW - 30, tick: 0, minTick: -10, maxTick: 10 },
+    economics: { waitUntil: NOW + 600, feesQuote: 1.97, costQuote: 1.79, coverage: 1 },
+  }))
+  const economics = report.conditions.find((c) => c.id === 'cycle_economics')
+  assert.equal(economics?.status, 'wait')
+  assert.equal(economics?.measured, 1.97)
+  assert.equal(economics?.threshold, 1.79)
+  assert.equal(economics?.remainingSeconds, 600)
+  assert.ok(report.blocking.includes('cycle_economics'))
+})
+
+test('a satisfied or expired economics gate reports pass without blocking', () => {
+  const report = buildGuardReport(args({
+    state: 'monitoring',
+    recentCompletedCycles: 0,
+    marketStats: { count: 10, firstTs: NOW - 300, lastTs: NOW - 30, tick: 0, minTick: -10, maxTick: 10 },
+    economics: { waitUntil: NOW - 5, feesQuote: 4, costQuote: 1.79, coverage: 1.25 },
+  }))
+  const economics = report.conditions.find((c) => c.id === 'cycle_economics')
+  assert.equal(economics?.status, 'pass')
+  assert.equal(economics?.threshold, 2.24)
+  assert.ok(!report.blocking.includes('cycle_economics'))
+})
+
+test('the economics condition is absent when the gate is not configured', () => {
+  const report = buildGuardReport(args({
+    state: 'monitoring',
+    recentCompletedCycles: 0,
+    marketStats: { count: 10, firstTs: NOW - 300, lastTs: NOW - 30, tick: 0, minTick: -10, maxTick: 10 },
+  }))
+  assert.equal(report.conditions.find((c) => c.id === 'cycle_economics'), undefined)
+})

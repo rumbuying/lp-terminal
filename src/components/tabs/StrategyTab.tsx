@@ -65,6 +65,8 @@ const PNL_CURVE_WINDOW_SECONDS = 30 * 24 * 60 * 60
 type SafeguardNumberKey = Exclude<keyof StrategyConfig['safeguards'], 'enabled' | 'minNetAprPct'>
 const SAFEGUARD_FIELDS = [
   { key: 'minCrossingMinutes', label: 'strategy.editor.minCrossingMinutes' },
+  { key: 'minCycleFeeCoverage', label: 'strategy.editor.minCycleFeeCoverage' },
+  { key: 'economicsHoldMinutes', label: 'strategy.editor.economicsHoldMinutes' },
   { key: 'maxRebalancesPerDay', label: 'strategy.editor.maxRebalancesPerDay' },
   { key: 'maxConsecutiveLowerBreaks', label: 'strategy.editor.maxConsecutiveLowerBreaks' },
   { key: 'maxRiskAssetPct', label: 'strategy.editor.maxRiskAssetPct' },

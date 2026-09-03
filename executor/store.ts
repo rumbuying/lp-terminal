@@ -249,6 +249,12 @@ if (!monitorColumns.some((column) => column.name === 'burst_wait_until'))
   db.exec('ALTER TABLE monitor_state ADD COLUMN burst_wait_until INTEGER')
 if (!monitorColumns.some((column) => column.name === 'burst_reset_at'))
   db.exec('ALTER TABLE monitor_state ADD COLUMN burst_reset_at INTEGER')
+if (!monitorColumns.some((column) => column.name === 'econ_wait_until'))
+  db.exec('ALTER TABLE monitor_state ADD COLUMN econ_wait_until INTEGER')
+if (!monitorColumns.some((column) => column.name === 'econ_fees_quote'))
+  db.exec('ALTER TABLE monitor_state ADD COLUMN econ_fees_quote TEXT')
+if (!monitorColumns.some((column) => column.name === 'econ_cost_quote'))
+  db.exec('ALTER TABLE monitor_state ADD COLUMN econ_cost_quote TEXT')
 const allocationComponentColumns = db.prepare('PRAGMA table_info(allocation_components)').all() as { name: string }[]
 if (!allocationComponentColumns.some((column) => column.name === 'held_profit_amount'))
   db.exec("ALTER TABLE allocation_components ADD COLUMN held_profit_amount TEXT NOT NULL DEFAULT '0'")
@@ -1029,13 +1035,19 @@ export type MonitorState = {
   guardStableSince?: number
   burstWaitUntil?: number
   burstResetAt?: number
+  /** Epoch second at which the economics gate stops deferring a recenter. */
+  econWaitUntil?: number
+  /** Collectable fees valued in quote units at the last gate check. */
+  econFeesQuote?: string
+  /** Last cycle's realized cost (gas + execution shortfall) in quote units. */
+  econCostQuote?: string
   lastTick?: number
   lastLiquidity?: string
   lastTokenId?: string
 }
 
 export function monitorState(strategyId: string): MonitorState | undefined {
-  const row = db.prepare('SELECT revision,out_side,out_since,cooldown_until,guard_reason,guard_stable_since,burst_wait_until,burst_reset_at,last_tick,last_liquidity,last_token_id FROM monitor_state WHERE strategy_id=?').get(strategyId) as any
+  const row = db.prepare('SELECT revision,out_side,out_since,cooldown_until,guard_reason,guard_stable_since,burst_wait_until,burst_reset_at,econ_wait_until,econ_fees_quote,econ_cost_quote,last_tick,last_liquidity,last_token_id FROM monitor_state WHERE strategy_id=?').get(strategyId) as any
   return row && {
     revision: row.revision,
     outSide: row.out_side ?? undefined,
@@ -1045,6 +1057,9 @@ export function monitorState(strategyId: string): MonitorState | undefined {
     guardStableSince: row.guard_stable_since ?? undefined,
     burstWaitUntil: row.burst_wait_until ?? undefined,
     burstResetAt: row.burst_reset_at ?? undefined,
+    econWaitUntil: row.econ_wait_until ?? undefined,
+    econFeesQuote: row.econ_fees_quote ?? undefined,
+    econCostQuote: row.econ_cost_quote ?? undefined,
     lastTick: row.last_tick ?? undefined,
     lastLiquidity: row.last_liquidity ?? undefined,
     lastTokenId: row.last_token_id ?? undefined,
@@ -1052,12 +1067,14 @@ export function monitorState(strategyId: string): MonitorState | undefined {
 }
 
 export function updateMonitorState(strategyId: string, state: MonitorState) {
-  db.prepare(`INSERT INTO monitor_state(strategy_id,revision,out_side,out_since,cooldown_until,guard_reason,guard_stable_since,burst_wait_until,burst_reset_at,last_tick,last_liquidity,last_token_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+  db.prepare(`INSERT INTO monitor_state(strategy_id,revision,out_side,out_since,cooldown_until,guard_reason,guard_stable_since,burst_wait_until,burst_reset_at,econ_wait_until,econ_fees_quote,econ_cost_quote,last_tick,last_liquidity,last_token_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(strategy_id) DO UPDATE SET revision=excluded.revision,out_side=excluded.out_side,out_since=excluded.out_since,cooldown_until=excluded.cooldown_until,
       guard_reason=excluded.guard_reason,guard_stable_since=excluded.guard_stable_since,burst_wait_until=excluded.burst_wait_until,burst_reset_at=excluded.burst_reset_at,
+      econ_wait_until=excluded.econ_wait_until,econ_fees_quote=excluded.econ_fees_quote,econ_cost_quote=excluded.econ_cost_quote,
       last_tick=excluded.last_tick,last_liquidity=excluded.last_liquidity,last_token_id=excluded.last_token_id,updated_at=excluded.updated_at`).run(
     strategyId, state.revision, state.outSide ?? null, state.outSince ?? null, state.cooldownUntil ?? null,
     state.guardReason ?? null, state.guardStableSince ?? null, state.burstWaitUntil ?? null, state.burstResetAt ?? null,
+    state.econWaitUntil ?? null, state.econFeesQuote ?? null, state.econCostQuote ?? null,
     state.lastTick ?? null, state.lastLiquidity ?? null, state.lastTokenId ?? null, ts(),
   )
 }

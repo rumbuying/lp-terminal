@@ -4,11 +4,12 @@ import { StrategyError } from '../shared/strategy/errors'
 import { rangeSide } from '../shared/strategy/range'
 import { decideBoundaryTrigger } from '../shared/strategy/trigger'
 import { evaluateMarketQuality, shouldStartBurstWait } from '../shared/strategy/market-guard'
+import { decideCycleEconomics } from '../shared/strategy/economics-gate'
 import { evaluateAdaptiveRangeStability, nextAdaptiveRangeScale, shouldContractAdaptiveRange, shouldWidenAdaptiveRange } from '../shared/strategy/adaptive-range'
 import { publicClient, readCollectableFees, readMonitorSnapshots, readStrategySnapshot } from './chain'
 import { EXECUTOR } from './config'
 import { quoteTurnover } from './risk'
-import { strategyPerformance } from './performance'
+import { strategyPerformance, cachedStrategyPerformance } from './performance'
 import {
   audit,
   completedCyclesSince,
@@ -57,6 +58,18 @@ async function adaptiveEconomics(config: Parameters<typeof readStrategySnapshot>
   }
 }
 
+/** Value raw token amounts in the strategy quote token using pool spot math. */
+function quoteValueInQuote(amount0: bigint, amount1: bigint, config: Parameters<typeof readStrategySnapshot>[0], snapshot: Awaited<ReturnType<typeof readStrategySnapshot>>): bigint {
+  const low0 = low(snapshot.token0)
+  const quoteValue = (low0 === low(config.quoteToken)
+    ? amount0
+    : quoteTurnover(amount0, snapshot.token0, config, snapshot, BigInt(snapshot.sqrtPriceX96)))
+  const low1 = low(snapshot.token1)
+  return quoteValue + (low1 === low(config.quoteToken)
+    ? amount1
+    : quoteTurnover(amount1, snapshot.token1, config, snapshot, BigInt(snapshot.sqrtPriceX96)))
+}
+
 async function feeCollectionDue(config: Parameters<typeof readStrategySnapshot>[0], snapshot: Awaited<ReturnType<typeof readStrategySnapshot>>, now: number) {
   if (config.fees.timing === 'on_rebalance' || config.fees.handling === 'reinvest') return false
   const fees = await readCollectableFees(config)
@@ -66,13 +79,24 @@ async function feeCollectionDue(config: Parameters<typeof readStrategySnapshot>[
     return now - last >= (config.fees.intervalMinutes ?? 0) * 60
   }
   const quoteDecimals = low(config.quoteToken) === low(snapshot.token0) ? snapshot.token0Decimals : snapshot.token1Decimals
-  const quoteValue = (low(snapshot.token0) === low(config.quoteToken)
-    ? fees.amount0
-    : quoteTurnover(fees.amount0, snapshot.token0, config, snapshot, BigInt(snapshot.sqrtPriceX96))) +
-    (low(snapshot.token1) === low(config.quoteToken)
-      ? fees.amount1
-      : quoteTurnover(fees.amount1, snapshot.token1, config, snapshot, BigInt(snapshot.sqrtPriceX96)))
-  return quoteValue >= parseUnits(config.fees.thresholdQuote!, quoteDecimals)
+  return quoteValueInQuote(fees.amount0, fees.amount1, config, snapshot) >= parseUnits(config.fees.thresholdQuote!, quoteDecimals)
+}
+
+/**
+ * Realized cost of the last completed cycle (gas + execution shortfall) in
+ * quote units — the same numbers the dashboard shows for that cycle. Uses the
+ * cached valuation: a gate wait re-checks every poll and must stay cheap.
+ * Undefined on any failure so the gate fails open.
+ */
+async function latestCycleCostQuote(config: Parameters<typeof readStrategySnapshot>[0], state: string): Promise<bigint | undefined> {
+  try {
+    const performance = await cachedStrategyPerformance(config, state)
+    const latest = performance.cycles?.[0]
+    if (!latest) return undefined
+    return BigInt(latest.gasCostQuoteRaw) + BigInt(latest.executionCostQuoteRaw)
+  } catch {
+    return undefined
+  }
 }
 
 /** One global, non-overlapping monitor pass. It creates plans; the runner owns signing. */
@@ -143,6 +167,13 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
         const positionStartedAt = latestRange?.completedAt ?? strategyBaseline(config.id)?.observedAt ?? config.createdAt
         const reset = !previous || previous.revision !== config.revision || previous.lastTokenId !== snapshot.tokenId
         const outSince = side === 'in' ? undefined : reset || previous.outSide !== side ? now : previous.outSince ?? now
+        // The economics gate's wait outlives a single pass; every interim state
+        // write must carry it until the gate itself resolves it.
+        const econCarry = {
+          econWaitUntil: previous?.econWaitUntil,
+          econFeesQuote: previous?.econFeesQuote,
+          econCostQuote: previous?.econCostQuote,
+        }
 
         const volatilityWindowSeconds = config.safeguards.enabled ? config.safeguards.volatilityWindowSeconds : undefined
         if (volatilityWindowSeconds && (config.safeguards.maxVolatilityBps !== undefined || config.safeguards.maxSpotTwapDeviationBps !== undefined)) {
@@ -153,6 +184,7 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
               guardReason: previous?.guardReason,
               outSide: side === 'in' ? undefined : side,
               outSince,
+              ...econCarry,
               lastTick: snapshot.tick,
               lastLiquidity: snapshot.liquidity,
               lastTokenId: snapshot.tokenId,
@@ -177,6 +209,7 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
               outSince,
               burstWaitUntil: previous?.burstWaitUntil,
               burstResetAt: previous?.burstResetAt,
+              ...econCarry,
               lastTick: snapshot.tick,
               lastLiquidity: snapshot.liquidity,
               lastTokenId: snapshot.tokenId,
@@ -200,6 +233,7 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
                 outSince,
                 burstWaitUntil: previous.burstWaitUntil,
                 burstResetAt: previous.burstResetAt,
+                ...econCarry,
                 lastTick: snapshot.tick,
                 lastLiquidity: snapshot.liquidity,
                 lastTokenId: snapshot.tokenId,
@@ -280,6 +314,7 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
         if (side === 'in' && await feeCollectionDue(config, snapshot, now)) {
           updateMonitorState(config.id, {
             revision: config.revision,
+            ...econCarry,
             lastTick: snapshot.tick,
             lastLiquidity: snapshot.liquidity,
             lastTokenId: snapshot.tokenId,
@@ -311,17 +346,52 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
           cooldownUntil,
           burstWaitUntil: previous?.burstWaitUntil,
           burstResetAt: previous?.burstResetAt,
+          ...econCarry,
           lastTick: snapshot.tick,
           lastLiquidity: snapshot.liquidity,
           lastTokenId: snapshot.tokenId,
         })
         if (decision.kind === 'none') {
           clearStrategyRetry(config.id)
+          // Back in range: the pending recenter (if any) is moot, so drop the
+          // economics wait instead of letting it linger until expiry.
+          if (previous?.econWaitUntil) {
+            updateMonitorState(config.id, {
+              revision: config.revision,
+              outSide: side === 'in' ? undefined : side,
+              outSince,
+              cooldownUntil,
+              burstWaitUntil: previous.burstWaitUntil,
+              burstResetAt: previous.burstResetAt,
+              econWaitUntil: undefined,
+              econFeesQuote: undefined,
+              econCostQuote: undefined,
+              lastTick: snapshot.tick,
+              lastLiquidity: snapshot.liquidity,
+              lastTokenId: snapshot.tokenId,
+            })
+          }
           setStrategyState(config.id, (previous?.burstWaitUntil ?? 0) > now ? 'guard_wait' : 'monitoring')
           continue
         }
         if (decision.kind === 'pause') {
           const state = decision.detail?.reason === 'manual_confirm' ? 'awaiting_manual' : 'paused_guard'
+          if (previous?.econWaitUntil) {
+            updateMonitorState(config.id, {
+              revision: config.revision,
+              outSide: side === 'in' ? undefined : side,
+              outSince,
+              cooldownUntil,
+              burstWaitUntil: previous.burstWaitUntil,
+              burstResetAt: previous.burstResetAt,
+              econWaitUntil: undefined,
+              econFeesQuote: undefined,
+              econCostQuote: undefined,
+              lastTick: snapshot.tick,
+              lastLiquidity: snapshot.liquidity,
+              lastTokenId: snapshot.tokenId,
+            })
+          }
           setStrategyState(config.id, state)
           audit('monitor', 'strategy_paused', 'strategy', config.id, { code: decision.code, detail: decision.detail ?? {} })
           continue
@@ -342,6 +412,7 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
               cooldownUntil,
               burstWaitUntil: previous!.burstWaitUntil,
               burstResetAt: previous?.burstResetAt,
+              ...econCarry,
               lastTick: snapshot.tick,
               lastLiquidity: snapshot.liquidity,
               lastTokenId: snapshot.tokenId,
@@ -361,6 +432,7 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
               cooldownUntil,
               burstWaitUntil: waitUntil,
               burstResetAt: waitUntil,
+              ...econCarry,
               lastTick: snapshot.tick,
               lastLiquidity: snapshot.liquidity,
               lastTokenId: snapshot.tokenId,
@@ -372,6 +444,83 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
               waitUntil,
             })
             continue
+          }
+        }
+        // Per-cycle economics gate: a recenter whose collectable fees do not
+        // cover its expected cost (last cycle's realized gas + execution
+        // shortfall) is churn. Defer it while the edge is thin, surface the
+        // wait through monitor state, and let the hold escape execute it once
+        // staying out of range costs more than the recenter. `hold_quote` and
+        // `manual_confirm` paths are protective or explicitly human — never
+        // gated. Every failure inside fails open toward execution.
+        const gateActive = decision.action !== 'hold_quote'
+          && config.safeguards.enabled
+          && (config.safeguards.minCycleFeeCoverage ?? 0) > 0
+        if (gateActive) {
+          const coverage = config.safeguards.minCycleFeeCoverage!
+          const escapeSeconds = (config.safeguards.economicsHoldMinutes ?? 30) * 60
+          const [fees, cost] = await Promise.all([
+            readCollectableFees(config).then((collectable) => quoteValueInQuote(collectable.amount0, collectable.amount1, config, snapshot)),
+            latestCycleCostQuote(config, strategyState),
+          ])
+          const verdict = decideCycleEconomics({
+            now,
+            outSince,
+            collectableFeesQuoteRaw: fees,
+            lastCycleCostQuoteRaw: cost,
+            minCycleFeeCoverage: coverage,
+            economicsHoldSeconds: escapeSeconds,
+          })
+          const previouslyWaiting = (previous?.econWaitUntil ?? 0) > now
+          if (verdict.kind === 'wait') {
+            updateMonitorState(config.id, {
+              revision: config.revision,
+              outSide: side === 'in' ? undefined : side,
+              outSince,
+              cooldownUntil,
+              burstWaitUntil: previous?.burstWaitUntil,
+              burstResetAt: previous?.burstResetAt,
+              econWaitUntil: verdict.waitUntil,
+              econFeesQuote: verdict.feesQuoteRaw.toString(),
+              econCostQuote: verdict.costQuoteRaw.toString(),
+              lastTick: snapshot.tick,
+              lastLiquidity: snapshot.liquidity,
+              lastTokenId: snapshot.tokenId,
+            })
+            setStrategyState(config.id, 'guard_wait')
+            if (!previouslyWaiting) audit('monitor', 'economics_gate_wait', 'strategy', config.id, {
+              feesQuoteRaw: verdict.feesQuoteRaw.toString(),
+              costQuoteRaw: verdict.costQuoteRaw.toString(),
+              coverage,
+              holdSeconds: escapeSeconds,
+              waitUntil: verdict.waitUntil,
+            })
+            continue
+          }
+          if (previouslyWaiting || previous?.econWaitUntil) {
+            const waitedUntil = previous?.econWaitUntil
+            // Expired wait = the escape fired; fees catching up before expiry
+            // is the ordinary edge-appeared pass.
+            const escaped = waitedUntil !== undefined && waitedUntil <= now
+            updateMonitorState(config.id, {
+              revision: config.revision,
+              outSide: side === 'in' ? undefined : side,
+              outSince,
+              cooldownUntil,
+              burstWaitUntil: previous?.burstWaitUntil,
+              burstResetAt: previous?.burstResetAt,
+              econWaitUntil: undefined,
+              econFeesQuote: undefined,
+              econCostQuote: undefined,
+              lastTick: snapshot.tick,
+              lastLiquidity: snapshot.liquidity,
+              lastTokenId: snapshot.tokenId,
+            })
+            audit('monitor', 'economics_gate_pass', 'strategy', config.id, {
+              escaped,
+              feesQuoteRaw: fees.toString(),
+              costQuoteRaw: cost?.toString() ?? null,
+            })
           }
         }
         // The age of an imported/pre-existing NFT is not known reliably. Its

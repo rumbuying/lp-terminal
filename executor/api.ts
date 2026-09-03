@@ -68,6 +68,15 @@ const guardReportFor = (config: StrategyConfig, state: string): GuardReport => {
   const burstSince = burstConfigured
     ? Math.max(now - (config.safeguards.burstWindowMinutes ?? 0) * 60, ms?.burstResetAt ?? 0)
     : 0
+  // Human quote units for the economics gate readout; raw bigint precision is
+  // only needed for the monitor's own decision, not this display.
+  const quoteDecimals = EXECUTOR.network.settlementDecimals
+  const humanQuote = (raw: string | undefined) => {
+    if (raw === undefined) return undefined
+    const value = Number(raw) / 10 ** quoteDecimals
+    return Number.isFinite(value) ? Math.round(value * 10_000) / 10_000 : undefined
+  }
+  const gateCoverage = config.safeguards.enabled ? config.safeguards.minCycleFeeCoverage : undefined
   return buildGuardReport({
     state,
     now,
@@ -84,6 +93,14 @@ const guardReportFor = (config: StrategyConfig, state: string): GuardReport => {
     marketStats,
     recentCompletedCycles: burstConfigured ? completedCyclesSince(config.id, burstSince) : undefined,
     pause: state === 'paused_guard' || state === 'awaiting_manual' ? latestStrategyPause(config.id) : undefined,
+    economics: gateCoverage && gateCoverage > 0
+      ? {
+          waitUntil: ms?.econWaitUntil ?? 0,
+          feesQuote: humanQuote(ms?.econFeesQuote),
+          costQuote: humanQuote(ms?.econCostQuote),
+          coverage: gateCoverage,
+        }
+      : undefined,
   })
 }
 

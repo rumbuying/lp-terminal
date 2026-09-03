@@ -20,6 +20,7 @@ export type GuardConditionId =
   | 'apr_available'
   | 'manual_confirm'
   | 'monitor_recheck'
+  | 'cycle_economics'
 
 export type GuardConditionStatus = 'pass' | 'fail' | 'wait'
 
@@ -86,6 +87,16 @@ export function buildGuardReport(args: {
   marketStats?: GuardMarketStats
   recentCompletedCycles?: number
   pause?: GuardPauseInfo
+  /** Present when the per-cycle economics gate is configured for the strategy. */
+  economics?: {
+    /** Epoch second at which a pending gate wait ends; 0 when not waiting. */
+    waitUntil: number
+    /** Collectable fees at the last gate check, human quote units. */
+    feesQuote?: number
+    /** Last cycle's realized cost, human quote units. */
+    costQuote?: number
+    coverage: number
+  }
 }): GuardReport {
   const waiting = WAITING_STATES.has(args.state)
   const needsManualResume = args.state === 'paused_guard' || args.state === 'awaiting_manual'
@@ -184,6 +195,26 @@ export function buildGuardReport(args: {
       waitUntil: args.cooldownUntil,
       remainingSeconds: args.cooldownUntil - args.now,
     })
+  }
+
+  if (args.economics && args.economics.coverage > 0) {
+    const waiting = args.economics.waitUntil > args.now
+    const required = args.economics.costQuote !== undefined
+      ? args.economics.costQuote * args.economics.coverage
+      : undefined
+    if (waiting) {
+      blocking.add('cycle_economics')
+      conditions.push({
+        id: 'cycle_economics',
+        status: 'wait',
+        measured: args.economics.feesQuote,
+        threshold: required !== undefined ? Math.round(required * 100) / 100 : undefined,
+        waitUntil: args.economics.waitUntil,
+        remainingSeconds: args.economics.waitUntil - args.now,
+      })
+    } else {
+      conditions.push({ id: 'cycle_economics', status: 'pass', measured: args.economics.feesQuote, threshold: required !== undefined ? Math.round(required * 100) / 100 : undefined })
+    }
   }
 
   if (args.outSide && args.outSince && args.confirmationSeconds > 0) {

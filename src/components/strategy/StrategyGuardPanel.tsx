@@ -29,6 +29,7 @@ const conditionLabel = (c: GuardCondition, t: Translate) => {
     case 'apr_available': return t('strategy.guardCondAprAvailable')
     case 'manual_confirm': return t('strategy.guardCondManualConfirm')
     case 'monitor_recheck': return t('strategy.guardCondMonitorRecheck')
+    case 'cycle_economics': return t('strategy.guardCondCycleEconomics', { threshold: c.threshold ?? '?' })
     default: return c.id
   }
 }
@@ -63,6 +64,12 @@ const conditionValue = (c: GuardCondition, remaining: number | undefined, now: n
       return t('strategy.guardValueAprUnavailable')
     case 'manual_confirm':
       return t('strategy.guardValueManualConfirm')
+    case 'cycle_economics': {
+      const base = c.measured === undefined
+        ? t('strategy.guardValueUnevaluated')
+        : t('strategy.guardValueCycleEconomics', { measured: c.measured, threshold: c.threshold ?? '?' })
+      return c.status === 'wait' && remaining !== undefined && remaining > 0 ? `${base} · ${t('strategy.guardValueRemaining', { time: clock(remaining) })}` : base
+    }
     default:
       return ''
   }
