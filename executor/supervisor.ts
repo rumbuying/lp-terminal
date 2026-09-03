@@ -38,7 +38,7 @@ export async function superviseOnce() {
         const code = error instanceof Error ? error.message.slice(0, 120) : 'E_RECOVERY'
         const retry = scheduleRecoveryRetry(job.id, code, !isTransientRecoveryFailure(error))
         audit('supervisor', retry.quarantined ? 'strategy_recovery_quarantined' : 'strategy_recovery_retry_scheduled', 'strategy', job.strategy_id, {
-          jobId: job.id, code, delayMs: retry.delayMs, attempts: retry.attempts, streak: retry.streak,
+          jobId: job.id, code, delayMs: retry.delayMs, attempts: retry.attempts, streak: retry.streak, failStreak: retry.failStreak,
         })
       }
     }))

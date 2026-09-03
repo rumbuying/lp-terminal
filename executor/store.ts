@@ -272,6 +272,8 @@ if (!jobColumns.some((column) => column.name === 'recovery_next_at'))
   db.exec('ALTER TABLE jobs ADD COLUMN recovery_next_at INTEGER')
 if (!jobColumns.some((column) => column.name === 'recovery_quarantined_at'))
   db.exec('ALTER TABLE jobs ADD COLUMN recovery_quarantined_at INTEGER')
+if (!jobColumns.some((column) => column.name === 'recovery_fail_streak'))
+  db.exec('ALTER TABLE jobs ADD COLUMN recovery_fail_streak INTEGER NOT NULL DEFAULT 0')
 db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
 
 const ts = () => Math.floor(Date.now() / 1000)
@@ -643,8 +645,8 @@ export function failProfitWithdrawalJob(jobId: string, code: string) {
   const confirmedMutation = db.prepare(`SELECT 1 FROM job_steps WHERE job_id=? AND kind IN ('profit_swap','profit_unwrap') AND state='confirmed' LIMIT 1`).get(jobId)
   const state = unfinished || confirmedMutation ? 'recovery' : 'failed'
   const now = ts()
-  db.prepare(`UPDATE jobs SET state=?,updated_at=?,recovery_last_error=? WHERE id=?`).run(state, now, code, jobId)
-  db.prepare(`UPDATE job_steps SET state='failed',error_code=? WHERE job_id=? AND state='pending'`).run(code, jobId)
+  db.prepare(`UPDATE jobs SET state=?,updated_at=?,recovery_last_error=? WHERE id=?`).run(state, now, redactUrls(code), jobId)
+  db.prepare(`UPDATE job_steps SET state='failed',error_code=? WHERE job_id=? AND state='pending'`).run(redactUrls(code), jobId)
   if (state === 'recovery') db.prepare(`UPDATE strategies SET state='recovery',updated_at=? WHERE id=(SELECT strategy_id FROM jobs WHERE id=?)`).run(now, jobId)
   return state as 'recovery' | 'failed'
 }
@@ -655,7 +657,7 @@ export function abandonProfitWithdrawalJob(jobId: string, code = 'E_PROFIT_WITHD
   try {
     const row = db.prepare(`SELECT strategy_id FROM jobs WHERE id=? AND state IN ('running','recovery')`).get(jobId) as { strategy_id: string } | undefined
     if (!row) throw new Error('E_PROFIT_WITHDRAWAL_JOB')
-    db.prepare(`UPDATE jobs SET state='failed',updated_at=?,recovery_last_error=?,recovery_next_at=NULL,recovery_quarantined_at=NULL WHERE id=?`).run(now, code, jobId)
+    db.prepare(`UPDATE jobs SET state='failed',updated_at=?,recovery_last_error=?,recovery_next_at=NULL,recovery_quarantined_at=NULL WHERE id=?`).run(now, redactUrls(code), jobId)
     db.prepare(`UPDATE strategies SET state='monitoring',updated_at=? WHERE id=? AND state IN ('executing','recovery','recovery_quarantined')`).run(now, row.strategy_id)
     db.exec('COMMIT')
   } catch (error) {
@@ -1267,32 +1269,54 @@ export function recoveryAttemptReady(jobId: string, now = ts()): boolean {
 }
 
 export function clearRecoverySchedule(jobId: string) {
-  db.prepare(`UPDATE jobs SET recovery_attempts=0,recovery_error_streak=0,recovery_last_error=NULL,recovery_next_at=NULL,recovery_quarantined_at=NULL
+  db.prepare(`UPDATE jobs SET recovery_attempts=0,recovery_error_streak=0,recovery_fail_streak=0,recovery_last_error=NULL,recovery_next_at=NULL,recovery_quarantined_at=NULL
     WHERE id=?`).run(jobId)
+}
+
+export type RecoveryRetryPrev = { attempts: number; errorStreak: number; failStreak: number; lastError: string | null }
+export type RecoveryRetryNext = { attempts: number; streak: number; failStreak: number; delaySeconds: number; quarantined: boolean }
+
+/**
+ * Pure retry policy. `quarantineEligible` marks an execution-grade failure
+ * (revert, context error …) as opposed to provider noise. Execution failures
+ * accumulate across alternating error texts — a job that alternates
+ * E_TX_REVERTED with a receipt timeout is failing every attempt and must
+ * reach quarantine. Provider noise never accumulates and never quarantines
+ * by itself, and it does not reset the execution-failure count either.
+ */
+export function nextRecoveryRetryState(prev: RecoveryRetryPrev, code: string, quarantineEligible: boolean): RecoveryRetryNext {
+  const attempts = prev.attempts + 1
+  const streak = prev.lastError === code ? prev.errorStreak + 1 : 1
+  const failStreak = quarantineEligible ? prev.failStreak + 1 : prev.failStreak
+  const delaySeconds = Math.min(300, 5 * (2 ** Math.min(attempts - 1, 6)))
+  const quarantined = (quarantineEligible && streak >= 3) || failStreak >= 3
+  return { attempts, streak, failStreak, delaySeconds, quarantined }
 }
 
 export function scheduleRecoveryRetry(jobId: string, code: string, quarantineEligible: boolean) {
   const now = ts()
-  const row = db.prepare(`SELECT strategy_id,recovery_attempts,recovery_error_streak,recovery_last_error FROM jobs WHERE id=? AND state='recovery'`).get(jobId) as {
-    strategy_id: string; recovery_attempts: number; recovery_error_streak: number; recovery_last_error: string | null
+  const row = db.prepare(`SELECT strategy_id,recovery_attempts,recovery_error_streak,recovery_fail_streak,recovery_last_error FROM jobs WHERE id=? AND state='recovery'`).get(jobId) as {
+    strategy_id: string; recovery_attempts: number; recovery_error_streak: number; recovery_fail_streak: number; recovery_last_error: string | null
   } | undefined
   if (!row) throw new Error('E_RECOVERY_JOB')
-  const attempts = Number(row.recovery_attempts) + 1
-  const streak = row.recovery_last_error === code ? Number(row.recovery_error_streak) + 1 : 1
-  const delaySeconds = Math.min(300, 5 * (2 ** Math.min(attempts - 1, 6)))
-  const quarantined = quarantineEligible && streak >= 3
+  const next = nextRecoveryRetryState(
+    { attempts: Number(row.recovery_attempts), errorStreak: Number(row.recovery_error_streak), failStreak: Number(row.recovery_fail_streak ?? 0), lastError: row.recovery_last_error },
+    code,
+    quarantineEligible,
+  )
+  const storedCode = redactUrls(code)
   db.exec('BEGIN IMMEDIATE')
   try {
-    db.prepare(`UPDATE jobs SET recovery_attempts=?,recovery_error_streak=?,recovery_last_error=?,recovery_next_at=?,recovery_quarantined_at=?,updated_at=? WHERE id=?`).run(
-      attempts, streak, code, now + delaySeconds, quarantined ? now : null, now, jobId,
+    db.prepare(`UPDATE jobs SET recovery_attempts=?,recovery_error_streak=?,recovery_fail_streak=?,recovery_last_error=?,recovery_next_at=?,recovery_quarantined_at=?,updated_at=? WHERE id=?`).run(
+      next.attempts, next.streak, next.failStreak, storedCode, now + next.delaySeconds, next.quarantined ? now : null, now, jobId,
     )
-    if (quarantined) db.prepare(`UPDATE strategies SET state='recovery_quarantined',updated_at=? WHERE id=?`).run(now, row.strategy_id)
+    if (next.quarantined) db.prepare(`UPDATE strategies SET state='recovery_quarantined',updated_at=? WHERE id=?`).run(now, row.strategy_id)
     db.exec('COMMIT')
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
   }
-  return { attempts, streak, delayMs: delaySeconds * 1_000, quarantined }
+  return { attempts: next.attempts, streak: next.streak, failStreak: next.failStreak, delayMs: next.delaySeconds * 1_000, quarantined: next.quarantined }
 }
 
 /** Allow one operator-requested attempt without discarding any chain facts. */
@@ -1425,5 +1449,15 @@ export function latestJobSummary(strategyId: string): LatestJobSummary | undefin
     recoveryQuarantinedAt: row.recovery_quarantined_at ?? undefined,
   }
 }
+/** Provider errors embed credentialed endpoints (…/v2/<key>) in their message
+ * text; audit rows and recovery error columns must never store them verbatim.
+ * The host stays visible for diagnosis — secrets live in the path/query. */
+const CREDENTIALED_URL = /https?:\/\/[^\s"'\\]+/g
+export const redactUrls = (text: string) => text.replace(CREDENTIALED_URL, (url) => {
+  const pathStart = url.indexOf('/', url.indexOf('://') + 3)
+  if (pathStart === -1) return url
+  return `${url.slice(0, pathStart)}/[redacted]`
+})
+
 export const audit = (actor: string, action: string, targetType?: string, targetId?: string, detail: Record<string, unknown> = {}) =>
-  void db.prepare('INSERT INTO audit_events(ts,actor,action,target_type,target_id,detail_json) VALUES(?,?,?,?,?,?)').run(ts(), actor, action, targetType ?? null, targetId ?? null, JSON.stringify(detail))
+  void db.prepare('INSERT INTO audit_events(ts,actor,action,target_type,target_id,detail_json) VALUES(?,?,?,?,?,?)').run(ts(), actor, action, targetType ?? null, targetId ?? null, redactUrls(JSON.stringify(detail)))
