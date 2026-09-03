@@ -391,6 +391,49 @@ test('rankSeedIdentities caps at the coverage top, best first, and closes when s
   assert.deepEqual(api.rankSeedIdentities(), []);
 });
 
+test('candidate history and responses are cached; a clear restores freshness', () => {
+  api.clearRecommendationCaches();
+  const pool = address(0xd021);
+  store.insertPool({
+    address: pool,
+    proto: CHAIN.id === 56 ? 'pancakev3' : 'univ3',
+    token0,
+    token1,
+    feePpm: 3_000,
+    tickSpacing: 60,
+  });
+  try {
+    store.upsertState(pool, { sqrtPrice: 1n << 96n, tick: 0, liquidity: 1_000_000n, reserve0: 1_000n, reserve1: 1_000n });
+    store.setTvl(pool, 100_000, false);
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 100_000, 'test');
+    store.captureAddressTickSamples([pool], '123');
+
+    const params = new URLSearchParams({ limit: '10' });
+    const first = api.getRecommendationCandidatesCached(params);
+    const second = api.getRecommendationCandidatesCached(params);
+    assert.equal(second, first, 'within the TTL the response cache serves the same body');
+
+    // a new sample lands mid-TTL in a later bucket: the memo intentionally holds
+    const futureTs = Math.floor(Date.now() / 1_000) + 120;
+    store.upsertState(pool, { sqrtPrice: (1n << 96n) * 4n, tick: 13_863, liquidity: 1_000_000n, reserve0: 1_000n, reserve1: 1_000n });
+    store.captureAddressTickSamples([pool], '456', futureTs);
+    const third = api.getRecommendationCandidatesCached(params);
+    const held = third.candidates.find((row) => row.pool === pool);
+    assert.ok(held);
+    assert.equal(held.tickHistory.at(-1)?.tick, 0, 'memoized history does not tear mid-TTL');
+
+    api.clearRecommendationCaches();
+    const fourth = api.getRecommendationCandidatesCached(params);
+    const fresh = fourth.candidates.find((row) => row.pool === pool);
+    assert.ok(fresh);
+    assert.equal(fresh.tickHistory.at(-1)?.tick, 13_863, 'a clear drops the memo so the new sample shows');
+  } finally {
+    api.clearRecommendationCaches();
+    store.db.prepare('DELETE FROM pool_tick_samples WHERE pool = ?').run(pool);
+    store.db.prepare('DELETE FROM pools WHERE address = ?').run(pool);
+  }
+});
+
 test('Robinhood recommendation candidates retain UP33 fee and reward identity', { skip: !CHAIN.gov }, () => {
   const pool = address(0xd002);
   store.insertPool({

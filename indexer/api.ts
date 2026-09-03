@@ -3095,14 +3095,89 @@ export function rankSeedIdentities(): string[] {
     .map((row) => row.address.toLowerCase());
 }
 
+// ── recommendation candidates: bounded caches ──────────────────────────────
+// The candidates handler is SYNCHRONOUS on the shared API event loop. One
+// uncached run costs O(candidates) range queries over the sample tables —
+// ~30s at steady-state data volume, minutes on a cold page cache — and FREEZES
+// every other endpoint for its duration: pool-rank, health and the catalog all
+// starve behind it, which is how the rank page ends up claiming no snapshot
+// exists while the recommender spins. Two bounded caches keep the loop free:
+//   history memo — per-pool market/tick history, the expensive part, 4min TTL.
+//   response cache — finished bodies, 60s TTL, the freshness the CDN is told.
+// History bounded at 4 minutes is honest: the executor re-scores on its own
+// 5-minute cache, so a fresher history never reached the model anyway — while
+// a 60s TTL would force a full recompute every minute and keep the event loop
+// half-blinded to the rest of the API.
+
+const RECOMMENDATION_HISTORY_TTL_MS = 240_000;
+const RECOMMENDATION_RESPONSE_TTL_MS = 60_000;
+const RECOMMENDATION_HISTORY_MEMO_CAP = 512;
+
+type RecommendationHistoryRow = Record<string, unknown>;
+type RecommendationHistory = { marketHistory: RecommendationHistoryRow[]; tickHistory: RecommendationHistoryRow[]; at: number };
+const recommendationHistoryMemo = new Map<string, RecommendationHistory>();
+const recommendationResponseCache = new Map<string, { at: number; body: ReturnType<typeof getRecommendationCandidates> }>();
+
+const recommendationMarketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
+    AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,
+    AVG(vol24h_usd) AS vol24hUsd
+  FROM pool_market_snapshots WHERE pool=? AND ts>=?
+  GROUP BY CAST(ts/3600 AS INTEGER) ORDER BY ts`);
+const recommendationRecentTickQ = db.prepare(
+  'SELECT ts,tick FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts',
+);
+const recommendationHistoricTickQ = db.prepare(`SELECT sample.ts,sample.tick
+  FROM pool_tick_samples sample JOIN (
+    SELECT MAX(ts) AS ts FROM pool_tick_samples
+    WHERE pool=? AND ts>=? AND ts<? GROUP BY CAST(ts/600 AS INTEGER)
+  ) bucket ON bucket.ts=sample.ts
+  WHERE sample.pool=? ORDER BY sample.ts`);
+
+function recommendationHistoryFor(identity: string, timestamp: number): RecommendationHistory {
+  const memoed = recommendationHistoryMemo.get(identity);
+  if (memoed && Date.now() - memoed.at < RECOMMENDATION_HISTORY_TTL_MS) return memoed;
+  const marketHistory = recommendationMarketQ.all(identity, timestamp - 30 * 86_400) as RecommendationHistoryRow[];
+  const tickHistory = [
+    ...recommendationHistoricTickQ.all(identity, timestamp - 7 * 86_400, timestamp - 30 * 3_600, identity),
+    ...recommendationRecentTickQ.all(identity, timestamp - 30 * 3_600),
+  ] as RecommendationHistoryRow[];
+  const entry: RecommendationHistory = { marketHistory, tickHistory, at: Date.now() };
+  if (recommendationHistoryMemo.size >= RECOMMENDATION_HISTORY_MEMO_CAP) {
+    const nowMs = Date.now();
+    for (const [key, value] of recommendationHistoryMemo)
+      if (nowMs - value.at >= RECOMMENDATION_HISTORY_TTL_MS) recommendationHistoryMemo.delete(key);
+    while (recommendationHistoryMemo.size >= RECOMMENDATION_HISTORY_MEMO_CAP)
+      recommendationHistoryMemo.delete(recommendationHistoryMemo.keys().next().value!);
+  }
+  recommendationHistoryMemo.set(identity, entry);
+  return entry;
+}
+
+/** Route entry: serves finished bodies for 60s so concurrent and repeated
+ * polls cost one computation per TTL window instead of one per request. The
+ * endpoint's parameter space is two knobs, so a small map is a complete key. */
+export function getRecommendationCandidatesCached(params: Params) {
+  const key = `${params.get('limit') ?? ''}|${params.get('min_tvl') ?? ''}|${params.get('min_volume') ?? ''}`;
+  const hit = recommendationResponseCache.get(key);
+  if (hit && Date.now() - hit.at < RECOMMENDATION_RESPONSE_TTL_MS) return hit.body;
+  const body = getRecommendationCandidates(params);
+  recommendationResponseCache.set(key, { at: Date.now(), body });
+  if (recommendationResponseCache.size > 16) recommendationResponseCache.clear();
+  return body;
+}
+
+/** Test/operational hook; normal expiry is bounded and automatic. */
+export function clearRecommendationCaches(): void {
+  recommendationHistoryMemo.clear();
+  recommendationResponseCache.clear();
+}
+
 export function getRecommendationCandidates(params: Params) {
   const rawLimit = params.get('limit');
   const limit = Math.min(Math.max(Number(rawLimit) || 50, 1), 80);
   const minTvl = Math.max(Number(params.get('min_tvl')) || 10_000, 0);
   const minVolume = Math.max(Number(params.get('min_volume')) || 10_000, 0);
   const timestamp = now();
-  const marketSince = timestamp - 30 * 86_400;
-  const tickSince = timestamp - 7 * 86_400;
   const addressSelect = `SELECT
       p.address AS identity,p.address AS pool,NULL AS pool_id,p.proto,
       p.token0,p.token1,p.fee_ppm,p.fee_ppm AS key_fee_ppm,
@@ -3190,20 +3265,6 @@ export function getRecommendationCandidates(params: Params) {
     }
   }
   const rows = [...merged.values()];
-  const marketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
-      AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,
-      AVG(vol24h_usd) AS vol24hUsd
-    FROM pool_market_snapshots WHERE pool=? AND ts>=?
-    GROUP BY CAST(ts/3600 AS INTEGER) ORDER BY ts`);
-  const recentTickQ = db.prepare(
-    'SELECT ts,tick FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts',
-  );
-  const historicTickQ = db.prepare(`SELECT sample.ts,sample.tick
-    FROM pool_tick_samples sample JOIN (
-      SELECT MAX(ts) AS ts FROM pool_tick_samples
-      WHERE pool=? AND ts>=? AND ts<? GROUP BY CAST(ts/600 AS INTEGER)
-    ) bucket ON bucket.ts=sample.ts
-    WHERE sample.pool=? ORDER BY sample.ts`);
   const up = CHAIN.gov
     ? db.prepare('SELECT price_usd FROM tokens WHERE address=?').get(CHAIN.gov.UP.toLowerCase()) as { price_usd: number | null } | undefined
     : undefined;
@@ -3221,6 +3282,7 @@ export function getRecommendationCandidates(params: Params) {
       const proto = String(row.proto);
       const rankPrior = rankPriors?.byAddress.get(String(row.pool).toLowerCase());
       const rankSeeded = seededIdentities.has(identity);
+      const history = recommendationHistoryFor(identity, timestamp);
       return {
         pool: String(row.pool),
         ...(row.pool_id ? { poolId: String(row.pool_id) } : {}),
@@ -3246,11 +3308,8 @@ export function getRecommendationCandidates(params: Params) {
         statsUpdatedAt: Number(row.stats_updated), stateUpdatedAt: Number(row.state_updated),
         gaugeAlive: Number(row.gauge_alive) === 1, rewardRate: String(row.reward_rate),
         periodFinish: Number(row.period_finish), upUsd: up?.price_usd ?? null,
-        marketHistory: marketQ.all(identity, marketSince),
-        tickHistory: [
-          ...historicTickQ.all(identity, tickSince, timestamp - 30 * 3_600, identity),
-          ...recentTickQ.all(identity, timestamp - 30 * 3_600),
-        ],
+        marketHistory: history.marketHistory,
+        tickHistory: history.tickHistory,
         ...(rankPrior
           ? {
               poolRank: {
@@ -3407,8 +3466,8 @@ export function createApiServer(): Server {
         if (Date.now() - started > 500) log(`[api] slow ${url.pathname} ${Date.now() - started}ms`);
         return;
       } else if (url.pathname === '/api/recommendation-candidates') {
-        body = getRecommendationCandidates(url.searchParams);
-        cache = 'public, max-age=30';
+        body = getRecommendationCandidatesCached(url.searchParams);
+        cache = 'public, max-age=60';
       } else if (url.pathname === '/api/pool-rank') {
         body = getPoolRankApi();
         cache = 'public, max-age=300';
