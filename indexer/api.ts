@@ -3527,8 +3527,13 @@ export function createApiServer(): Server {
         if (Date.now() - started > 500) log(`[api] slow ${url.pathname} ${Date.now() - started}ms`);
         return;
       } else if (url.pathname === '/api/recommendation-candidates') {
+        // Compute FIRST: the warming path throws ApiCapacityError, and the
+        // outer catch must still be free to writeHead(503) — writing this
+        // branch's 200 before the body would turn that into
+        // ERR_HTTP_HEADERS_SENT and kill the process.
+        const candidatesBody = getRecommendationCandidatesCached(url.searchParams);
         res.writeHead(200, { ...JSONH, 'cache-control': 'public, max-age=60' });
-        res.end(getRecommendationCandidatesCached(url.searchParams));
+        res.end(candidatesBody);
         if (Date.now() - started > 500) log(`[api] slow ${url.pathname} ${Date.now() - started}ms`);
         return;
       } else if (url.pathname === '/api/pool-rank') {
