@@ -84,4 +84,11 @@ export const FEATURES = {
    * has an equivalent pipeline, not merely an indexer.
    */
   poolRank: CHAIN.key === 'robinhood',
+  /**
+   * The V4 CREATE tab — initialize a brand-new v4 pool and seed it. Pinned to
+   * Robinhood Chain by product decision: the write path is chain-agnostic in
+   * its contract calls, but the price probe and the copy (native always
+   * currency0, the launchpad rungs) are only validated here.
+   */
+  v4Create: CHAIN.uniV4 !== null && CHAIN.key === 'robinhood',
 } as const
