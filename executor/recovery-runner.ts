@@ -20,6 +20,7 @@ import { receiptLiquidityFlows, receiptTokenDelta, receiptV4MintedTokenId, recei
 import { freshRange, quoteTurnover, riskAssetPct, swapImpactBps } from './risk'
 import { sendTracked } from './signer'
 import { escalatedSlippageBps } from './swap-escalation'
+import { isTransientRpcFailure } from './rpc-retry'
 import { burnCall, collectCall, decreaseCall, decreaseCollectCall, mintCall, v4CollectCall } from './steps'
 import {
   activeJobForStrategy,
@@ -38,6 +39,7 @@ import {
   markStep,
   recoveryJobById,
   replaceRecoveryStrategyConfig,
+  SWAP_REVERT_STREAK_KEY,
   reserveDailyTurnover,
   setJobContext,
   setJobState,
@@ -63,7 +65,6 @@ const receivedByWallet = (before: bigint, after: bigint, receipt: TransactionRec
   after - before + (isNativeCurrency(token) ? receiptGas(receipt) : 0n)
 
 type SwapRevertStreaks = Record<string, number>
-const SWAP_REVERT_STREAK_KEY = 'swap_revert_streak'
 
 function swapRevertStreaks(jobId: string): SwapRevertStreaks {
   return getJobContext<SwapRevertStreaks>(jobId, SWAP_REVERT_STREAK_KEY) ?? {}
@@ -341,11 +342,27 @@ async function confirmedReceipts(jobId: string): Promise<{ stepIndex: number; tx
     .sort((a, b) => Number(a.step_index) - Number(b.step_index) || Number(a.tx_index) - Number(b.tx_index))
   const result = []
   for (const row of rows) {
-    const receipt = await publicClient.getTransactionReceipt({ hash: row.tx_hash as `0x${string}` })
+    const receipt = await readConfirmedReceipt(row.tx_hash as `0x${string}`)
     if (receipt.status !== 'success') throw new Error('E_TX_REVERTED')
     result.push({ stepIndex: Number(row.step_index), txIndex: Number(row.tx_index), receipt })
   }
   return result
+}
+
+/** These receipts are already durable chain facts; a transient provider error
+ * while re-reading them must not fail the attempt. Bounded retries, rethrow. */
+async function readConfirmedReceipt(hash: `0x${string}`): Promise<TransactionReceipt> {
+  let last: unknown
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await publicClient.getTransactionReceipt({ hash })
+    } catch (error) {
+      last = error
+      if (attempt === 3 || !isTransientRpcFailure(error)) throw error
+      await new Promise((resolve) => setTimeout(resolve, 250 * (2 ** attempt)))
+    }
+  }
+  throw last
 }
 
 /**

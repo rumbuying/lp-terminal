@@ -6,6 +6,7 @@ import type { StrategyExecutionPlan } from '../shared/strategy/types'
 import type { LedgerEntry } from '../shared/strategy/types'
 import { parseStrategyConfig } from '../shared/strategy/schema'
 import { EXECUTOR } from './config'
+import { atSlippageCap } from './swap-escalation'
 
 mkdirSync(dirname(EXECUTOR.dbPath), { recursive: true, mode: 0o700 })
 export const db = new DatabaseSync(EXECUTOR.dbPath)
@@ -1283,14 +1284,49 @@ export type RecoveryRetryNext = { attempts: number; streak: number; failStreak: 
  * E_TX_REVERTED with a receipt timeout is failing every attempt and must
  * reach quarantine. Provider noise never accumulates and never quarantines
  * by itself, and it does not reset the execution-failure count either.
+ *
+ * `deferQuarantine` suspends both quarantine paths while a reverted swap can
+ * still widen its tolerated slippage (swap escalation below its cap): the
+ * strategy is already out of position, so the cheap way out is another
+ * re-quoted send at a wider `minOut` on a slower backoff, not a quarantine
+ * that pages an operator. Once the escalation is capped, every further
+ * revert counts exactly as before.
  */
-export function nextRecoveryRetryState(prev: RecoveryRetryPrev, code: string, quarantineEligible: boolean): RecoveryRetryNext {
+export function nextRecoveryRetryState(prev: RecoveryRetryPrev, code: string, quarantineEligible: boolean, deferQuarantine = false): RecoveryRetryNext {
   const attempts = prev.attempts + 1
   const streak = prev.lastError === code ? prev.errorStreak + 1 : 1
   const failStreak = quarantineEligible ? prev.failStreak + 1 : prev.failStreak
-  const delaySeconds = Math.min(300, 5 * (2 ** Math.min(attempts - 1, 6)))
-  const quarantined = (quarantineEligible && streak >= 3) || failStreak >= 3
+  const baseDelay = Math.min(300, 5 * (2 ** Math.min(attempts - 1, 6)))
+  const delaySeconds = deferQuarantine ? Math.max(baseDelay, Math.min(300, 30 * (2 ** Math.min(attempts - 1, 4)))) : baseDelay
+  const quarantined = deferQuarantine ? false : (quarantineEligible && streak >= 3) || failStreak >= 3
   return { attempts, streak, failStreak, delaySeconds, quarantined }
+}
+
+/** Consecutive on-chain revert counts per recovery swap txIndex, persisted so
+ * the escalation survives restarts and drives the defer-quarantine policy. */
+export const SWAP_REVERT_STREAK_KEY = 'swap_revert_streak'
+
+/** True while a reverted swap still has escalation headroom (see
+ * swap-escalation). With no tracked swap streak at all the answer is no —
+ * reverts outside the tracked swap path must count toward quarantine. */
+function swapEscalationUncapped(jobId: string): boolean {
+  const streaks = getJobContext<Record<string, number>>(jobId, SWAP_REVERT_STREAK_KEY) ?? {}
+  const counts = Object.values(streaks).map(Number).filter((count) => Number.isFinite(count) && count > 0)
+  if (!counts.length) return false
+  const baseBps = strategySwapSlippageBaseBps(jobId)
+  return !atSlippageCap(baseBps, Math.max(...counts))
+}
+
+function strategySwapSlippageBaseBps(jobId: string): number {
+  const row = db.prepare('SELECT s.config_json FROM jobs j JOIN strategies s ON s.id=j.strategy_id WHERE j.id=?').get(jobId) as { config_json: string } | undefined
+  if (!row) return 100
+  try {
+    const config = JSON.parse(row.config_json) as { safeguards?: { maxSlippageBps?: number } }
+    const base = Number(config.safeguards?.maxSlippageBps)
+    return Number.isFinite(base) && base > 0 ? base : 100
+  } catch {
+    return 100
+  }
 }
 
 export function scheduleRecoveryRetry(jobId: string, code: string, quarantineEligible: boolean) {
@@ -1299,10 +1335,12 @@ export function scheduleRecoveryRetry(jobId: string, code: string, quarantineEli
     strategy_id: string; recovery_attempts: number; recovery_error_streak: number; recovery_fail_streak: number; recovery_last_error: string | null
   } | undefined
   if (!row) throw new Error('E_RECOVERY_JOB')
+  const deferQuarantine = quarantineEligible && code === 'E_TX_REVERTED' && swapEscalationUncapped(jobId)
   const next = nextRecoveryRetryState(
     { attempts: Number(row.recovery_attempts), errorStreak: Number(row.recovery_error_streak), failStreak: Number(row.recovery_fail_streak ?? 0), lastError: row.recovery_last_error },
     code,
     quarantineEligible,
+    deferQuarantine,
   )
   const storedCode = redactUrls(code)
   db.exec('BEGIN IMMEDIATE')
@@ -1316,7 +1354,7 @@ export function scheduleRecoveryRetry(jobId: string, code: string, quarantineEli
     db.exec('ROLLBACK')
     throw error
   }
-  return { attempts: next.attempts, streak: next.streak, failStreak: next.failStreak, delayMs: next.delaySeconds * 1_000, quarantined: next.quarantined }
+  return { attempts: next.attempts, streak: next.streak, failStreak: next.failStreak, delayMs: next.delaySeconds * 1_000, quarantined: next.quarantined, escalating: deferQuarantine }
 }
 
 /** Allow one operator-requested attempt without discarding any chain facts. */

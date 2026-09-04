@@ -12,6 +12,31 @@ export type SafeTx = { to: Address; data: Hex; value?: bigint }
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * Polls for the receipt across provider hiccups. The transaction hash is
+ * durable before this runs, so the poll itself is idempotent and a transient
+ * failure (provider 400 on a rejected batch, 403/429 throttle, timeout) says
+ * nothing about the transaction — failing the step here false-failed sends
+ * that had already landed on chain. Only the overall deadline is fatal.
+ */
+async function waitForReceiptTolerant(hash: Hex) {
+  const deadline = Date.now() + 300_000
+  let attempt = 0
+  let last: unknown
+  while (Date.now() < deadline) {
+    try {
+      return await publicClient.waitForTransactionReceipt({ hash, confirmations: EXECUTOR.confirmations, timeout: 60_000 })
+    } catch (error) {
+      last = error
+      if (!isTransientRpcFailure(error)) throw error
+      attempt += 1
+      if (attempt > 8) throw error
+      await wait(retryDelay(EXECUTOR.rpcRetryDelayMs, attempt))
+    }
+  }
+  throw last instanceof Error ? last : new Error(`E_RECEIPT_TIMEOUT ${hash}`)
+}
+
+/**
  * Reads performed before signing are safe to retry: no nonce has been marked
  * and no transaction can have reached the mempool. Keep broadcast itself
  * single-shot except for the explicit fee-rejection path below.
@@ -114,7 +139,7 @@ export async function sendTracked(args: { config: StrategyConfig; jobId: string;
   // The hash is durable before any receipt wait or subsequent chain read.
   markStep({ jobId: args.jobId, index: args.stepIndex, state: 'sent', nonce: BigInt(nonce), txHash: hash, txTo: args.tx.to, calldataHash })
   markTransaction({ jobId: args.jobId, stepIndex: args.stepIndex, txIndex, state: 'sent', nonce: BigInt(nonce), txHash: hash, txTo: args.tx.to, calldataHash })
-  const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: EXECUTOR.confirmations, timeout: 180_000 })
+  const receipt = await waitForReceiptTolerant(hash)
   if (receipt.status !== 'success') {
     markStep({ jobId: args.jobId, index: args.stepIndex, state: 'failed', txHash: hash, blockNumber: receipt.blockNumber, errorCode: 'E_TX_REVERTED' })
     markTransaction({ jobId: args.jobId, stepIndex: args.stepIndex, txIndex, state: 'failed', txHash: hash, txTo: args.tx.to, calldataHash, blockNumber: receipt.blockNumber, errorCode: 'E_TX_REVERTED' })

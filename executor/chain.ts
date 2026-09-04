@@ -18,11 +18,16 @@ import type { StrategyConfig, StrategyPositionSnapshot } from '../shared/strateg
 import { EXECUTOR } from './config'
 import { recordRpcRequest } from './rpc-metrics'
 
-/** Read/preflight RPC retries tolerate short provider outages and rate limits. */
+/** Read/preflight RPC retries tolerate short provider outages and rate limits.
+ * Batching stays off: the monitor's 4-second sampling cadence coalesces many
+ * reads into one HTTP call, and a single rejected request in such a batch
+ * fails the whole call with a provider 400 — which also killed perfectly
+ * valid receipt polls inside that batch and false-failed transactions that
+ * had already landed on chain. */
 export const publicClient = createPublicClient({
   chain: activeChain,
   transport: http(EXECUTOR.rpcUrl, {
-    batch: true,
+    batch: false,
     onFetchRequest: recordRpcRequest('read'),
     retryCount: EXECUTOR.rpcRetryCount,
     retryDelay: EXECUTOR.rpcRetryDelayMs,

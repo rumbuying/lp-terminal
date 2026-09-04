@@ -10,7 +10,12 @@ test('classifies temporary HTTP and transport failures for safe exact retries', 
 })
 
 test('does not retry deterministic transaction rejection errors', () => {
-  assert.equal(isTransientRpcFailure(new Error('Missing or invalid parameters')), false)
+  // 'Missing or invalid parameters' is deliberately NOT here anymore: it is
+  // the provider's HTTP-400 body for a rejected JSON-RPC batch, and batching
+  // meant one rejected member false-failed valid reads in the same batch —
+  // see isBatchRejection in executor/rpc-retry and the CASHCAT incidents of
+  // 2026-09-04. A standalone -32602 stays deterministic.
+  assert.equal(isTransientRpcFailure(new Error('Invalid params: expected a hex string')), false)
   assert.equal(isTransientRpcFailure(new Error('execution reverted')), false)
   assert.equal(isTransientRpcFailure(new Error('nonce too low')), false)
   assert.equal(isTransientRpcFailure(new Error('replacement transaction underpriced')), false)

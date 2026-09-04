@@ -19,8 +19,23 @@ function errorChain(error: unknown): ErrorRecord[] {
   return records
 }
 
+/** Provider rejected the whole request with its generic malformed-params body.
+ * With JSON-RPC batching this fires for the entire coalesced call when any one
+ * member is rejected, so valid reads inside the batch die with it — a provider
+ * artifact, not a deterministic bug in our params. A standalone call that
+ * still returns this is rare; retrying it a bounded number of times is cheap
+ * and harmless because every retried call here is idempotent. */
+export function isBatchRejection(error: unknown): boolean {
+  const records = errorChain(error)
+  const statuses = records.flatMap((record) => [record.status, record.statusCode]).map(Number)
+  const text = records.flatMap((record) => [record.message, record.shortMessage, record.details]).filter((value): value is string => typeof value === 'string').join('\n')
+  if (/^missing or invalid parameters\.?/im.test(text)) return true
+  return statuses.some((status) => status === 400) && /missing or invalid parameters/i.test(text)
+}
+
 /** Only errors that can represent temporary provider/network unavailability. */
 export function isTransientRpcFailure(error: unknown): boolean {
+  if (isBatchRejection(error)) return true
   const records = errorChain(error)
   const statuses = records.flatMap((record) => [record.status, record.statusCode]).map(Number)
   if (statuses.some((status) => status === 403 || status === 408 || status === 425 || status === 429 || status >= 500)) return true
