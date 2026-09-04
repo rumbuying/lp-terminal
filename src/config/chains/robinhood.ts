@@ -150,6 +150,13 @@ export const robinhoodConfig: ChainConfig = {
     rungs: [
       { fee: 2500, tickSpacing: 60 },
       { fee: 10000, tickSpacing: 200 },
+      // The AMC/ETH pool seeded through this terminal's own V4 CREATE tab
+      // (poolId 0x6cacfd1f…, live 2026-09-04). Off every canonical ladder, so
+      // no event-sourced router shortlist reaches it but ours — that is the
+      // point of pinning it: the direct v4 routes probe it by key and the
+      // quoter answers both directions. Liquidity is the owner's to deepen;
+      // the ladder only decides whether a route may try.
+      { fee: 20000, tickSpacing: 200 },
       { fee: 3000, tickSpacing: 60 },
       { fee: 500, tickSpacing: 10 },
       { fee: 100, tickSpacing: 1 },
