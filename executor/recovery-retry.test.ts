@@ -105,7 +105,7 @@ test('defer never masks non-swap execution failures', async () => {
 })
 
 test('swap slippage doubles per consecutive revert and is bounded', async () => {
-  const { escalatedSlippageBps, atSlippageCap } = await import('./swap-escalation')
+  const { escalatedSlippageBps, atSlippageCap, isRecoverySwapRevert } = await import('./swap-escalation')
   assert.equal(escalatedSlippageBps(100, 0), 100)
   assert.equal(escalatedSlippageBps(100, 1), 200)
   assert.equal(escalatedSlippageBps(100, 2), 400)
@@ -116,6 +116,11 @@ test('swap slippage doubles per consecutive revert and is bounded', async () => 
   assert.equal(atSlippageCap(100, 3), false, '800 bps still has one widening left')
   assert.equal(atSlippageCap(100, 4), true, 'the ladder cannot widen past the cap')
   assert.equal(atSlippageCap(2000, 0), true, 'a strategy already wider than the cap never defers')
+  assert.equal(isRecoverySwapRevert(new Error('E_TX_REVERTED')), true)
+  assert.equal(isRecoverySwapRevert(new Error('Execution reverted with reason: Return amount is not enough.\n\nEstimate Gas Arguments:')), true,
+    'a pre-send estimateGas revert must climb the same recovery ladder')
+  assert.equal(isRecoverySwapRevert(new Error('HTTP request failed. Status: 503')), false,
+    'provider availability is not evidence that the route reverted')
 })
 
 test('audit detail serialization redacts credentialed endpoint URLs', async () => {

@@ -19,7 +19,7 @@ import { inspectRecovery } from './recovery'
 import { receiptLiquidityFlows, receiptTokenDelta, receiptV4MintedTokenId, receiptV4TokenFlows } from './receipts'
 import { freshRange, quoteTurnover, riskAssetPct, swapImpactBps } from './risk'
 import { sendTracked } from './signer'
-import { escalatedSlippageBps } from './swap-escalation'
+import { escalatedSlippageBps, isRecoverySwapRevert } from './swap-escalation'
 import { isTransientRpcFailure } from './rpc-retry'
 import { burnCall, collectCall, decreaseCall, decreaseCollectCall, mintCall, v4CollectCall } from './steps'
 import {
@@ -89,16 +89,22 @@ function clearSwapRevert(jobId: string, txIndex: number) {
   setJobContext(jobId, SWAP_REVERT_STREAK_KEY, streaks)
 }
 
-/** The only way a recovery path sends a swap. An on-chain revert escalates
- * that swap's tolerated slippage for the next attempt, so a systematically
- * optimistic quote cannot revert-loop a job forever; any success resets it. */
+/** The only way a recovery path sends a swap. A receipt revert or a proven
+ * contract revert during estimateGas escalates that swap's tolerated slippage
+ * for the next attempt, so an optimistic quote cannot trap the job; any
+ * success resets it. */
 async function sendRecoverySwap(args: { job: RunnableJob; txIndex: number; privateKey: `0x${string}`; tx: Parameters<typeof sendTracked>[0]['tx'] }): Promise<TransactionReceipt> {
   try {
     const receipt = await sendTracked({ config: args.job.config, jobId: args.job.id, stepIndex: 5, txIndex: args.txIndex, privateKey: args.privateKey, tx: args.tx })
     clearSwapRevert(args.job.id, args.txIndex)
     return receipt
   } catch (error) {
-    if (error instanceof Error && error.message === 'E_TX_REVERTED') noteSwapRevert(args.job.id, args.txIndex)
+    if (isRecoverySwapRevert(error)) {
+      noteSwapRevert(args.job.id, args.txIndex)
+      // Normalise a pre-send viem revert so the supervisor defers quarantine
+      // while this newly-recorded swap still has escalation headroom.
+      if (!(error instanceof Error) || error.message !== 'E_TX_REVERTED') throw new Error('E_TX_REVERTED')
+    }
     throw error
   }
 }

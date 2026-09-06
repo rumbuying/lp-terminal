@@ -1,6 +1,6 @@
 import { encodeFunctionData, type Address, type Hex } from 'viem'
 import { clGaugeAbi, clPmAbi, erc20Abi, uniV3PmAbi } from '../src/abi'
-import { getLiquidityForAmounts, getSqrtRatioAtTick, minAmountsForLiquidity } from '../src/lib/clmath'
+import { getLiquidityForAmounts, getSqrtRatioAtTick, liquidityForAmountsWithSlippage, minAmountsForLiquidity } from '../src/lib/clmath'
 import {
   encodeV4Collect,
   encodeV4Decrease,
@@ -181,7 +181,21 @@ export function mintCall(args: {
   const sqrtPriceX96 = args.sqrtPriceX96 ?? BigInt(snapshot.sqrtPriceX96)
   const sqrtA = getSqrtRatioAtTick(args.tickLower)
   const sqrtB = getSqrtRatioAtTick(args.tickUpper)
-  const liquidity = getLiquidityForAmounts(sqrtPriceX96, sqrtA, sqrtB, args.amount0Desired, args.amount1Desired)
+  // A v3 NPM derives liquidity again at the inclusion-block price while the
+  // desired amounts remain fixed. Size the minima from liquidity that those
+  // same ceilings can fund across the whole permitted price band; using the
+  // spot-sized liquidity makes one minimum impossible after an otherwise
+  // allowed price move (the production STONKBROKER `Price slippage check`).
+  const liquidity = config.safeguards.enabled
+    ? liquidityForAmountsWithSlippage(
+      sqrtPriceX96,
+      sqrtA,
+      sqrtB,
+      args.amount0Desired,
+      args.amount1Desired,
+      config.safeguards.maxSlippageBps,
+    )
+    : getLiquidityForAmounts(sqrtPriceX96, sqrtA, sqrtB, args.amount0Desired, args.amount1Desired)
   if (liquidity <= 0n) throw new Error('E_MINT_ZERO_LIQUIDITY')
   // Mint calldata is built from fresh balances and a fresh pool snapshot. In
   // unguarded mode, zero minima let the transaction consume the valid token
