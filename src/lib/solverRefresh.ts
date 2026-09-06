@@ -35,8 +35,11 @@ export const solverQuoteRefetchInterval = (
 ): number | false =>
   solverQuoteCanAutoRefresh(state, manualRefreshes) ? SOLVER_QUOTE_REFRESH_MS : false
 
-export const quoteDataIsStale = (lastSuccessfulQuoteAt: number, now: number): boolean =>
-  lastSuccessfulQuoteAt <= 0 || now - lastSuccessfulQuoteAt >= SOLVER_QUOTE_REFRESH_MS
+export const quoteDataIsStale = (
+  lastSuccessfulQuoteAt: number,
+  now: number,
+  maxAgeMs = SOLVER_QUOTE_REFRESH_MS,
+): boolean => lastSuccessfulQuoteAt <= 0 || now - lastSuccessfulQuoteAt >= maxAgeMs
 
 export const solverQuoteNeedsManualRefresh = (
   autoRefreshExhausted: boolean,

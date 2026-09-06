@@ -31,6 +31,8 @@ test('cached solver and direct data leave selection and request refresh at the a
   assert.deepEqual(select(1_001, 1_001, false, true), { solver, direct: null, hasStaleData: false })
   assert.equal(quoteDataIsStale(1_000, 15_999), false)
   assert.equal(quoteDataIsStale(1_000, 16_000), true)
+  assert.equal(quoteDataIsStale(1_000, 30_999, 30_000), false)
+  assert.equal(quoteDataIsStale(1_000, 31_000, 30_000), true)
 })
 
 test('solver auto-refreshes three times, then requires a fresh manual quote', () => {

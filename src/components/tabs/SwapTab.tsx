@@ -324,6 +324,11 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
   const solverSel = selectedSource === 'solver' ? solverData : null
   const selected =
     selectedSource && selectedSource !== 'solver' ? directData?.byProtocol[selectedSource] ?? null : null
+  const selectedQuoteRefreshing = solverSel
+    ? solver.isFetching
+    : selected
+      ? quote.isFetching
+      : solver.isFetching || quote.isFetching
   // one shape for the details section, whichever kind is selected
   const outAmount = solverSel ? solverSel.quote.amountOutNet : selected?.amountOut ?? null
   const selImpactBps = solverSel ? solverSel.impactBps : selected?.impactBps ?? null
@@ -454,11 +459,10 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
         stepWhy = why
       }
       // Skip once the user has moved on to another trade, and only ever raise.
-      const raiseFloorAndRequote = () => {
+      const raiseFloorAndRequote = async () => {
         if (tradeSigRef.current !== tradeSig) return
         setSlipFloor((prev) => Math.max(prev ?? 0, retrySlippage(effectiveSlippage)))
-        void quote.refetch()
-        void solver.refetch()
+        await Promise.allSettled([quote.refetch(), solver.refetch()])
       }
       try {
         let result: Awaited<ReturnType<typeof executeSwap>> = null
@@ -506,10 +510,10 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
         if (result && tradeSigRef.current === tradeSig) setSlipFloor(null) // a fill clears the floor
         // it reached the chain and the chain refused it — the min-out baked into
         // the calldata is what it was refused against
-        if (!result && stepWhy === 'reverted') raiseFloorAndRequote()
+        if (!result && stepWhy === 'reverted') await raiseFloorAndRequote()
       } catch (error) {
         // halted before signing, on a re-quote already below the floor
-        if (error instanceof SlippageError) raiseFloorAndRequote()
+        if (error instanceof SlippageError) await raiseFloorAndRequote()
         txlog.push('err', (error as Error).message)
       }
     })
@@ -876,6 +880,7 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
   } else if (amount === 0n) cta = t('swap.ctaEnterAmount')
   else if (insufficient) cta = t('common.insufficientBalance')
   else if (tradePending) cta = t('swap.ctaPending') // this exact trade is in flight — block a double
+  else if (selectedQuoteRefreshing) cta = t('swap.ctaQuoting')
   else if (quotesNeedRefresh) {
     cta = t('swap.ctaRefreshQuote')
     ctaTone = 'amber'
@@ -1186,7 +1191,10 @@ export function SwapTab(props: { market?: TokenInfo | null; embedded?: boolean }
             title={ctaTitle}
             // a submitted trade shows "SWAP PENDING" text (not a spinner); the
             // banner above carries the live status + explorer link
-            busy={!tradePending && (submitting || (refreshCta && (solver.isFetching || quote.isFetching)))}
+            busy={
+              !tradePending &&
+              (submitting || selectedQuoteRefreshing || (refreshCta && (solver.isFetching || quote.isFetching)))
+            }
             disabled={ctaDisabled}
             onClick={!user ? () => openConnectModal?.() : refreshCta ? refreshQuotes : swapClick}
           >

@@ -12,7 +12,12 @@ import { CHAIN } from '../config/chains'
 import { simulateClAdd, simulateV2Add, type VolumeWindow } from '../lib/apr'
 import { fmtAmount } from '../lib/format'
 import { autoSlippage, needsSlippageConfirm, retrySlippage, slippagePctToBps, slippageTone, SLIPPAGE_CHOICES, type AutoSlippage } from '../lib/swapGate'
-import { SOLVER_AUTO_REFRESHES, solverQuoteAutoRefreshExhausted, solverQuoteCanAutoRefresh } from '../lib/solverRefresh'
+import {
+  quoteDataIsStale,
+  SOLVER_AUTO_REFRESHES,
+  solverQuoteAutoRefreshExhausted,
+  solverQuoteCanAutoRefresh,
+} from '../lib/solverRefresh'
 import { autostake } from '../lib/autostake'
 import {
   DEPOSIT_MINS_BPS,
@@ -113,6 +118,7 @@ export function ZapPanel(props: {
   )
   const [runPlan, setRunPlan] = useState<ZapPlan | null>(null)
   const [done, setDone] = useState(false)
+  const [, setPlanAgeTick] = useState(0)
 
   useEffect(() => {
     const h = setTimeout(() => {
@@ -169,12 +175,32 @@ export function ZapPanel(props: {
         amountIn: amount,
       }),
   })
-  const p = running ? runPlan : (plan.data ?? null)
+  // TanStack keeps the last successful data after staleTime and after a failed
+  // refetch. That is useful for display continuity, but unsafe as an executable
+  // ZAP plan: its swap output also sizes the deposit that follows. Expire the
+  // plan at the refresh boundary and require a completed refresh before another
+  // run can freeze it.
+  const planStale =
+    plan.data != null && quoteDataIsStale(plan.dataUpdatedAt, Date.now(), ZAP_PLAN_REFRESH_MS)
+  const usablePlan = !plan.isError && !planStale ? (plan.data ?? null) : null
+  const p = running ? runPlan : usablePlan
+  useEffect(() => {
+    if (!plan.dataUpdatedAt || running) return
+    const remaining = plan.dataUpdatedAt + ZAP_PLAN_REFRESH_MS - Date.now()
+    if (remaining <= 0) return
+    const id = setTimeout(() => setPlanAgeTick((version) => version + 1), remaining + 1)
+    return () => clearTimeout(id)
+  }, [plan.dataUpdatedAt, running])
   // once the auto-refresh cap is hit the preview stops updating — surface a
   // manual refresh. Gate on amount, not on data: four planning FAILURES also
   // exhaust the budget, and that is exactly when a retry control is needed.
   const planRecord = queryClient.getQueryCache().find({ queryKey: zapPlanKey, exact: true })
   const planPaused = amount > 0n && !running && !!planRecord && solverQuoteAutoRefreshExhausted(planRecord.state)
+  const planNeedsRefresh =
+    amount > 0n &&
+    !running &&
+    !!planRecord &&
+    (planPaused || planStale || plan.isError)
   const autoBase = p?.impactBps == null ? null : autoSlippage(p.impactBps, zapVenueFeeBps(p))
   // post-halt floor wins over the quote-derived number (and stands in for it
   // when the impact probe is unavailable — a failed run IS a measurement)
@@ -187,7 +213,7 @@ export function ZapPanel(props: {
   const slippageRequired = !!p && p.legs.length > 0 && effectiveSlip === undefined
   // a zap with no swap leg never spends the tolerance — `run` passes 0 — so
   // there is nothing to confirm however wide the editor's number happens to be
-  const wideSlippage = needsSlippageConfirm(plan.data?.legs.length === 0 ? 0 : effectiveSlip)
+  const wideSlippage = needsSlippageConfirm(usablePlan?.legs.length === 0 ? 0 : effectiveSlip)
   const runConfirm = useArmedConfirm(`${zapPlanKey.join('|')}|${effectiveSlip ?? ''}`)
   const stages = useMemo(
     () => (p ? zapStages(p, target, tIn, t0, t1, autoStake) : []),
@@ -250,8 +276,8 @@ export function ZapPanel(props: {
   const dusts = [dustNote(0), dustNote(1)].filter(Boolean)
 
   const run = async () => {
-    const frozen = plan.data
-    if (!user || !frozen || amount === 0n || running) return
+    const frozen = usablePlan
+    if (!user || !frozen || amount === 0n || running || plan.isFetching) return
     const executionSlippage = frozen.legs.length === 0 ? 0 : effectiveSlip
     if (executionSlippage === undefined) return
     setRunPlan(frozen)
@@ -282,7 +308,7 @@ export function ZapPanel(props: {
         // AUTO must not re-offer the tolerance that just failed — only ever raise
         if (reason === 'slippage') setSlipFloor((prev) => Math.max(prev ?? 0, retrySlippage(executionSlippage)))
         // and the retry must re-plan from a live quote, not the ≤30s cached one
-        void plan.refetch()
+        await plan.refetch()
       }
     } finally {
       setRunning(false)
@@ -464,7 +490,7 @@ export function ZapPanel(props: {
         </>
       )}
 
-      {planPaused && (
+      {planNeedsRefresh && (
         <div className="form-row">
           <button
             className="chip amber"
@@ -515,10 +541,18 @@ export function ZapPanel(props: {
 
       <div className="form-row">
         <Btn
-          busy={running}
+          busy={running || (amount > 0n && plan.isFetching)}
           tone={runTone}
           onClick={runClick}
-          disabled={!user || amount === 0n || !plan.data || insufficient || slippageRequired || running}
+          disabled={
+            !user ||
+            amount === 0n ||
+            !usablePlan ||
+            insufficient ||
+            slippageRequired ||
+            running ||
+            plan.isFetching
+          }
           title={runTitle}
         >
           {runLabel}
