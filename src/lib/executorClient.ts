@@ -53,7 +53,9 @@ export type ExecutorCalendarRow = {
   quote: { address: string; symbol: string; decimals: number }; pnlRaw: string | null; feesRaw: string; gasRaw: string; executionRaw: string
   pnlUsdgRaw: string | null
   closingPnlRaw: string | null; closingPnlUsdgRaw: string | null
-  openingAssetsRaw: string | null; closingAssetsRaw: string | null; reopens: number
+  openingAssetsRaw: string | null; closingAssetsRaw: string | null
+  openingAssetsUsdgRaw: string | null; closingAssetsUsdgRaw: string | null
+  reopens: number
 }
 export type ExecutorPnlCurvePoint = {
   strategyId: string; bucketAt: number; observedAt: number
@@ -78,6 +80,16 @@ export type ExecutorPerformanceCycle = {
   rangeScale: number
   txHashes: string[]
 }
+export type ExecutorUncollectedFee = {
+  address: string
+  symbol: string
+  decimals: number
+  raw: string
+}
+export type ExecutorUncollectedFees = {
+  token0: ExecutorUncollectedFee
+  token1: ExecutorUncollectedFee
+}
 export type ExecutorPerformance = {
   strategyId: string
   calculatedAt?: number
@@ -86,6 +98,8 @@ export type ExecutorPerformance = {
   stable?: { address: string; symbol: string; decimals: number; baselineSource?: 'recorded_at_start' | 'historical_weth_usdg' }
   risk?: { address: string; symbol: string }
   price?: { startQuotePerRisk: number | null; currentQuotePerRisk: number | null }
+  /** Live claimable LP fees per pool token (token0/token1 of the position). */
+  uncollectedFees?: ExecutorUncollectedFees | null
   summary?: {
     reopens: number
     grossFeesQuoteRaw: string

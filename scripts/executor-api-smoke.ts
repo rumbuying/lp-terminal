@@ -105,7 +105,7 @@ try {
   recordStrategyPnlSnapshot({
     strategyId: config.id, observedAt: snapshotAt, day: 0,
     quoteToken: config.quoteToken, quoteSymbol: 'QUOTE', quoteDecimals: 18,
-    pnlRaw: '123', pnlUsdgRaw: '456', feesRaw: '0', gasRaw: '0', executionRaw: '0', assetsRaw: '1000', reopens: 0,
+    pnlRaw: '123', pnlUsdgRaw: '456', feesRaw: '0', gasRaw: '0', executionRaw: '0', assetsRaw: '1000', assetsUsdgRaw: '1000', reopens: 0,
   })
   const curve = await fetch(`${base}/v1/pnl-curve?from=${snapshotAt - 300}&to=${snapshotAt + 300}`, { headers: auth })
   assert.equal(curve.status, 200)

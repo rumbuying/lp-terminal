@@ -378,6 +378,9 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
   let currentValue = 0n
   let profitReserveQuote = 0n
   let currentUncollectedFees = 0n
+  // Live pool-token fee claims (token0/token1 amounts) so the terminal can value
+  // uncollected LP fees token-by-token instead of only through the quote mark.
+  let uncollectedFeeClaims: { address: Address; decimals: number; raw: bigint }[] | undefined
   let currentUnclaimedReward = 0n
   let currentUnclaimedRewardQuote = 0n
   let rewardReadAvailable = true
@@ -416,6 +419,10 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       profitReserveQuote = quoteTurnover(allocationComponents[low(snapshot.token0)]?.heldProfit ?? 0n, snapshot.token0, config, snapshot, pool.sqrtPriceX96)
         + quoteTurnover(allocationComponents[low(snapshot.token1)]?.heldProfit ?? 0n, snapshot.token1, config, snapshot, pool.sqrtPriceX96)
       currentUncollectedFees = quoteTurnover(fees.amount0, snapshot.token0, config, snapshot, pool.sqrtPriceX96) + quoteTurnover(fees.amount1, snapshot.token1, config, snapshot, pool.sqrtPriceX96)
+      uncollectedFeeClaims = [
+        { address: snapshot.token0, decimals: snapshot.token0Decimals, raw: fees.amount0 },
+        { address: snapshot.token1, decimals: snapshot.token1Decimals, raw: fees.amount1 },
+      ]
       rewardReadAvailable = !snapshot.rewardReadError
       if (snapshot.rewardReadError) rewardValuationError = snapshot.rewardReadError
       currentUnclaimedReward = config.staking?.enabled && rewardReadAvailable ? BigInt(snapshot.rewardOwed ?? '0') : 0n
@@ -447,6 +454,14 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
   })))
   const quoteSymbol = await tokenSymbol(config.quoteToken)
   const riskSymbol = await tokenSymbol(config.riskToken)
+  // Live claimable LP fees per pool token. Only available when the live
+  // position snapshot was read cleanly; planned/archived rows carry null.
+  const uncollectedFees = uncollectedFeeClaims && !liveError
+    ? {
+        token0: { address: uncollectedFeeClaims[0].address, symbol: await tokenSymbol(uncollectedFeeClaims[0].address), decimals: uncollectedFeeClaims[0].decimals, raw: uncollectedFeeClaims[0].raw.toString() },
+        token1: { address: uncollectedFeeClaims[1].address, symbol: await tokenSymbol(uncollectedFeeClaims[1].address), decimals: uncollectedFeeClaims[1].decimals, raw: uncollectedFeeClaims[1].raw.toString() },
+      }
+    : null
   const baselineTick = startBaseline?.tick ?? mintBasis?.tick ?? firstPrice?.tick
   const startQuotePerRisk = baselineTick !== undefined && priceSnapshot
     ? quotePerRiskAtTick(baselineTick, config, priceSnapshot)
@@ -519,6 +534,7 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
     stable: { address: SETTLEMENT, symbol: EXECUTOR.network.settlementSymbol, decimals: EXECUTOR.network.settlementDecimals, baselineSource: stableBaselineSource },
     risk: { address: config.riskToken, symbol: riskSymbol },
     price: { startQuotePerRisk, currentQuotePerRisk },
+    uncollectedFees,
     summary: {
       reopens: cycles.filter((cycle) => cycle.new_token_id !== null).length,
       grossFeesQuoteRaw: grossFeesQuote.toString(),
@@ -661,6 +677,7 @@ export async function archivedAccountingPerformance(config: StrategyConfig, arch
       baselineValueQuoteRaw: null, pnlQuoteRaw: null, pnlPct: null,
       currentValueUsdgRaw: null, baselineValueUsdgRaw: null, gasCostUsdgRaw: null, pnlUsdgRaw: null, pnlUsdgPct: null },
     baseline: null, currentPosition: { tokenId: config.activeTokenId, tick: null, tickLower: null, tickUpper: null },
+    uncollectedFees: null,
     unclaimedReward: null, feeTokens: [], profitWithdrawals: [], cycles: cycleDetails, warnings: ['historical_final_valuation_unavailable', ...(gasValuation.error ? ['gas_quote_unavailable'] : [])],
   }
 }

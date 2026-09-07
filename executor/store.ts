@@ -208,6 +208,8 @@ CREATE TABLE IF NOT EXISTS strategy_daily_snapshots (
   closing_execution_raw TEXT NOT NULL,
   opening_assets_raw TEXT,
   closing_assets_raw TEXT,
+  opening_assets_usdg_raw TEXT,
+  closing_assets_usdg_raw TEXT,
   opening_reopens INTEGER NOT NULL,
   closing_reopens INTEGER NOT NULL,
   PRIMARY KEY(strategy_id,shanghai_day),
@@ -238,6 +240,10 @@ if (!dailySnapshotColumns.some((column) => column.name === 'opening_pnl_usdg_raw
   db.exec('ALTER TABLE strategy_daily_snapshots ADD COLUMN opening_pnl_usdg_raw TEXT')
 if (!dailySnapshotColumns.some((column) => column.name === 'closing_pnl_usdg_raw'))
   db.exec('ALTER TABLE strategy_daily_snapshots ADD COLUMN closing_pnl_usdg_raw TEXT')
+if (!dailySnapshotColumns.some((column) => column.name === 'opening_assets_usdg_raw'))
+  db.exec('ALTER TABLE strategy_daily_snapshots ADD COLUMN opening_assets_usdg_raw TEXT')
+if (!dailySnapshotColumns.some((column) => column.name === 'closing_assets_usdg_raw'))
+  db.exec('ALTER TABLE strategy_daily_snapshots ADD COLUMN closing_assets_usdg_raw TEXT')
 db.exec(`INSERT OR IGNORE INTO strategy_pnl_snapshots(strategy_id,bucket_at,observed_at,quote_token,quote_symbol,quote_decimals,pnl_raw,pnl_usdg_raw)
   SELECT strategy_id,(last_observed_at / 300) * 300,last_observed_at,quote_token,quote_symbol,quote_decimals,closing_pnl_raw,closing_pnl_usdg_raw
   FROM strategy_daily_snapshots`)
@@ -420,23 +426,25 @@ export function replaceStrategyBaselineQuote(baseline: StrategyBaseline) {
 export type StrategyDailyPoint = {
   strategyId: string; observedAt: number; day: number
   quoteToken: string; quoteSymbol: string; quoteDecimals: number
-  pnlRaw: string | null; pnlUsdgRaw: string | null; feesRaw: string; gasRaw: string; executionRaw: string; assetsRaw: string | null; reopens: number
+  pnlRaw: string | null; pnlUsdgRaw: string | null; feesRaw: string; gasRaw: string; executionRaw: string
+  assetsRaw: string | null; assetsUsdgRaw: string | null; reopens: number
 }
 
 /** First value is immutable for the day; latest value advances monotonically in time. */
 export function recordStrategyDailyPoint(point: StrategyDailyPoint) {
   db.prepare(`INSERT INTO strategy_daily_snapshots(strategy_id,shanghai_day,first_observed_at,last_observed_at,quote_token,quote_symbol,quote_decimals,
     opening_pnl_raw,closing_pnl_raw,opening_pnl_usdg_raw,closing_pnl_usdg_raw,opening_fees_raw,closing_fees_raw,opening_gas_raw,closing_gas_raw,opening_execution_raw,closing_execution_raw,
-    opening_assets_raw,closing_assets_raw,opening_reopens,closing_reopens)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    opening_assets_raw,closing_assets_raw,opening_assets_usdg_raw,closing_assets_usdg_raw,opening_reopens,closing_reopens)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(strategy_id,shanghai_day) DO UPDATE SET
       last_observed_at=excluded.last_observed_at,closing_pnl_raw=excluded.closing_pnl_raw,closing_pnl_usdg_raw=excluded.closing_pnl_usdg_raw,closing_fees_raw=excluded.closing_fees_raw,
       closing_gas_raw=excluded.closing_gas_raw,closing_execution_raw=excluded.closing_execution_raw,closing_assets_raw=excluded.closing_assets_raw,
+      closing_assets_usdg_raw=excluded.closing_assets_usdg_raw,
       closing_reopens=excluded.closing_reopens
     WHERE excluded.last_observed_at>=strategy_daily_snapshots.last_observed_at`).run(
     point.strategyId, point.day, point.observedAt, point.observedAt, point.quoteToken.toLowerCase(), point.quoteSymbol, point.quoteDecimals,
     point.pnlRaw, point.pnlRaw, point.pnlUsdgRaw, point.pnlUsdgRaw, point.feesRaw, point.feesRaw, point.gasRaw, point.gasRaw, point.executionRaw, point.executionRaw,
-    point.assetsRaw, point.assetsRaw, point.reopens, point.reopens,
+    point.assetsRaw, point.assetsRaw, point.assetsUsdgRaw, point.assetsUsdgRaw, point.reopens, point.reopens,
   )
 }
 

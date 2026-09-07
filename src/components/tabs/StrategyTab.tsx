@@ -42,6 +42,7 @@ import {
   type ExecutorStrategy,
   type ExecutorCalendarRow,
   type ExecutorPerformance,
+  type ExecutorUncollectedFee,
   type ExecutorPnlCurvePoint,
   type ExecutorPreflight,
   type ExecutorWallet,
@@ -53,9 +54,9 @@ import { StrategyPnlCurve } from '../strategy/StrategyPnlCurve'
 import { StrategyGuardPanel, guardBlockingText } from '../strategy/StrategyGuardPanel'
 import { PnlUnitToggle } from '../PnlUnitToggle'
 import { mergePnlCurveSnapshots } from '../../lib/pnlCurve'
-import { dailyCycleTotals, weightedDailyReturnPct } from '../../lib/strategyOverview'
+import { dailyCycleTotals, quoteDailyReturnPct, stableDailyReturnPct } from '../../lib/strategyOverview'
 import { shanghaiDay } from '../../../shared/strategy/calendar'
-import { fmtNum } from '../../lib/format'
+import { fmtNum, fmtAmount } from '../../lib/format'
 
 const ACTIVE_EXECUTOR_STATES = new Set(['planned', 'executing', 'monitoring', 'guard_wait', 'recovery', 'recovery_quarantined', 'paused_guard', 'awaiting_manual'])
 const PNL_CURVE_WINDOW_SECONDS = 30 * 24 * 60 * 60
@@ -148,12 +149,19 @@ export function StrategyTab() {
   const performanceQuoteAddresses = useMemo(() => {
     // Most strategies retain WETH. Start its USD mark in parallel with the
     // executor performance request instead of discovering it afterwards and
-    // turning the first render into two sequential network waits.
+    // turning the first render into two sequential network waits. Uncollected
+    // fee claims add their own pool tokens so the claims can be priced
+    // token-by-token like the positions page prices them.
     const addresses = new Map<string, Address>([[ADDR.WNATIVE.toLowerCase(), ADDR.WNATIVE]])
     for (const performance of executorPerformanceList) {
       if (!performance.quote) continue
       const address = performance.quote.address.toLowerCase()
       if (address !== ADDR.STABLE.toLowerCase()) addresses.set(address, performance.quote.address as Address)
+      for (const claim of [performance.uncollectedFees?.token0, performance.uncollectedFees?.token1]) {
+        if (!claim || claim.address === ADDR.STABLE) continue
+        const claimAddress = claim.address.toLowerCase()
+        if (claimAddress !== ADDR.STABLE.toLowerCase()) addresses.set(claimAddress, claim.address as Address)
+      }
     }
     return [...addresses.values()]
   }, [executorPerformanceList])
@@ -718,6 +726,94 @@ export function StrategyTab() {
     return `${sign}${new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(abs)} USDG`
   }
 
+  /**
+   * Uncollected LP fees, priced token-by-token the way the positions page does:
+   * each fee token uses its own USDG mark when the indexer prices it, and the
+   * pool-implied mark (quote mark × quote-per-risk) otherwise. This keeps the
+   * strategy page's value on the same basis as the 仓位页 for the same claims.
+   */
+  const uncollectedFeeUsdPrice = (performance: ExecutorPerformance, claim: ExecutorUncollectedFee): number | null => {
+    if (!performance.quote) return null
+    const quoteAddress = performance.quote.address.toLowerCase()
+    const claimAddress = claim.address.toLowerCase()
+    const mark = quoteUsdByAddress.get(claimAddress)
+    if (mark !== undefined && Number.isFinite(mark) && mark > 0) return mark
+    if (claimAddress === quoteAddress) {
+      const quoteUsd = quoteUsdByAddress.get(quoteAddress)
+      return quoteUsd !== undefined && Number.isFinite(quoteUsd) && quoteUsd > 0 ? quoteUsd : null
+    }
+    // The non-quote pool token is the risk token — derive its mark from the
+    // quote mark and the current pool ratio, exactly like the positions page's
+    // pool fallback.
+    const quoteUsd = quoteUsdByAddress.get(quoteAddress)
+    const ratio = performance.price?.currentQuotePerRisk
+    return quoteUsd !== undefined && Number.isFinite(quoteUsd) && quoteUsd > 0
+        && ratio !== undefined && ratio !== null && Number.isFinite(ratio) && ratio > 0
+      ? quoteUsd * ratio
+      : null
+  }
+
+  /** USDG value of live uncollected LP fees priced per token; null when the
+   *  claims are absent or unpriced. */
+  const uncollectedLpFeesUsdg = (performance: ExecutorPerformance): number | null => {
+    const claims = performance.uncollectedFees
+    if (!claims) return null
+    const price0 = uncollectedFeeUsdPrice(performance, claims.token0)
+    const price1 = uncollectedFeeUsdPrice(performance, claims.token1)
+    if (price0 === null || price1 === null) return null
+    return (Number(claims.token0.raw) / 10 ** claims.token0.decimals) * price0
+      + (Number(claims.token1.raw) / 10 ** claims.token1.decimals) * price1
+  }
+
+  /** Claims-valued LP fees when the live claims price; otherwise the executor's
+   *  quote-converted total (legacy payloads without per-token claims). */
+  const strategyUncollectedLpFeeUsdg = (performance: ExecutorPerformance): number | null => {
+    const perToken = uncollectedLpFeesUsdg(performance)
+    if (perToken !== null) return perToken
+    return performance.summary ? stableValue(performance.summary.currentUncollectedFeesQuoteRaw, performance) : null
+  }
+
+  const uncollectedFeeTokenSymbol = (performance: ExecutorPerformance, claim: ExecutorUncollectedFee) => {
+    if (!performance.quote) return claim.symbol
+    if (claim.address.toLowerCase() === performance.quote.address.toLowerCase()) return performance.quote.symbol
+    if (performance.risk && claim.address.toLowerCase() === performance.risk.address.toLowerCase()) return performance.risk.symbol
+    return claim.symbol
+  }
+
+  /** "0.0012 AMC + 0.05 WETH"-style per-token uncollected LP fee amounts. */
+  const uncollectedFeeAmountsText = (performance: ExecutorPerformance): string | null => {
+    const claims = performance.uncollectedFees
+    if (!claims) return null
+    return [claims.token0, claims.token1].map((claim) =>
+      `${fmtAmount(BigInt(claim.raw), claim.decimals)} ${uncollectedFeeTokenSymbol(performance, claim)}`).join(' + ')
+  }
+
+  /** Display text for a strategy's uncollected LP fees: per-token amounts plus
+   *  the same token-level value the positions page shows. */
+  const uncollectedLpFeeText = (performance: ExecutorPerformance): string => {
+    const usd = strategyUncollectedLpFeeUsdg(performance)
+    const amounts = uncollectedFeeAmountsText(performance)
+    const valueText = usd === null ? null : `≈ ${stableTotal(usd)}`
+    if (amounts !== null) return valueText ? `${amounts} · ${valueText}` : amounts
+    return valueText ?? '—'
+  }
+
+  /** LP fees (claims-valued) + staking reward (quote-valued) in USDG. */
+  const uncollectedTotalUsdg = (performance: ExecutorPerformance): number | null => {
+    const lpUsd = uncollectedLpFeesUsdg(performance)
+    const rewardRaw = performance.unclaimedReward?.quoteRaw ?? null
+    const rewardUsd = rewardRaw !== null ? stableValue(rewardRaw, performance) : null
+    if (lpUsd === null && rewardUsd === null) return null
+    return (lpUsd ?? 0) + (rewardUsd ?? 0)
+  }
+
+  const uncollectedTotalText = (performance: ExecutorPerformance): string => {
+    const total = uncollectedTotalUsdg(performance)
+    if (total !== null) return `≈ ${stableTotal(total)}`
+    // Legacy payloads without per-token claims keep the quote-converted total.
+    return performance.summary ? stableAmount(performance.summary.currentUnclaimedTotalQuoteRaw, performance) : '—'
+  }
+
   const performancePnl = (performance: ExecutorPerformance) => {
     const summary = performance.summary
     if (!summary) return { raw: null, text: '—', pct: null }
@@ -773,14 +869,26 @@ export function StrategyTab() {
   const dashboardTodayPnlPositive = pnlUnit === 'stable'
     ? dashboardTodayStableRaw === null ? null : BigInt(dashboardTodayStableRaw) >= 0n
     : dashboardTodayQuoteRaw === null ? null : BigInt(dashboardTodayQuoteRaw) >= 0n
-  const dashboardDailyReturn = weightedDailyReturnPct(dashboardTodayRows.map((row) => {
-    const performance = performanceByStrategy.get(row.strategyId)
-    return {
-      pnlRaw: row.pnlRaw,
-      openingAssetsRaw: row.openingAssetsRaw,
-      openingAssetsStable: performance ? stableValue(row.openingAssetsRaw, performance) : null,
-    }
-  }))
+  // 当日收益率 follows the same currency basis as 当日盈亏, so the two can
+  // never disagree in sign: stable mode divides the USDG P/L by USDG opening
+  // assets; quote mode divides the quote P/L by quote opening assets. Both use
+  // the same row set as the P/L total above (rows whose day P/L is known).
+  const dashboardDailyReturn = pnlUnit === 'stable'
+    ? stableDailyReturnPct(dashboardTodayKnown.map((row) => {
+        const performance = performanceByStrategy.get(row.strategyId)
+        return {
+          pnlUsdgRaw: row.pnlUsdgRaw,
+          openingAssetsUsdgRaw: row.openingAssetsUsdgRaw,
+          openingAssetsStable: performance ? stableValue(row.openingAssetsRaw, performance) : null,
+        }
+      }))
+    : dashboardTodayQuoteAddresses.size === 1
+      ? quoteDailyReturnPct(dashboardTodayKnown.map((row) => ({
+          pnlRaw: row.pnlRaw,
+          openingAssetsRaw: row.openingAssetsRaw,
+          quoteAddress: row.quote.address,
+        })))
+      : null
   const dashboardMetricText = (rows: { performance: ExecutorPerformance; raw: string }[]) => {
     if (!rows.length) return '—'
     if (pnlUnit === 'stable') {
@@ -803,7 +911,16 @@ export function StrategyTab() {
     : [])
   const dashboardTodayCollectedFees = dashboardMetricText(dashboardCycleRows.map(({ performance, grossFeesRaw }) => ({ performance, raw: grossFeesRaw })))
   const dashboardTodayIncomeTax = dashboardMetricText(dashboardCycleRows.map(({ performance, incomeTaxRaw }) => ({ performance, raw: incomeTaxRaw })))
-  const dashboardUnclaimedFees = dashboardMetric('currentUncollectedFeesQuoteRaw')
+  // Stable mode prices each strategy's uncollected LP fees token-by-token
+  // (same basis as the positions page); quote mode keeps the quote aggregate.
+  const dashboardUnclaimedFees = pnlUnit === 'stable'
+    ? (() => {
+        const values = runningStrategies
+          .map(({ performance }) => performance?.summary && performance.quote ? strategyUncollectedLpFeeUsdg(performance) : null)
+          .filter((value): value is number => value !== null)
+        return values.length ? stableTotal(values.reduce((sum, value) => sum + value, 0)) : '—'
+      })()
+    : dashboardMetric('currentUncollectedFeesQuoteRaw')
   const dashboardWithdrawableProfit = dashboardMetric('profitReserveQuoteRaw')
   const dashboardTodayGas = dashboardMetricText(dashboardTodayRows.flatMap((row) => {
     const performance = performanceByStrategy.get(row.strategyId)
@@ -1200,7 +1317,7 @@ export function StrategyTab() {
                   <div className="performance-metric">
                     <span>{t('strategy.perfAssets')}</span>
                     <strong>≈ {stableAmount(performance.summary.currentValueQuoteRaw, performance)}</strong>
-                    <small>{quoteAmount(performance.summary.currentValueQuoteRaw, performance)} · {t('strategy.perfUncollected')} ≈ {stableAmount(performance.summary.currentUnclaimedTotalQuoteRaw, performance)}</small>
+                    <small>{quoteAmount(performance.summary.currentValueQuoteRaw, performance)} · {t('strategy.perfUncollected')} {uncollectedTotalText(performance)}</small>
                   </div>
                 </div>
                 <StrategyPnlCurve
@@ -1240,7 +1357,7 @@ export function StrategyTab() {
                   <span>{t('strategy.perfBaseline')} ≈ {stableAmount(performance.summary.baselineValueQuoteRaw, performance)} ({quoteAmount(performance.summary.baselineValueQuoteRaw, performance)})</span>
                   <span>{t('strategy.perfProfitReserve')} ≈ {stableAmount(performance.summary.profitReserveQuoteRaw, performance)} ({quoteAmount(performance.summary.profitReserveQuoteRaw, performance)})</span>
                   <span>{t('strategy.perfProfitWithdrawn')} ≈ {usdgAmount(performance.summary.withdrawnProfitUsdgRaw)} ({quoteAmount(performance.summary.withdrawnProfitQuoteRaw, performance)})</span>
-                  <span>{t('strategy.perfUncollectedLp')} ≈ {stableAmount(performance.summary.currentUncollectedFeesQuoteRaw, performance)} ({quoteAmount(performance.summary.currentUncollectedFeesQuoteRaw, performance)})</span>
+                  <span>{t('strategy.perfUncollectedLp')} {uncollectedLpFeeText(performance)}</span>
                   {performance.unclaimedReward ? (
                     <span>{t('strategy.perfUnclaimedReward')} {tokenAmount(performance.unclaimedReward.raw, performance.unclaimedReward.decimals, performance.unclaimedReward.symbol)} · ≈ {stableAmount(performance.unclaimedReward.quoteRaw, performance)} ({quoteAmount(performance.unclaimedReward.quoteRaw, performance)})</span>
                   ) : null}

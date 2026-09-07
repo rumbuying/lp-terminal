@@ -21,6 +21,7 @@ export function recordPerformanceDay(performance: CalendarPerformance) {
     gasRaw: performance.summary.gasCostQuoteRaw,
     executionRaw: performance.summary.executionCostQuoteRaw,
     assetsRaw: performance.summary.currentValueQuoteRaw,
+    assetsUsdgRaw: performance.summary.currentValueUsdgRaw,
     reopens: performance.summary.reopens,
   }
   recordStrategyDailyPoint(point)
@@ -63,6 +64,7 @@ export function calendarRows(fromDay?: number, toDay?: number) {
       closingPnlRaw: closingPnl, closingPnlUsdgRaw: closingPnlUsdg,
       gasRaw: rawDelta(String(row.opening_gas_raw), String(row.closing_gas_raw))!, executionRaw: rawDelta(String(row.opening_execution_raw), String(row.closing_execution_raw))!,
       openingAssetsRaw: text(row.opening_assets_raw), closingAssetsRaw: text(row.closing_assets_raw),
+      openingAssetsUsdgRaw: text(row.opening_assets_usdg_raw), closingAssetsUsdgRaw: text(row.closing_assets_usdg_raw),
       reopens: Number(row.closing_reopens) - Number(row.opening_reopens),
     }
   })
