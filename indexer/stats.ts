@@ -234,6 +234,67 @@ export async function up33StatsCycle(): Promise<string[]> {
 }
 
 export async function statsCycle(): Promise<string[]> {
-  const [gt, up33] = await Promise.all([gtCycle(), up33StatsCycle()]);
-  return [...new Set([...gt, ...up33])];
+  const [gt, up33, catalog] = await Promise.all([gtCycle(), up33StatsCycle(), catalogStatsCycle()]);
+  return [...new Set([...gt, ...up33, ...catalog])];
+}
+
+/** The POOLS-page universe — the top univ3/PancakeSwap-v3 pools by
+ * chain-derived TVL — enriched from DexScreener's ADDRESS-addressable batch
+ * endpoint. GT's listing sorts by volume, which wash-traded pools dominate,
+ * so real pools fell off the fetched pages and their stats went stale for
+ * days (the pools page was showing week-old 24h figures). Up33 CL pools are
+ * covered by up33StatsCycle; v2 stays out (PRD decision 2). */
+const CATALOG_UNIVERSE = 150;
+const CATALOG_MIN_TVL_USD = 10_000;
+
+export async function catalogStatsCycle(): Promise<string[]> {
+  if (!CHAIN.slugs.dexscreener) return [];
+  const rows = db.prepare(`SELECT p.address, COALESCE(s.tvl_usd, st.liq_usd, 0) AS tvl
+    FROM pools p
+    LEFT JOIN pool_state s ON s.address = p.address
+    LEFT JOIN pool_stats st ON st.address = p.address
+    WHERE p.proto IN ('univ3','pancakev3') AND COALESCE(s.tvl_usd, st.liq_usd, 0) >= ?
+    ORDER BY COALESCE(s.tvl_usd, st.liq_usd) DESC LIMIT ?`).all(CATALOG_MIN_TVL_USD, CATALOG_UNIVERSE) as { address: string }[];
+  const matched = new Set<string>();
+  for (let index = 0; index < rows.length; index += 30) {
+    const batch = rows.slice(index, index + 30).map((row) => row.address);
+    let pairs: DsPair[] = [];
+    try {
+      const response = await fetch(
+        `https://api.dexscreener.com/latest/dex/pairs/${CHAIN.slugs.dexscreener}/${batch.join(',')}`,
+        {
+          headers: { accept: 'application/json', 'user-agent': 'up33-lp-indexer/0.1' },
+          signal: AbortSignal.timeout(12_000),
+        },
+      );
+      if (response.ok) pairs = ((await response.json()) as { pairs?: DsPair[] }).pairs ?? [];
+    } catch {
+      // A later cycle retries; last-good market history remains published.
+    }
+    for (const pair of pairs) {
+      const address = pair.pairAddress?.toLowerCase();
+      if (!address) continue;
+      const proto = poolRow(address)?.proto;
+      if (proto !== 'univ3' && proto !== 'pancakev3') continue;
+      const h24 = pair.txns?.h24;
+      const txns = h24 ? (h24.buys ?? 0) + (h24.sells ?? 0) : null;
+      const liquidity = num(pair.liquidity?.usd);
+      upsertStats(address, {
+        m5: num(pair.volume?.m5), h1: num(pair.volume?.h1),
+        h6: num(pair.volume?.h6), h24: num(pair.volume?.h24),
+      }, txns, liquidity, 'dexscreener');
+      const depth = (liquidity ?? 0) / 2;
+      const base = pair.baseToken?.address?.toLowerCase();
+      const quote = pair.quoteToken?.address?.toLowerCase();
+      const baseUsd = num(pair.priceUsd);
+      const native = pair.priceNative ? Number(pair.priceNative) : null;
+      if (depth > 0 && base && plausibleUsd(baseUsd)) setTokenPrice(base, baseUsd, depth, 'ds');
+      if (depth > 0 && quote && plausibleUsd(baseUsd) && native && native > 0 && plausibleUsd(baseUsd / native))
+        setTokenPrice(quote, baseUsd / native, depth, 'ds');
+      matched.add(address);
+    }
+    if (index + 30 < rows.length) await sleep(250);
+  }
+  if (rows.length) log(`[stats] DexScreener catalog: ${matched.size}/${rows.length} pools matched`);
+  return [...matched];
 }
