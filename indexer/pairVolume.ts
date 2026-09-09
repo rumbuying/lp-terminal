@@ -28,8 +28,10 @@ import {
 
 const DAY_SECONDS = 86_400;
 const WINDOW_DAYS = 45;
-/** Families kept in the kv snapshot — pairs nobody ranked are not analyzed. */
-const MAX_FAMILIES = 64;
+/** Families kept in the kv snapshot — pairs nobody ranked are not analyzed.
+ * Sized above the rank table's own row count so single-member families of
+ * ranked pools survive the cut. */
+const MAX_FAMILIES = 128;
 const NEWCOMER_AGE_DAYS = 14;
 const NEWCOMER_SHARE_STEP = 0.05;
 const NEWCOMER_MIN_DAY_USD = 1_000;
