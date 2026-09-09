@@ -462,39 +462,30 @@ export function pairTotals(vols: readonly (readonly (number | null)[])[]): (numb
 
 /**
  * Independent daily volumes from OWN rolling-window snapshots (PRD §7.2's
- * escape hatch for venues without a daily source): two vol24h samples spaced
- * one WINDOW apart differ to exactly the volume of the ~day between them.
- * Sweep timing is irregular, so exact midnight samples are rare while
- * window-apart pairs are everywhere; a ±tolerance on the spacing costs a
- * ≤tolerance skew of the covered slice. Samples must ascend; each sample
- * pairs at most once (chained), a negative difference is a source revision
- * and drops the day, and every assigned day is the slice's midpoint's UTC day.
+ * escape hatch for venues without a daily source). Exact 24h-apart sample
+ * pairs are rare because sweep timestamps drift, but vol24h at the LAST
+ * sample of day D+1 minus vol24h at the LAST sample of day D is the volume of
+ * (t_D, t_{D+1}] — a ~24h slice crossing the D→D+1 boundary with at most
+ * sub-hour leakage — regardless of drift. A day with no samples breaks the
+ * chain (no interpolation); a negative difference is a source revision and
+ * drops the day.
  */
-export function dailyFromSnapshotPairs(
+export function dailyFromDayEndSamples(
   samples: readonly { ts: number; vol24h: number }[],
-  windowSeconds = 86_400,
-  toleranceSeconds = 300,
 ): { day: number; vol: number }[] {
-  const byDay = new Map<number, number>()
-  let i = 0
-  while (i < samples.length) {
-    const start = samples[i]
-    if (!(start.vol24h >= 0) || !Number.isFinite(start.vol24h)) {
-      i++
-      continue
-    }
-    let j = i + 1
-    while (j < samples.length && samples[j].ts < start.ts + windowSeconds - toleranceSeconds) j++
-    if (j >= samples.length || samples[j].ts > start.ts + windowSeconds + toleranceSeconds) {
-      i++
-      continue
-    }
-    const vol = samples[j].vol24h - start.vol24h
-    if (vol >= 0 && Number.isFinite(vol)) {
-      const day = Math.floor((start.ts + windowSeconds / 2) / 86_400) * 86_400
-      if (!byDay.has(day)) byDay.set(day, vol)
-    }
-    i = j
+  const lastByDay = new Map<number, { ts: number; vol24h: number }>()
+  for (const s of samples) {
+    if (!Number.isFinite(s.vol24h) || s.vol24h < 0) continue
+    lastByDay.set(Math.floor(s.ts / 86_400) * 86_400, s) // ascending input → the last sample of each day wins
   }
-  return [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([day, vol]) => ({ day, vol }))
+  const days = [...lastByDay.keys()].sort((a, b) => a - b)
+  const out: { day: number; vol: number }[] = []
+  for (let i = 1; i < days.length; i++) {
+    if (days[i] - days[i - 1] !== 86_400) continue // an unsampled day breaks the chain
+    const a = lastByDay.get(days[i - 1])!
+    const b = lastByDay.get(days[i])!
+    const vol = b.vol24h - a.vol24h
+    if (vol >= 0 && Number.isFinite(vol)) out.push({ day: days[i], vol })
+  }
+  return out
 }

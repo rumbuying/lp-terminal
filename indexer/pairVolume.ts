@@ -17,7 +17,7 @@ import { ADDR } from '../src/config/addresses';
 import { db, kvGet, kvSet, snapshotRawVolumes } from './store';
 import {
   classifyVolumeTrend,
-  dailyFromSnapshotPairs,
+  dailyFromDayEndSamples,
   detectMigrationEvent,
   diagnosePair,
   pairShares,
@@ -385,7 +385,7 @@ export function buildPairVolumeSnapshot(input: {
       const identity = row.address.toLowerCase();
       if (seeded.has(identity)) continue;
       const raw = snapshotRawVolumes(identity, input.nowTs - (WINDOW_DAYS + 1) * DAY_SECONDS);
-      const daily = dailyFromSnapshotPairs(raw);
+      const daily = dailyFromDayEndSamples(raw);
       if (daily.length < SNAPSHOT_MIN_DAYS) continue;
       const series = new Map(daily.map((d) => [d.day, d.vol]));
       const family = familyFor(row.token0, row.token1, row.sym0 ?? '?', row.sym1 ?? '?');
