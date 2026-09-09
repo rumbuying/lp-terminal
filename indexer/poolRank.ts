@@ -51,8 +51,13 @@ const YEAR_DAYS = 365;
 const SECONDS_PER_YEAR = 31_536_000;
 /** Pools below this much 7d fee volume are dust to an LP, whatever the ratios say. */
 const MIN_FEE_VOLUME_7D_USD = 50;
-/** V3 candidate cap: each pool costs two paced GT OHLCV calls per cycle. */
-const UNIV3_CANDIDATES = 12;
+/** V3 candidate cap: each pool costs two paced GT OHLCV calls per cycle.
+ * 30 (GT volume top-30, two listing pages) covers the pools page's active
+ * univ3 rows — the token-pair attribution fallback inherits every candidate's
+ * daily series, so this number is the coverage knob for the whole feature. */
+const UNIV3_CANDIDATES = 30;
+/** GT listing pages pulled for the candidate set (20 pools per page). */
+const UNIV3_LIST_PAGES = 2;
 /** Daily sigma at or above this is data corruption (a pulled pool re-anchoring), not a market. */
 const MAX_PLAUSIBLE_DAILY_SIGMA = 1.0;
 /** OHLCV history kept per request; ≥8 closes are required for a sigma estimate. */
@@ -237,23 +242,28 @@ const addressFromRelation = (id: string | undefined): string | null => {
 type GtCandidate = { name: string; address: string; tvlUsd: number; volDayUsd: number; token0: string | null; token1: string | null };
 
 async function gtUniv3TopPools(network: string, dex: string): Promise<GtCandidate[]> {
-  const body = (await gtFetch(`/networks/${network}/dexes/${dex}/pools?page=1&sort=h24_volume_usd_desc`, `v3list`)) as GtPoolList | null;
-  const list = body?.data ?? [];
   const out: GtCandidate[] = [];
-  for (const p of list) {
-    const address = p.id?.replace(`${network}_`, '');
-    const name = p.attributes?.name ?? '';
-    const tvlUsd = Number(p.attributes?.reserve_in_usd ?? 0);
-    const volDayUsd = Number(p.attributes?.volume_usd?.h24 ?? 0);
-    if (!address || !name || !(tvlUsd > 0)) continue;
-    out.push({
-      name,
-      address,
-      tvlUsd,
-      volDayUsd,
-      token0: addressFromRelation(p.relationships?.token0?.data?.id),
-      token1: addressFromRelation(p.relationships?.token1?.data?.id),
-    });
+  const seen = new Set<string>();
+  for (let page = 1; page <= UNIV3_LIST_PAGES; page++) {
+    const body = (await gtFetch(`/networks/${network}/dexes/${dex}/pools?page=${page}&sort=h24_volume_usd_desc`, `v3list${page}`)) as GtPoolList | null;
+    for (const p of body?.data ?? []) {
+      const address = p.id?.replace(`${network}_`, '');
+      const name = p.attributes?.name ?? '';
+      const tvlUsd = Number(p.attributes?.reserve_in_usd ?? 0);
+      const volDayUsd = Number(p.attributes?.volume_usd?.h24 ?? 0);
+      if (!address || !name || !(tvlUsd > 0)) continue;
+      const k = address.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({
+        name,
+        address,
+        tvlUsd,
+        volDayUsd,
+        token0: addressFromRelation(p.relationships?.token0?.data?.id),
+        token1: addressFromRelation(p.relationships?.token1?.data?.id),
+      });
+    }
   }
   out.sort((a, b) => b.volDayUsd - a.volDayUsd);
   return out.slice(0, UNIV3_CANDIDATES);

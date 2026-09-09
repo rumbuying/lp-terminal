@@ -33,10 +33,12 @@ export function PoolVolumeMini(props: { identity?: string | null; token0?: strin
   const family = useVolumePairByTokens(!exact ? props.token0 : null, !exact ? props.token1 : null)
   const sibling = (() => {
     if (exact || !family.data?.ready) return null
-    const priced = family.data.pools.filter((m) => m.dailyVol.some((v) => v !== null))
-    if (!priced.length) return null
-    // the family member carrying the most recent volume speaks for the pair
-    return priced.reduce((a, b) => (b.dailyVol.at(-1) ?? 0) > (a.dailyVol.at(-1) ?? 0) ? b : a)
+    // a classified member speaks for the pair; a dust member's "unknown" says
+    // nothing and would render as a bare dash
+    const classified = family.data.pools.filter((m) => m.trend.class !== 'unknown' && m.dailyVol.some((v) => v !== null))
+    const pool = classified.length ? classified : family.data.pools.filter((m) => m.dailyVol.some((v) => v !== null))
+    if (!pool.length) return null
+    return pool.reduce((a, b) => (b.dailyVol.at(-1) ?? 0) > (a.dailyVol.at(-1) ?? 0) ? b : a)
   })()
 
   const row = exact ?? null
