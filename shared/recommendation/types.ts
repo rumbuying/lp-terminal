@@ -16,6 +16,13 @@ export type RecommendationMarketSnapshot = {
   vol24hUsd: number | null
 }
 
+/** The pool's day-level volume-trend class from the rank snapshot (PRD FR-REC-1). */
+export type CandidateVolumeTrend = {
+  class: 'rising' | 'new_hot' | 'stable' | 'fading' | 'collapsing' | 'unknown'
+  vsBaseline: number | null
+  slope7dPct: number | null
+}
+
 export type RecommendationTickSample = { ts: number; tick: number }
 
 export type RecommendationCandidate = {
@@ -56,6 +63,8 @@ export type RecommendationCandidate = {
   tickHistory: RecommendationTickSample[]
   /** present only while the indexer's rank snapshot is fresh */
   poolRank?: RecommendationRankPrior
+  /** the rank snapshot's volume-trend class — same freshness gate as poolRank */
+  volumeTrend?: CandidateVolumeTrend
   /** true when the pool entered the universe only through the rank table's
    * coverage seeds (docs: the candidate universe's second entry) */
   rankSeeded?: boolean
@@ -146,6 +155,8 @@ export type RecommendationItem = {
   warnings: string[]
   /** the pool-rank prior this projection was scored against, when fresh */
   poolRank?: RecommendationRankPrior
+  /** the scored trend class (FR-UI-5) — rides along for the card's heat line */
+  volumeTrend?: CandidateVolumeTrend
 }
 
 export type RecommendationResponse = {

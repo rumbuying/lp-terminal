@@ -191,6 +191,7 @@ function RecommendationModeSection(props: {
     if (code === 'volume_above_baseline') return t('pools.recWarnVolumeBaseline')
     if (code === 'emit_apr_divergence') return t('pools.recWarnEmitApr')
     if (code === 'cost_default') return t('pools.recWarnCostDefault')
+    if (code === 'volume_fading') return t('pools.recWarnVolumeFading')
     return null
   }
 
@@ -230,6 +231,22 @@ function RecommendationModeSection(props: {
                     title={t('pools.recPriorTip')}
                   >
                     {t('pools.recPrior', { coverage: item.poolRank.coverage.toFixed(1), sigma: sigmaPct(item.poolRank.sigmaDaily) })}
+                  </div>
+                )}
+                {item.volumeTrend && item.volumeTrend.class !== 'unknown' && (
+                  <div
+                    className={`mono-sm ${item.volumeTrend.class === 'rising' ? 'green' : item.volumeTrend.class === 'fading' || item.volumeTrend.class === 'collapsing' ? 'amber' : 'dim'}`}
+                    title={t('pools.recTrendTip')}
+                  >
+                    {item.volumeTrend.class === 'new_hot'
+                      ? t('pools.recTrendNewHot')
+                      : t('pools.recTrend', {
+                          klass: t(`poolRank.trendClass.${item.volumeTrend.class}`),
+                          slope: item.volumeTrend.slope7dPct !== null ? `${item.volumeTrend.slope7dPct >= 0 ? '+' : ''}${item.volumeTrend.slope7dPct.toFixed(0)}%` : '—',
+                        })}
+                    {item.volumeTrend.class === 'fading' || item.volumeTrend.class === 'collapsing'
+                      ? ` · ${t('pools.recTrendFadeNote')}`
+                      : null}
                   </div>
                 )}
                 <div className="recommendation-main">

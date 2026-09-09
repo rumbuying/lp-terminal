@@ -6,6 +6,7 @@ import { addWallet, audit, quarantineInterruptedJobs, walletByAddress, walletByI
 import { configuredFileSigner } from './vault'
 import { superviseOnce } from './supervisor'
 import { captureDailyPerformance } from './calendar'
+import { recordVolumeTrendAlerts } from './volumeAlert'
 
 const fileSigner = configuredFileSigner()
 if (fileSigner) {
@@ -33,9 +34,11 @@ void monitorOnce()
 void runOnce()
 void superviseOnce()
 void captureDailyPerformance()
+void recordVolumeTrendAlerts()
 setInterval(() => void captureDailyPerformance(), 5 * 60_000)
 setInterval(() => {
   void superviseOnce()
   void monitorOnce()
   void runOnce()
+  void recordVolumeTrendAlerts()
 }, EXECUTOR.pollMs)

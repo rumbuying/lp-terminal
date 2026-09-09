@@ -3209,3 +3209,93 @@ th.sortable.on { color: var(--acc); }
   .strategy-account-actions { width: 100%; flex-wrap: wrap; }
   .strategy-account-actions .input { flex: 1; min-width: 160px; }
 }
+
+/* ---------- pool rank: volume trend badges + pair attribution panel ---------- */
+.pr-trend {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+.pr-trend .badge {
+  font-size: 0.68rem;
+  padding: 1px 6px;
+}
+.pr-spark {
+  color: var(--dim);
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+.pr-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+.pr-chip {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 2px 9px;
+  cursor: pointer;
+  color: var(--dim);
+  font: inherit;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+.pr-chip:hover { border-color: var(--acc-dim); color: var(--fg); }
+.pr-chip.on { color: var(--acc); border-color: var(--acc-dim); }
+.pr-banner {
+  border: 1px solid var(--amber);
+  border-radius: var(--r-md);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pr-banner-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.pr-expand-btn {
+  background: none;
+  border: none;
+  padding: 0 4px;
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 0.7rem;
+}
+.pr-expand-btn:hover { color: var(--fg); }
+.pr-expand > td {
+  background: var(--panel2);
+  border-top: 1px dashed var(--line);
+}
+.pr-panel {
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pr-charts { display: flex; flex-direction: column; gap: 2px; }
+.pr-legend { display: flex; gap: 12px; flex-wrap: wrap; }
+tr.pr-focus td { background: rgba(var(--acc-rgb), 0.06); }
+.pr-emerging { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.pr-emerging-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pos-trend-warn {
+  border: 1px solid var(--amber);
+  border-radius: var(--r-md);
+  padding: 6px 10px;
+  margin: 6px 0 2px;
+}
+.pos-trend-warn a { color: inherit; text-decoration: underline; }

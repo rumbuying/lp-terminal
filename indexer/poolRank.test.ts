@@ -69,8 +69,8 @@ function makePool(overrides: Partial<SubgraphPool> = {}): SubgraphPool {
     id: '0xpool',
     tickSpacing: 60,
     totalValueLockedUSD: '100000',
-    token0: { symbol: 'AAA' },
-    token1: { symbol: 'BBB' },
+    token0: { id: '0xtokena', symbol: 'AAA' },
+    token1: { id: '0xtokenb', symbol: 'BBB' },
     poolDayData: oscillating,
     ...overrides,
   };

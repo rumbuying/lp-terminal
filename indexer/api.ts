@@ -36,6 +36,7 @@ import {
   BSC_UNI_V3_SUBGRAPH_ID,
 } from './v3Subgraph';
 import { getPoolRankApi, getPoolRankSnapshot, POOL_RANK_ENABLED, type PoolRankRow } from './poolRank';
+import { getPairVolumeApi } from './pairVolume';
 import { SerializedResponseCache, type SerializedResponse } from './responseCache';
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8' };
@@ -3384,6 +3385,17 @@ export function getRecommendationCandidates(params: Params) {
               },
             }
           : {}),
+        // The volume-trend class rides the same freshness gate as the rank
+        // prior (PRD FR-REC-1) — stale snapshots attach neither.
+        ...(rankPrior?.trend
+          ? {
+              volumeTrend: {
+                class: rankPrior.trend.class,
+                vsBaseline: rankPrior.trend.vsBaseline,
+                slope7dPct: rankPrior.trend.slope7dPct,
+              },
+            }
+          : {}),
         ...(rankSeeded ? { rankSeeded: true } : {}),
       };
     }),
@@ -3538,6 +3550,13 @@ export function createApiServer(): Server {
         return;
       } else if (url.pathname === '/api/pool-rank') {
         body = getPoolRankApi();
+        cache = 'public, max-age=300';
+      } else if (url.pathname === '/api/volume/pair') {
+        // kv-verbatim read (see pairVolume.ts): the cycle computed everything;
+        // the route only routes an identity to its family payload.
+        const pool = url.searchParams.get('pool')?.trim() ?? '';
+        if (!/^0x[0-9a-fA-F]{40,64}$/.test(pool)) throw new ApiInputError('pool must be an address or poolId');
+        body = getPairVolumeApi(pool);
         cache = 'public, max-age=300';
       } else if (url.pathname === '/api/v4/positions') {
         body = getV4Positions(url.searchParams);

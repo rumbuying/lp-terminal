@@ -27,6 +27,7 @@ import {
 import { largestFundable } from "../../lib/clDeposit";
 import { fmtApr } from "../../lib/apr";
 import { fmtAmount, fmtNum, fmtUsd, shortAddr } from "../../lib/format";
+import { PositionTrendWarning } from "./PositionTrendWarning";
 import { effectiveClFeePpm, poolIdentity } from "../../lib/poolIdentity";
 import {
   buildV2RemoveLiquidityCall,
@@ -965,6 +966,8 @@ export function ClCard({
           )}
         </div>
       </div>
+
+      <PositionTrendWarning identity={isV4 ? pos.pool.poolId ?? null : pos.pool.address} />
 
       <div className="pmetrics mono-sm">
         <PCell

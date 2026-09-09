@@ -391,7 +391,17 @@ export function scoreCandidate(args: {
     const tickConfidence = Math.min(1, replay.coverageHours / 24)
     const costConfidence = Math.min(1, cost.sampleCycles / 20)
     const marketConfidence = [candidate.vol1hUsd, candidate.vol6hUsd, candidate.vol24hUsd].filter(finite).length / 3
-    const confidenceScore = Math.max(0, Math.min(1, 0.45 * tickConfidence + 0.25 * lookback.confidence + 0.2 * costConfidence + 0.1 * marketConfidence))
+    let confidenceScore = Math.max(0, Math.min(1, 0.45 * tickConfidence + 0.25 * lookback.confidence + 0.2 * costConfidence + 0.1 * marketConfidence))
+    // FR-REC-2: the day-level trend tempers the projection the same way the
+    // rank's baseline tempers the hourly one. A fading/cliffing pool caps the
+    // displayed confidence — the trailing volume the projection is priced on
+    // is leaving. A verified rise that the walk-forward did NOT call a spike
+    // adds a small nudge; new_hot gets nothing (days too few to trust).
+    const trendClass = candidate.volumeTrend?.class ?? null
+    const volumeFading = trendClass === 'fading' || trendClass === 'collapsing'
+    const volumeRising = trendClass === 'rising' && lookback.reason !== 'short_spike'
+    if (volumeFading) confidenceScore = Math.min(confidenceScore, 0.5)
+    else if (volumeRising) confidenceScore = Math.min(1, confidenceScore + 0.05)
     const rawCenter = tickToPrice(candidate.tick, candidate.decimals0, candidate.decimals1)
     const actualCenter = candidate.token0IsRisk ? rawCenter : 1 / rawCenter
     const warnings = [
@@ -406,6 +416,7 @@ export function scoreCandidate(args: {
       ...(belowLvrFloor && risk !== 'conservative' ? ['below_lvr_floor'] : []),
       ...(aboveBaseline ? ['volume_above_baseline'] : []),
       ...(emitMismatch ? ['emit_apr_divergence'] : []),
+      ...(volumeFading ? ['volume_fading'] : []),
     ]
     const gateReasons = [
       ...(replay.reopens > maxDailyReopens[risk] ? ['excessive_reopens' as const] : []),
@@ -457,6 +468,7 @@ export function scoreCandidate(args: {
       gateReasons,
       warnings,
       ...(prior ? { poolRank: prior } : {}),
+      ...(candidate.volumeTrend ? { volumeTrend: candidate.volumeTrend } : {}),
     } satisfies RecommendationItem
   })
 }

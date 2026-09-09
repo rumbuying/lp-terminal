@@ -39,6 +39,8 @@ import { CHAIN, GT, log, now, sleep, TUNE } from './config';
 import { clGaugeAbi, clPoolAbi, voterAbi } from '../src/abi';
 import { mc, ok, safeError, type Call } from './rpc';
 import { kvGet, kvSet } from './store';
+import { classifyVolumeTrend, type VolumeTrend } from './volumeTrend';
+import { buildPairVolumeSnapshot, storePairVolumeSnapshot, type MigrationEventItem } from './pairVolume';
 
 export const POOL_RANK_ENABLED = CHAIN.key === 'robinhood';
 
@@ -71,6 +73,19 @@ const kv = {
 
 export type PoolRankVenue = 'up33-cl' | 'univ3';
 
+/** A pool too young for the rank's σ/coverage gates but with real volume —
+ * surfaced with its trend badge only, never entry semantics (PRD §9.1). */
+export type EmergingRow = {
+  venue: PoolRankVenue;
+  pool: string;
+  address: string;
+  feeBps: number;
+  tickSpacing: number | null;
+  tvlUsd: number;
+  volDayUsd: number;
+  trend: VolumeTrend;
+};
+
 export type PoolRankRow = {
   venue: PoolRankVenue;
   pool: string;
@@ -88,6 +103,8 @@ export type PoolRankRow = {
   emitApr: number | null;
   volumePersistence: number;
   daysActive: number;
+  /** volume-trend classification — docs/VOLUME-TREND-PRD.zh-CN.md §5.1 */
+  trend: VolumeTrend;
 };
 
 export type PoolRankSnapshot = {
@@ -97,6 +114,10 @@ export type PoolRankSnapshot = {
   upPriceUsd: number | null;
   rows: PoolRankRow[];
   dropped: { pool: string; reason: string }[];
+  /** young pools below the σ gate, trend-badged only (PRD §9.1) */
+  emerging: EmergingRow[];
+  /** pair-level migration events, freshest magnitude first (§ FR-CALC-3) */
+  migrationEvents: MigrationEventItem[];
 };
 
 // ── pure metric math (unit-tested) ─────────────────────────────────────────
@@ -136,6 +157,24 @@ export function coverageOf(feeApr: number, sigmaDaily: number): number | null {
 export function volumePersistence(last7DailyAvg: number, lifetimeDailyAvg: number): number {
   if (!(lifetimeDailyAvg > 0)) return 0;
   return last7DailyAvg / lifetimeDailyAvg;
+}
+
+/** Day-level trend helpers (PRD §7.2): only INDEPENDENT full-day buckets may
+ * reach classifyVolumeTrend — a rolling-window snapshot never does. */
+const DAY_SECONDS = 86_400;
+const dayStartSec = (ts: number): number => Math.floor(ts / DAY_SECONDS) * DAY_SECONDS;
+const todayStartSec = (): number => dayStartSec(now());
+
+/**
+ * Independent full-day volumes, oldest→newest. Entries dated in the CURRENT
+ * UTC day are the in-progress bucket and are stripped before classification —
+ * a half-filled day would read as a collapse to every ratio here.
+ */
+function fullDayDailyVol(entries: readonly { ts: number; vol: number }[], limit = 14): { vol: (number | null)[]; days: number } {
+  const today = todayStartSec();
+  const full = entries.filter((e) => dayStartSec(e.ts) < today);
+  const window = full.slice(-limit);
+  return { vol: window.map((e) => (Number.isFinite(e.vol) && e.vol > 0 ? e.vol : null)), days: full.length };
 }
 
 // ── GeckoTerminal access (paced, kv-cached, stale-on-failure) ──────────────
@@ -178,20 +217,43 @@ async function gtFetch(path: string, cacheKey: string): Promise<unknown | null> 
 }
 
 type GtPoolList = {
-  data?: { id: string; attributes: { name?: string; reserve_in_usd?: string; volume_usd?: { h24?: string } } }[];
+  data?: {
+    id: string;
+    attributes: { name?: string; reserve_in_usd?: string; volume_usd?: { h24?: string } };
+    relationships?: {
+      token0?: { data?: { id?: string } };
+      token1?: { data?: { id?: string } };
+    };
+  }[];
 };
 
-async function gtUniv3TopPools(network: string, dex: string): Promise<{ name: string; address: string; tvlUsd: number; volDayUsd: number }[]> {
+/** GT relationship ids look like "/networks/robinhood/tokens/0xabc…" — the
+ * trailing segment is the address the pair-key needs. */
+const addressFromRelation = (id: string | undefined): string | null => {
+  const last = id?.split('/').pop();
+  return last && last.startsWith('0x') && last.length === 42 ? last.toLowerCase() : null;
+};
+
+type GtCandidate = { name: string; address: string; tvlUsd: number; volDayUsd: number; token0: string | null; token1: string | null };
+
+async function gtUniv3TopPools(network: string, dex: string): Promise<GtCandidate[]> {
   const body = (await gtFetch(`/networks/${network}/dexes/${dex}/pools?page=1&sort=h24_volume_usd_desc`, `v3list`)) as GtPoolList | null;
   const list = body?.data ?? [];
-  const out: { name: string; address: string; tvlUsd: number; volDayUsd: number }[] = [];
+  const out: GtCandidate[] = [];
   for (const p of list) {
     const address = p.id?.replace(`${network}_`, '');
     const name = p.attributes?.name ?? '';
     const tvlUsd = Number(p.attributes?.reserve_in_usd ?? 0);
     const volDayUsd = Number(p.attributes?.volume_usd?.h24 ?? 0);
     if (!address || !name || !(tvlUsd > 0)) continue;
-    out.push({ name, address, tvlUsd, volDayUsd });
+    out.push({
+      name,
+      address,
+      tvlUsd,
+      volDayUsd,
+      token0: addressFromRelation(p.relationships?.token0?.data?.id),
+      token1: addressFromRelation(p.relationships?.token1?.data?.id),
+    });
   }
   out.sort((a, b) => b.volDayUsd - a.volDayUsd);
   return out.slice(0, UNIV3_CANDIDATES);
@@ -222,8 +284,8 @@ type SubgraphPool = {
   id: string;
   tickSpacing: number;
   totalValueLockedUSD: string;
-  token0: { symbol: string };
-  token1: { symbol: string };
+  token0: { id: string; symbol: string };
+  token1: { id: string; symbol: string };
   poolDayData: SubgraphDay[];
 };
 
@@ -231,7 +293,7 @@ async function fetchUp33Subgraph(): Promise<SubgraphPool[]> {
   const query = `{
     pools(first: 100, orderBy: totalValueLockedUSD, orderDirection: desc) {
       id tickSpacing totalValueLockedUSD
-      token0 { symbol } token1 { symbol }
+      token0 { id symbol } token1 { id symbol }
       poolDayData(first: 40, orderBy: date, orderDirection: desc) {
         date volumeUSD sqrtPrice txCount
       }
@@ -300,9 +362,10 @@ async function fetchUp33Onchain(addresses: readonly string[]): Promise<Map<strin
   return new Map(addresses.map((address, i) => [address.toLowerCase(), per[i]]));
 }
 
-export function up33Rows(pools: SubgraphPool[], onchain: Map<string, Up33Onchain>, upPriceUsd: number | null): { rows: PoolRankRow[]; dropped: { pool: string; reason: string }[] } {
+export function up33Rows(pools: SubgraphPool[], onchain: Map<string, Up33Onchain>, upPriceUsd: number | null): { rows: PoolRankRow[]; dropped: { pool: string; reason: string }[]; emerging: EmergingRow[] } {
   const rows: PoolRankRow[] = [];
   const dropped: { pool: string; reason: string }[] = [];
+  const emerging: EmergingRow[] = [];
   for (const pool of pools) {
     const name = `${pool.token0.symbol}/${pool.token1.symbol}`;
     const days = pool.poolDayData;
@@ -320,7 +383,26 @@ export function up33Rows(pools: SubgraphPool[], onchain: Map<string, Up33Onchain
       dropped.push({ pool: name, reason: 'on-chain reads unavailable' });
       continue;
     }
+    // Volume trend from INDEPENDENT full-day buckets: subgraph poolDayData is
+    // newest-first and its first entry is the in-progress day, so it is
+    // dropped before classification (PRD §7.2). The span of full days is the
+    // age lower bound that routes hot young pools to new_hot.
+    const daily = fullDayDailyVol([...days].reverse().map((d) => ({ ts: d.date, vol: Number(d.volumeUSD) })));
+    const trend = classifyVolumeTrend({ dailyVol: daily.vol, ageDaysLowerBound: Math.max(0, days.length - 1), rankQualified: true });
     if (sigmaDaily === null) {
+      // Young pool: no σ → no coverage → not rankable, but with real volume it
+      // belongs in the emerging list with its trend badge (PRD §9.1).
+      if (trend.class !== 'unknown')
+        emerging.push({
+          venue: 'up33-cl',
+          pool: name,
+          address: pool.id,
+          feeBps: feePpm / 100,
+          tickSpacing: pool.tickSpacing,
+          tvlUsd,
+          volDayUsd: vol7 / 7,
+          trend,
+        });
       dropped.push({ pool: name, reason: 'insufficient price history' });
       continue;
     }
@@ -360,16 +442,25 @@ export function up33Rows(pools: SubgraphPool[], onchain: Map<string, Up33Onchain
       emitApr,
       volumePersistence: volumePersistence(vol7 / 7, lifetimeAvg),
       daysActive,
+      trend,
     });
   }
-  return { rows, dropped };
+  return { rows, dropped, emerging };
 }
 
 // ── official Uniswap v3 leg ────────────────────────────────────────────────
 
-async function univ3Rows(network: string, dex: string): Promise<{ rows: PoolRankRow[]; dropped: { pool: string; reason: string }[] }> {
+async function univ3Rows(network: string, dex: string): Promise<{
+  rows: PoolRankRow[];
+  dropped: { pool: string; reason: string }[];
+  emerging: EmergingRow[];
+  candidates: GtCandidate[];
+  candles: Map<string, GtCandle[]>;
+}> {
   const rows: PoolRankRow[] = [];
   const dropped: { pool: string; reason: string }[] = [];
+  const emerging: EmergingRow[] = [];
+  const candles = new Map<string, GtCandle[]>();
   const candidates = await gtUniv3TopPools(network, dex);
   for (const candidate of candidates) {
     const feeMatch = candidate.name.match(/([\d.]+)%/);
@@ -383,8 +474,24 @@ async function univ3Rows(network: string, dex: string): Promise<{ rows: PoolRank
       dropped.push({ pool: candidate.name, reason: 'OHLCV unavailable' });
       continue;
     }
+    candles.set(candidate.address.toLowerCase(), usdCandles);
     const sigmaDaily = dailySigma(tokenCandles.map((c) => c[4]));
+    // Same independent-buckets rule as the UP33 leg: GT's latest daily candle
+    // for the running UTC day is partial and must not reach the classifier.
+    const daily = fullDayDailyVol(usdCandles.map((c) => ({ ts: c[0], vol: c[5] })));
     if (sigmaDaily === null) {
+      const trend = classifyVolumeTrend({ dailyVol: daily.vol, ageDaysLowerBound: daily.days, rankQualified: false });
+      if (trend.class !== 'unknown')
+        emerging.push({
+          venue: 'univ3',
+          pool: candidate.name,
+          address: candidate.address,
+          feeBps,
+          tickSpacing: null,
+          tvlUsd: candidate.tvlUsd,
+          volDayUsd: candidate.volDayUsd,
+          trend,
+        });
       dropped.push({ pool: candidate.name, reason: 'insufficient price history' });
       continue;
     }
@@ -423,9 +530,10 @@ async function univ3Rows(network: string, dex: string): Promise<{ rows: PoolRank
       emitApr: null,
       volumePersistence: volumePersistence(volDayUsd, lifetimeDaily),
       daysActive: usdCandles.length,
+      trend: classifyVolumeTrend({ dailyVol: daily.vol, ageDaysLowerBound: daily.days, rankQualified: true }),
     });
   }
-  return { rows, dropped };
+  return { rows, dropped, emerging, candidates, candles };
 }
 
 // ── cycle orchestration + kv snapshot ──────────────────────────────────────
@@ -450,10 +558,31 @@ export type PoolRankApi = {
   ageSeconds: number | null;
   nextRefreshSeconds: number | null;
   rows: PoolRankRow[];
+  emerging: EmergingRow[];
   dropped: { pool: string; reason: string }[];
+  migrationEvents: MigrationEventItem[];
   upPriceUsd: number | null;
   windowDays: number;
 };
+
+/** Legacy kv snapshots (written before the trend fields shipped) may still be
+ * served right after a deploy; rows without a trend read as explicit unknown
+ * instead of crashing the badge. */
+const UNKNOWN_TREND: VolumeTrend = {
+  class: 'unknown',
+  vsBaseline: null,
+  slope7dPct: null,
+  consecutiveRiseDays: null,
+  consecutiveFallDays: null,
+  daysToVerified: null,
+  confidence: 0,
+  dailyVol: [],
+  daysSampled: 0,
+};
+
+function withTrend(rows: PoolRankRow[]): PoolRankRow[] {
+  return rows.map((row) => ({ ...row, trend: row.trend ?? UNKNOWN_TREND }));
+}
 
 export function getPoolRankApi(): PoolRankApi {
   const snapshot = getPoolRankSnapshot();
@@ -465,8 +594,10 @@ export function getPoolRankApi(): PoolRankApi {
     ageSeconds: snapshot ? Math.max(0, now() - snapshot.generatedAt) : null,
     nextRefreshSeconds:
       successAt > 0 ? Math.max(0, Math.round((TUNE.poolRankMs - (Date.now() - successAt * 1000)) / 1000)) : null,
-    rows: snapshot?.rows ?? [],
+    rows: withTrend(snapshot?.rows ?? []),
+    emerging: snapshot?.emerging ?? [],
     dropped: snapshot?.dropped ?? [],
+    migrationEvents: snapshot?.migrationEvents ?? [],
     upPriceUsd: snapshot?.upPriceUsd ?? null,
     windowDays: snapshot?.windowDays ?? 0,
   };
@@ -485,8 +616,29 @@ export async function runPoolRankCycle(): Promise<PoolRankSnapshot> {
     const subgraphPools = await fetchUp33Subgraph();
     const onchain = await fetchUp33Onchain(subgraphPools.map((p) => p.id));
     const up33 = up33Rows(subgraphPools, onchain, upPriceUsd);
-    const univ3 = v3Dex ? await univ3Rows(network, v3Dex) : { rows: [], dropped: [] };
+    const univ3 = v3Dex
+      ? await univ3Rows(network, v3Dex)
+      : { rows: [] as PoolRankRow[], dropped: [] as { pool: string; reason: string }[], emerging: [] as EmergingRow[], candidates: [] as GtCandidate[], candles: new Map<string, GtCandle[]>() };
     const rows = [...up33.rows, ...univ3.rows].sort((a, b) => b.coverage - a.coverage);
+    const emerging = [...up33.emerging, ...univ3.emerging].sort((a, b) => b.volDayUsd - a.volDayUsd).slice(0, 8);
+    // Pair attribution is fail-soft: the rank table must survive a hiccup in
+    // data it does not itself need (v4 reads, GT relationship gaps).
+    let migrationEvents: MigrationEventItem[] = [];
+    try {
+      const pairSnapshot = buildPairVolumeSnapshot({
+        subgraphPools,
+        onchain,
+        univ3Candidates: univ3.candidates,
+        univ3Candles: new Map([...univ3.candles].map(([k, v]) => [k, v.map((c) => ({ ts: c[0], vol: c[5] }))])),
+        rankedIdentities: new Set(rows.map((r) => r.address.toLowerCase())),
+        nowTs: now(),
+      });
+      storePairVolumeSnapshot(pairSnapshot);
+      migrationEvents = pairSnapshot ? [...new Map(Object.values(pairSnapshot.pairs).flatMap((p) => p.events).map((e) => [`${e.fromPool}->${e.toPool}`, e] as const)).values()]
+        .sort((a, b) => b.magnitudeUsd - a.magnitudeUsd).slice(0, 10) : [];
+    } catch (e) {
+      log(`[pool-rank] pair volume snapshot failed: ${safeError(e)}`);
+    }
     const snapshot: PoolRankSnapshot = {
       generatedAt: now(),
       durationMs: Date.now() - started,
@@ -494,12 +646,14 @@ export async function runPoolRankCycle(): Promise<PoolRankSnapshot> {
       upPriceUsd,
       rows,
       dropped: [...up33.dropped, ...univ3.dropped],
+      emerging,
+      migrationEvents,
     };
     kvSet(kv.snapshot, JSON.stringify(snapshot));
     kvSet(kv.successAt, String(now()));
     kvSet(kv.error, '');
     kvSet(kv.errorAt, '');
-    log(`[pool-rank] ${rows.length} pools ranked (${up33.rows.length} up33-cl, ${univ3.rows.length} univ3) in ${(snapshot.durationMs / 1000).toFixed(0)}s`);
+    log(`[pool-rank] ${rows.length} pools ranked (${up33.rows.length} up33-cl, ${univ3.rows.length} univ3), ${emerging.length} emerging, ${migrationEvents.length} migration events in ${(snapshot.durationMs / 1000).toFixed(0)}s`);
     return snapshot;
   } catch (e) {
     kvSet(kv.error, safeError(e));

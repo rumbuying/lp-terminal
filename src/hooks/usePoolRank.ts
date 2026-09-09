@@ -4,6 +4,42 @@ import { indexerApiPath } from '../config/chains/routes'
 import { ENV } from '../config/env'
 import { FEATURES } from '../config/features'
 
+/** Volume-trend classification served by the rank snapshot (PRD §5.1). */
+export type TrendClass = 'rising' | 'new_hot' | 'stable' | 'fading' | 'collapsing' | 'unknown'
+
+export type VolumeTrend = {
+  class: TrendClass
+  vsBaseline: number | null
+  slope7dPct: number | null
+  consecutiveRiseDays: number | null
+  consecutiveFallDays: number | null
+  /** new_hot only: days until the pool reaches the verified age */
+  daysToVerified: number | null
+  confidence: number
+  /** 14 daily volumes, oldest→newest; null = missing day */
+  dailyVol: (number | null)[]
+  daysSampled: number
+}
+
+export type MigrationEvent = {
+  type: 'migration'
+  fromPool: string
+  toPool: string
+  pair: string
+  venueFrom: string
+  venueTo: string
+  feeFromBps: number | null
+  feeToBps: number | null
+  fromShareStart: number
+  fromShareEnd: number
+  toShareStart: number
+  toShareEnd: number
+  windowDays: number
+  magnitudeUsd: number
+  nearEpochFlip: boolean
+  detectedAt: number
+}
+
 export type PoolRankRow = {
   venue: 'up33-cl' | 'univ3'
   pool: string
@@ -21,7 +57,11 @@ export type PoolRankRow = {
   emitApr: number | null
   volumePersistence: number
   daysActive: number
+  trend: VolumeTrend
 }
+
+/** Too young for the σ/coverage gates, real volume — trend badge only. */
+export type EmergingRow = Pick<PoolRankRow, 'venue' | 'pool' | 'address' | 'feeBps' | 'tickSpacing' | 'tvlUsd' | 'volDayUsd' | 'trend'>
 
 export type PoolRankApi = {
   enabled: boolean
@@ -30,7 +70,9 @@ export type PoolRankApi = {
   ageSeconds: number | null
   nextRefreshSeconds: number | null
   rows: PoolRankRow[]
+  emerging: EmergingRow[]
   dropped: { pool: string; reason: string }[]
+  migrationEvents: MigrationEvent[]
   upPriceUsd: number | null
   windowDays: number
 }
