@@ -228,16 +228,29 @@ type GtPoolList = {
     relationships?: {
       token0?: { data?: { id?: string } };
       token1?: { data?: { id?: string } };
+      base_token?: { data?: { id?: string } };
+      quote_token?: { data?: { id?: string } };
     };
   }[];
 };
 
-/** GT relationship ids look like "/networks/robinhood/tokens/0xabc…" — the
- * trailing segment is the address the pair-key needs. */
+/** GT relationship ids: some listings use "/networks/<net>/tokens/0x…",
+ * this chain's dex listing uses "robinhood_0x…" — the trailing segment is
+ * the address the pair key needs either way. */
 const addressFromRelation = (id: string | undefined): string | null => {
-  const last = id?.split('/').pop();
+  const last = id?.split(/[/_]/).pop();
   return last && last.startsWith('0x') && last.length === 42 ? last.toLowerCase() : null;
 };
+
+/** token addresses off a GT pool entry. Listings name the sides
+ * base_token/quote_token (this chain) or token0/token1 (others); a candidate
+ * without BOTH addresses can still rank but cannot join a pair family. */
+function gtPoolTokens(p: NonNullable<GtPoolList['data']>[number]): { token0: string | null; token1: string | null } {
+  const rel = p.relationships ?? {};
+  const token0 = addressFromRelation(rel.token0?.data?.id) ?? addressFromRelation(rel.base_token?.data?.id);
+  const token1 = addressFromRelation(rel.token1?.data?.id) ?? addressFromRelation(rel.quote_token?.data?.id);
+  return { token0, token1 };
+}
 
 type GtCandidate = { name: string; address: string; tvlUsd: number; volDayUsd: number; token0: string | null; token1: string | null };
 
@@ -255,13 +268,14 @@ async function gtUniv3TopPools(network: string, dex: string): Promise<GtCandidat
       const k = address.toLowerCase();
       if (seen.has(k)) continue;
       seen.add(k);
+      const tokens = gtPoolTokens(p);
       out.push({
         name,
         address,
         tvlUsd,
         volDayUsd,
-        token0: addressFromRelation(p.relationships?.token0?.data?.id),
-        token1: addressFromRelation(p.relationships?.token1?.data?.id),
+        token0: tokens.token0,
+        token1: tokens.token1,
       });
     }
   }
