@@ -4,7 +4,7 @@ import {
   classifyVolumeTrend,
   consecutiveFallDays,
   consecutiveRiseDays,
-  dailyFromMidnightBounds,
+  dailyFromSnapshotPairs,
   detectMigrationEvent,
   diagnosePair,
   logSlope7dPct,
@@ -191,41 +191,44 @@ test('diagnosePair: all four kinds and the unknown', () => {
   )
 })
 
-test('dailyFromMidnightBounds: consecutive midnight vol24h differences are the days between them', () => {
-  const DAY = 86_400
-  const d0 = 50_000 * DAY
-  const bounds = [
-    { day: d0, vol24h: 100 },
-    { day: d0 + DAY, vol24h: 250 },
-    { day: d0 + 2 * DAY, vol24h: 250 },
-    { day: d0 + 3 * DAY, vol24h: 400 },
+test('dailyFromSnapshotPairs: window-apart sample pairs become independent day slices', () => {
+  const W = 86_400
+  const D = 86_400
+  const t0 = 4_320_000_000
+  // samples ~6h after each midnight, spaced exactly 24h apart
+  const samples = [
+    { ts: t0 + 21_600, vol24h: 100 },
+    { ts: t0 + D + 21_600, vol24h: 250 },
+    { ts: t0 + 2 * D + 21_600, vol24h: 250 },
+    { ts: t0 + 3 * D + 21_600, vol24h: 400 },
   ]
-  const out = dailyFromMidnightBounds(bounds)
+  const out = dailyFromSnapshotPairs(samples, W, 300)
   // day0: 250-100=150 · day1: 250-250=0 (a real zero-volume day, kept) · day2: 400-250=150
   assert.deepEqual(out, [
-    { day: d0, vol: 150 },
-    { day: d0 + DAY, vol: 0 },
-    { day: d0 + 2 * DAY, vol: 150 },
+    { day: t0, vol: 150 },
+    { day: t0 + D, vol: 0 },
+    { day: t0 + 2 * D, vol: 150 },
   ])
 })
 
-test('dailyFromMidnightBounds: a missing boundary nulls its day, a revision nulls the day after', () => {
-  const DAY = 86_400
-  const d0 = 50_000 * DAY
-  // boundary for day2 missing → day1 cannot be computed (its end bound is gone)
-  const gap = dailyFromMidnightBounds([
-    { day: d0, vol24h: 100 },
-    { day: d0 + DAY, vol24h: 250 },
-    { day: d0 + 3 * DAY, vol24h: 400 },
-  ])
-  assert.deepEqual(gap, [{ day: d0, vol: 150 }], 'the day after the gap is unverifiable and stays null')
-  // a negative difference is a source revision: drop that day, keep going
-  const revised = dailyFromMidnightBounds([
-    { day: d0, vol24h: 100 },
-    { day: d0 + DAY, vol24h: 90 },
-    { day: d0 + 2 * DAY, vol24h: 200 },
-  ])
-  assert.deepEqual(revised, [{ day: d0 + DAY, vol: 110 }])
+test('dailyFromSnapshotPairs: out-of-tolerance gaps do not pair; revisions drop the day', () => {
+  const W = 86_400
+  const D = 86_400
+  const t0 = 4_320_000_000
+  // a 3-hour late sample breaks the second pair: day1 is unverifiable
+  const gapped = dailyFromSnapshotPairs([
+    { ts: t0, vol24h: 100 },
+    { ts: t0 + D, vol24h: 250 },
+    { ts: t0 + 2 * D + 10_800, vol24h: 400 },
+  ], W, 300)
+  assert.deepEqual(gapped, [{ day: t0, vol: 150 }], 'the day after the gap is unverifiable and stays null')
+  // a negative difference is a source revision: drop that day, keep the chain
+  const revised = dailyFromSnapshotPairs([
+    { ts: t0, vol24h: 100 },
+    { ts: t0 + D, vol24h: 90 },
+    { ts: t0 + 2 * D, vol24h: 200 },
+  ], W, 300)
+  assert.deepEqual(revised, [{ day: t0 + D, vol: 110 }])
 })
 
 test('trend sort weight ranks verified rising above new_hot above stable', () => {  assert.ok(trendSortWeight.rising > trendSortWeight.new_hot)

@@ -14,10 +14,10 @@
 // the kv string verbatim.
 import { log } from './config';
 import { ADDR } from '../src/config/addresses';
-import { db, kvGet, kvSet, midnightVolumes } from './store';
+import { db, kvGet, kvSet, snapshotRawVolumes } from './store';
 import {
   classifyVolumeTrend,
-  dailyFromMidnightBounds,
+  dailyFromSnapshotPairs,
   detectMigrationEvent,
   diagnosePair,
   pairShares,
@@ -384,9 +384,8 @@ export function buildPairVolumeSnapshot(input: {
     for (const row of rows) {
       const identity = row.address.toLowerCase();
       if (seeded.has(identity)) continue;
-      const bounds = midnightVolumes(identity, input.nowTs - (WINDOW_DAYS + 1) * DAY_SECONDS);
-      if (bounds.length < SNAPSHOT_MIN_DAYS + 1) continue;
-      const daily = dailyFromMidnightBounds(bounds);
+      const raw = snapshotRawVolumes(identity, input.nowTs - (WINDOW_DAYS + 1) * DAY_SECONDS);
+      const daily = dailyFromSnapshotPairs(raw);
       if (daily.length < SNAPSHOT_MIN_DAYS) continue;
       const series = new Map(daily.map((d) => [d.day, d.vol]));
       const family = familyFor(row.token0, row.token1, row.sym0 ?? '?', row.sym1 ?? '?');

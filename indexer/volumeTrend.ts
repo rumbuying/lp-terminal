@@ -462,26 +462,39 @@ export function pairTotals(vols: readonly (readonly (number | null)[])[]): (numb
 
 /**
  * Independent daily volumes from OWN rolling-window snapshots (PRD §7.2's
- * escape hatch for venues without a daily source): vol24h sampled at a UTC
- * midnight t is exactly the volume of the preceding day, so the difference of
- * CONSECUTIVE midnight samples is the day between them. `bounds` is the
- * midnight boundary series (day-start seconds, ascending). A missing boundary
- * nulls that day — never interpolate, never sum overlapping windows. A
- * negative difference is a source revision, not a sale: it nulls the day.
+ * escape hatch for venues without a daily source): two vol24h samples spaced
+ * one WINDOW apart differ to exactly the volume of the ~day between them.
+ * Sweep timing is irregular, so exact midnight samples are rare while
+ * window-apart pairs are everywhere; a ±tolerance on the spacing costs a
+ * ≤tolerance skew of the covered slice. Samples must ascend; each sample
+ * pairs at most once (chained), a negative difference is a source revision
+ * and drops the day, and every assigned day is the slice's midpoint's UTC day.
  */
-export function dailyFromMidnightBounds(
-  bounds: readonly { day: number; vol24h: number }[],
+export function dailyFromSnapshotPairs(
+  samples: readonly { ts: number; vol24h: number }[],
+  windowSeconds = 86_400,
+  toleranceSeconds = 300,
 ): { day: number; vol: number }[] {
-  const out: { day: number; vol: number }[] = []
-  for (let i = 0; i + 1 < bounds.length; i++) {
-    const a = bounds[i]
-    const b = bounds[i + 1]
-    // ADJACENT midnights only: a difference across a day gap would book two
-    // days of volume into one day (PRD §7.2 — never interpolate).
-    if (b.day - a.day !== 86_400) continue
-    if (!(a.vol24h >= 0) || !(b.vol24h >= 0)) continue
-    const vol = b.vol24h - a.vol24h
-    if (vol >= 0 && Number.isFinite(vol)) out.push({ day: a.day, vol })
+  const byDay = new Map<number, number>()
+  let i = 0
+  while (i < samples.length) {
+    const start = samples[i]
+    if (!(start.vol24h >= 0) || !Number.isFinite(start.vol24h)) {
+      i++
+      continue
+    }
+    let j = i + 1
+    while (j < samples.length && samples[j].ts < start.ts + windowSeconds - toleranceSeconds) j++
+    if (j >= samples.length || samples[j].ts > start.ts + windowSeconds + toleranceSeconds) {
+      i++
+      continue
+    }
+    const vol = samples[j].vol24h - start.vol24h
+    if (vol >= 0 && Number.isFinite(vol)) {
+      const day = Math.floor((start.ts + windowSeconds / 2) / 86_400) * 86_400
+      if (!byDay.has(day)) byDay.set(day, vol)
+    }
+    i = j
   }
-  return out
+  return [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([day, vol]) => ({ day, vol }))
 }

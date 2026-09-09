@@ -2446,22 +2446,15 @@ export function pruneRecommendationHistory(timestamp = now()): void {
 }
 
 /**
- * One vol24h sample per UTC day (the first within 15 min after each midnight)
- * — the boundary series that volume-trend differencing turns into independent
- * daily volumes (docs/VOLUME-TREND-PRD.zh-CN.md §7.2). Rolling-window
- * snapshots are only usable AT the day boundaries; mid-day samples overlap.
+ * Raw rolling-window vol24h samples for one pool, ascending — the input the
+ * pure volume-trend differencing pairs into independent daily volumes
+ * (docs/VOLUME-TREND-PRD.zh-CN.md §7.2). Pairing lives in the pure function
+ * (volumeTrend.dailyFromSnapshotPairs); this query stays dumb.
  */
-export const midnightVolumes = (address: string, sinceTs: number): { day: number; vol24h: number }[] => {
-  const rows = db.prepare(
-    'SELECT ts, vol24h_usd AS vol24h FROM pool_market_snapshots WHERE pool=? AND ts>=? AND vol24h_usd IS NOT NULL AND (ts % 86400) < 900 ORDER BY ts'
+export const snapshotRawVolumes = (address: string, sinceTs: number): { ts: number; vol24h: number }[] =>
+  db.prepare(
+    'SELECT ts, vol24h_usd AS vol24h FROM pool_market_snapshots WHERE pool=? AND ts>=? AND vol24h_usd IS NOT NULL ORDER BY ts'
   ).all(address.toLowerCase(), sinceTs) as { ts: number; vol24h: number }[];
-  const byDay = new Map<number, number>();
-  for (const row of rows) {
-    const day = Math.floor(row.ts / 86_400) * 86_400;
-    if (!byDay.has(day)) byDay.set(day, row.vol24h);
-  }
-  return [...byDay.entries()].sort((a, b) => a[0] - b[0]).map(([day, vol24h]) => ({ day, vol24h }));
-};
 
 /**
  * Frontpage set: the top-N pools by TVL — exactly what /api/pools?sort=tvl
