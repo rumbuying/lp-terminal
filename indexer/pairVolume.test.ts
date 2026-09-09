@@ -96,11 +96,21 @@ test('a ranked pair assembles family shares, a migration event, and the diagnosi
 
 test('the API read routes an identity to its family and answers unknown pools', () => {
   storePairVolumeSnapshot(build());
-  const hit = getPairVolumeApi('0xPoolA');
+  const hit = getPairVolumeApi({ pool: '0xPoolA' });
   assert.equal(hit.ready, true);
   assert.equal(hit.ready === true && hit.pools.length, 2);
-  assert.equal(getPairVolumeApi('0xunrelated').ready, false);
-  assert.deepEqual(getPairVolumeApi('0xunrelated'), { ready: false, reason: 'pool_not_grouped' });
+  assert.equal(getPairVolumeApi({ pool: '0xunrelated' }).ready, false);
+  assert.deepEqual(getPairVolumeApi({ pool: '0xunrelated' }), { ready: false, reason: 'pool_not_grouped' });
+});
+
+test('a token-pair lookup reaches the same family even when the pool itself is unmonitored', () => {
+  // a sibling pool (e.g. a launchpad's 100 univ3 clones) that the snapshot
+  // never seeded can still find the family through its token addresses
+  const byTokens = getPairVolumeApi({ token0: '0xtokenB', token1: '0xtokena' });
+  assert.equal(byTokens.ready, true, 'order-insensitive pair key');
+  assert.equal(byTokens.ready === true && byTokens.pools.length, 2);
+  const miss = getPairVolumeApi({ token0: '0xtokena', token1: '0xother' });
+  assert.deepEqual(miss, { ready: false, reason: 'pool_not_grouped' });
 });
 
 function byPoolIdentity(snapshot: ReturnType<typeof build>): string {

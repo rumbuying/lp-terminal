@@ -77,3 +77,27 @@ export function useVolumePair(identity: string | null) {
     },
   })
 }
+
+/**
+ * Pair-level lookup for a pool the snapshot never seeded (a launchpad token's
+ * unranked sibling): the token PAIR reaches the same family payload. Order of
+ * token0/token1 is irrelevant — the key is sorted server-side.
+ */
+export function useVolumePairByTokens(token0: string | null | undefined, token1: string | null | undefined) {
+  const base = FEATURES.poolRank
+    ? indexerApiPath('volume/pair', CHAIN.key, ENV.chainGateway, ACTIVE_IS_BUILD)
+    : null
+  const pairKey = token0 && token1 ? [token0.toLowerCase(), token1.toLowerCase()].sort().join(':') : null
+  return useQuery({
+    queryKey: ['volume-pair', CHAIN.key, 'tokens', pairKey],
+    enabled: base !== null && pairKey !== null,
+    retry: 1,
+    staleTime: 10 * 60_000,
+    queryFn: async (): Promise<PairVolumeApi> => {
+      const url = `${base}?token0=${encodeURIComponent(token0 as string)}&token1=${encodeURIComponent(token1 as string)}`
+      const r = await fetch(url)
+      if (!r.ok) throw new Error(`volume pair unavailable (${r.status})`)
+      return (await r.json()) as PairVolumeApi
+    },
+  })
+}

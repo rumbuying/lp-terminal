@@ -1066,7 +1066,7 @@ export function StrategyTab() {
                   <div className="strategy-overview-card-head">
                     <strong title={displayStrategyName(remote.config, performance)}>{displayStrategyName(remote.config, performance)}</strong>
                     <Badge tone={status.tone}>{status.title}</Badge>
-                    <PoolVolumeMini identity={remote.config.protocol === 'univ4' ? remote.config.poolId ?? null : remote.config.pool} />
+                    <PoolVolumeMini identity={remote.config.protocol === 'univ4' ? remote.config.poolId ?? null : remote.config.pool} token0={remote.config.riskToken} token1={remote.config.quoteToken} />
                   </div>
                   <div className="strategy-overview-pnl">
                     <span>{t('strategy.perfPnl')}</span>
@@ -1216,7 +1216,7 @@ export function StrategyTab() {
               {strategy.execution.lowTransactionMode && <Badge tone="amber">{t('strategy.lowTxBadge')}</Badge>}
               {rangeExpanded && <Badge tone="amber">{t('strategy.rangeExpandedBadge', { scale: compactNumber(currentRangeScale) })}</Badge>}
               {walletForOwner(strategy.owner) ? <Badge tone="dim">{walletForOwner(strategy.owner)!.label}</Badge> : <Badge tone="red">{t('strategy.accountMissing')}</Badge>}
-              <PoolVolumeMini identity={strategy.protocol === 'univ4' ? strategy.poolId ?? null : strategy.pool} />
+              <PoolVolumeMini identity={strategy.protocol === 'univ4' ? strategy.poolId ?? null : strategy.pool} token0={strategy.riskToken} token1={strategy.quoteToken} />
               <div className="card-actions">
                 {remote?.state === 'paused_guard' && (
                   <Btn tone="danger" onClick={() => resumeMonitoring(strategy)} busy={executorBusy} disabled={!accessToken}>

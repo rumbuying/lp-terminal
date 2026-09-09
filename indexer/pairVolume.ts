@@ -540,8 +540,14 @@ export type PairVolumeApi =
   | ({ ready: true } & PairVolumePayload)
   | { ready: false; reason: 'pool_not_grouped' | 'not_ready' };
 
-/** Route read: identity → family, served verbatim from the kv string. */
-export function getPairVolumeApi(poolParam: string): PairVolumeApi {
+/**
+ * Route read: an exact pool identity routes through byPool; a token PAIR
+ * (token0/token1 params, order-insensitive) routes through the pair key —
+ * the fallback that lets a position on an unmonitored pool of a MONITORED
+ * pair still see its family's volume (launchpad tokens sprout dozens of
+ * sibling pools; only the deepest get ranked).
+ */
+export function getPairVolumeApi(params: { pool?: string; token0?: string; token1?: string }): PairVolumeApi {
   const raw = kvGet(kvSnapshot);
   if (!raw) return { ready: false, reason: 'not_ready' };
   let snapshot: PairVolumeSnapshot;
@@ -550,7 +556,11 @@ export function getPairVolumeApi(poolParam: string): PairVolumeApi {
   } catch {
     return { ready: false, reason: 'not_ready' };
   }
-  const key = snapshot.byPool?.[poolParam.toLowerCase()];
+  const key = params.pool
+    ? snapshot.byPool?.[params.pool.toLowerCase()]
+    : params.token0 && params.token1
+      ? pairKeyOf(params.token0, params.token1)
+      : undefined;
   const payload = key ? snapshot.pairs?.[key] : undefined;
   if (!key || !payload) return { ready: false, reason: 'pool_not_grouped' };
   return { ready: true, ...payload };

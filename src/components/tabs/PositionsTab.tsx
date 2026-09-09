@@ -871,7 +871,7 @@ export function ClCard({
               CL {(effectiveClFeePpm(pos.pool) / 10_000).toFixed(2)}% · ts
               {pos.pool.tickSpacing}
             </Badge>
-            <PoolVolumeMini identity={isV4 ? pos.pool.poolId ?? null : pos.pool.address} />
+            <PoolVolumeMini identity={isV4 ? pos.pool.poolId ?? null : pos.pool.address} token0={pos.pool.token0} token1={pos.pool.token1} />
           </>
         )}
         <a

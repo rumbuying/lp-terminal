@@ -3553,10 +3553,14 @@ export function createApiServer(): Server {
         cache = 'public, max-age=300';
       } else if (url.pathname === '/api/volume/pair') {
         // kv-verbatim read (see pairVolume.ts): the cycle computed everything;
-        // the route only routes an identity to its family payload.
+        // the route only routes an identity or a token pair to its family.
         const pool = url.searchParams.get('pool')?.trim() ?? '';
-        if (!/^0x[0-9a-fA-F]{40,64}$/.test(pool)) throw new ApiInputError('pool must be an address or poolId');
-        body = getPairVolumeApi(pool);
+        const token0 = url.searchParams.get('token0')?.trim() ?? '';
+        const token1 = url.searchParams.get('token1')?.trim() ?? '';
+        const addrRe = /^0x[0-9a-fA-F]{40}$/;
+        if (pool && !/^0x[0-9a-fA-F]{40,64}$/.test(pool)) throw new ApiInputError('pool must be an address or poolId');
+        if (!pool && !(addrRe.test(token0) && addrRe.test(token1))) throw new ApiInputError('give pool, or the token0/token1 pair');
+        body = getPairVolumeApi({ pool: pool || undefined, token0: token0.toLowerCase() || undefined, token1: token1.toLowerCase() || undefined });
         cache = 'public, max-age=300';
       } else if (url.pathname === '/api/v4/positions') {
         body = getV4Positions(url.searchParams);
