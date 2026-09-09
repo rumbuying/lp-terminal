@@ -9,6 +9,7 @@ import {
 import { Trans, useTranslation } from "react-i18next";
 import { useAccount } from "wagmi";
 import { readContract, sendTransaction, writeContract } from "wagmi/actions";
+import { PoolVolumeMini } from "./PoolVolumeMini";
 import {
   formatUnits,
   parseUnits,
@@ -1654,6 +1655,14 @@ function PoolRow(props: {
                 <span className="red">{t("pools.killed")}</span>
               </>
             )}
+            {/* 近期量能速览：精确命中排名快照直接显示；本池未收录（发射盘的
+                未排名兄弟池、v2）则按 token pair 回退到家族里量能最大的池并
+                标注来源（≡）。原生币哨兵先归一成 WNATIVE 再组 pair key。 */}
+            <PoolVolumeMini
+              identity={p.protocol === "univ4" ? p.poolId ?? null : p.address}
+              token0={addr0 === NATIVE ? ADDR.WNATIVE : addr0}
+              token1={addr1 === NATIVE ? ADDR.WNATIVE : addr1}
+            />
           </div>
           {/* A squat chip shows whether or not the row is selected: an unhidden
               squatting row is one the user asked to see, and the name it is
