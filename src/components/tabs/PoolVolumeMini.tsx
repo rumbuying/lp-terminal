@@ -33,6 +33,10 @@ export function PoolVolumeMini(props: { identity?: string | null; token0?: strin
   const family = useVolumePairByTokens(!exact ? props.token0 : null, !exact ? props.token1 : null)
   const sibling = (() => {
     if (exact || !family.data?.ready) return null
+    // the pool itself, when the family knows it (snapshot-derived member) —
+    // its own trend, no provenance marker needed
+    const self = id ? family.data.pools.find((m) => m.identity === id) : undefined
+    if (self) return self
     // a classified member speaks for the pair; a dust member's "unknown" says
     // nothing and would render as a bare dash
     const classified = family.data.pools.filter((m) => m.trend.class !== 'unknown' && m.dailyVol.some((v) => v !== null))
@@ -54,7 +58,7 @@ export function PoolVolumeMini(props: { identity?: string | null; token0?: strin
       <VolumeSparkline values={trend.dailyVol} />
       <TrendBadge trend={trend} />
       {volDay !== null && <span className="dim">${fmtCompact(volDay)}/d</span>}
-      {fromSibling && sibling && (
+      {fromSibling && sibling && sibling.identity !== id && (
         <span className="dim" title={t('poolRank.volumeMiniSiblingTip')}>
           ≡ {VENUE_LABEL[sibling.proto] ?? sibling.proto}
           {sibling.feeBps !== null ? ` ${sibling.feeBps < 1 ? sibling.feeBps.toFixed(2) : sibling.feeBps}bp` : ''}

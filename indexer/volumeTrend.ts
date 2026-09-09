@@ -459,3 +459,29 @@ export function pairTotals(vols: readonly (readonly (number | null)[])[]): (numb
   }
   return out
 }
+
+/**
+ * Independent daily volumes from OWN rolling-window snapshots (PRD §7.2's
+ * escape hatch for venues without a daily source): vol24h sampled at a UTC
+ * midnight t is exactly the volume of the preceding day, so the difference of
+ * CONSECUTIVE midnight samples is the day between them. `bounds` is the
+ * midnight boundary series (day-start seconds, ascending). A missing boundary
+ * nulls that day — never interpolate, never sum overlapping windows. A
+ * negative difference is a source revision, not a sale: it nulls the day.
+ */
+export function dailyFromMidnightBounds(
+  bounds: readonly { day: number; vol24h: number }[],
+): { day: number; vol: number }[] {
+  const out: { day: number; vol: number }[] = []
+  for (let i = 0; i + 1 < bounds.length; i++) {
+    const a = bounds[i]
+    const b = bounds[i + 1]
+    // ADJACENT midnights only: a difference across a day gap would book two
+    // days of volume into one day (PRD §7.2 — never interpolate).
+    if (b.day - a.day !== 86_400) continue
+    if (!(a.vol24h >= 0) || !(b.vol24h >= 0)) continue
+    const vol = b.vol24h - a.vol24h
+    if (vol >= 0 && Number.isFinite(vol)) out.push({ day: a.day, vol })
+  }
+  return out
+}

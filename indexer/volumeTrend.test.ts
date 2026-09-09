@@ -4,6 +4,7 @@ import {
   classifyVolumeTrend,
   consecutiveFallDays,
   consecutiveRiseDays,
+  dailyFromMidnightBounds,
   detectMigrationEvent,
   diagnosePair,
   logSlope7dPct,
@@ -190,8 +191,44 @@ test('diagnosePair: all four kinds and the unknown', () => {
   )
 })
 
-test('trend sort weight ranks verified rising above new_hot above stable', () => {
-  assert.ok(trendSortWeight.rising > trendSortWeight.new_hot)
+test('dailyFromMidnightBounds: consecutive midnight vol24h differences are the days between them', () => {
+  const DAY = 86_400
+  const d0 = 50_000 * DAY
+  const bounds = [
+    { day: d0, vol24h: 100 },
+    { day: d0 + DAY, vol24h: 250 },
+    { day: d0 + 2 * DAY, vol24h: 250 },
+    { day: d0 + 3 * DAY, vol24h: 400 },
+  ]
+  const out = dailyFromMidnightBounds(bounds)
+  // day0: 250-100=150 · day1: 250-250=0 (a real zero-volume day, kept) · day2: 400-250=150
+  assert.deepEqual(out, [
+    { day: d0, vol: 150 },
+    { day: d0 + DAY, vol: 0 },
+    { day: d0 + 2 * DAY, vol: 150 },
+  ])
+})
+
+test('dailyFromMidnightBounds: a missing boundary nulls its day, a revision nulls the day after', () => {
+  const DAY = 86_400
+  const d0 = 50_000 * DAY
+  // boundary for day2 missing → day1 cannot be computed (its end bound is gone)
+  const gap = dailyFromMidnightBounds([
+    { day: d0, vol24h: 100 },
+    { day: d0 + DAY, vol24h: 250 },
+    { day: d0 + 3 * DAY, vol24h: 400 },
+  ])
+  assert.deepEqual(gap, [{ day: d0, vol: 150 }], 'the day after the gap is unverifiable and stays null')
+  // a negative difference is a source revision: drop that day, keep going
+  const revised = dailyFromMidnightBounds([
+    { day: d0, vol24h: 100 },
+    { day: d0 + DAY, vol24h: 90 },
+    { day: d0 + 2 * DAY, vol24h: 200 },
+  ])
+  assert.deepEqual(revised, [{ day: d0 + DAY, vol: 110 }])
+})
+
+test('trend sort weight ranks verified rising above new_hot above stable', () => {  assert.ok(trendSortWeight.rising > trendSortWeight.new_hot)
   assert.ok(trendSortWeight.new_hot > trendSortWeight.stable)
   assert.ok(trendSortWeight.stable > trendSortWeight.fading)
   assert.ok(trendSortWeight.fading > trendSortWeight.collapsing)

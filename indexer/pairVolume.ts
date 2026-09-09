@@ -14,9 +14,10 @@
 // the kv string verbatim.
 import { log } from './config';
 import { ADDR } from '../src/config/addresses';
-import { db, kvGet, kvSet } from './store';
+import { db, kvGet, kvSet, midnightVolumes } from './store';
 import {
   classifyVolumeTrend,
+  dailyFromMidnightBounds,
   detectMigrationEvent,
   diagnosePair,
   pairShares,
@@ -29,9 +30,14 @@ import {
 const DAY_SECONDS = 86_400;
 const WINDOW_DAYS = 45;
 /** Families kept in the kv snapshot — pairs nobody ranked are not analyzed.
- * Sized above the rank table's own row count so single-member families of
- * ranked pools survive the cut. */
-const MAX_FAMILIES = 128;
+ * Sized above the rank table's own row count plus the catalog-snapshot leg's
+ * active-pool families (§7.2 differencing leg). */
+const MAX_FAMILIES = 200;
+/** A snapshot-derived member qualifies a family once it carries at least this
+ * many daily buckets (fewer cannot support a classification) … */
+const SNAPSHOT_MIN_DAYS = 5;
+/** … and its latest day moved at least this much. */
+const SNAPSHOT_MIN_LAST_DAY_USD = 10_000;
 const NEWCOMER_AGE_DAYS = 14;
 const NEWCOMER_SHARE_STEP = 0.05;
 const NEWCOMER_MIN_DAY_USD = 1_000;
@@ -355,12 +361,65 @@ export function buildPairVolumeSnapshot(input: {
     log(`[pair-volume] v4 leg skipped: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  // Keep only families a ranked pool belongs to; cap by latest pair volume.
-  // Single-member families are kept: "this pair has only one monitored pool"
-  // is a real answer, and the retreat diagnosis still reads through the pair
-  // total (events simply cannot fire — detectMigrationEvent needs two).
+  // Third leg — the pools-page universe from OWN 5-min snapshots (PRD §7.2
+  // differencing). GT's volume ranking and the catalog's TVL ranking are two
+  // different universes, so the most-watched univ3 pools never made the
+  // candidate set; their daily series live in pool_market_snapshots, and
+  // midnight-boundary differencing turns those into independent day buckets.
+  try {
+    const seeded = new Set<string>();
+    for (const f of families.values()) for (const m of f.members) seeded.add(m.identity);
+    const rows = db.prepare(`SELECT p.address, p.token0, p.token1, p.fee_ppm, p.tick_spacing,
+        COALESCE(s.tvl_usd, st.liq_usd, 0) AS tvl, ta.symbol AS sym0, tb.symbol AS sym1
+      FROM pools p
+      LEFT JOIN pool_state s ON s.address = p.address
+      LEFT JOIN pool_stats st ON st.address = p.address
+      LEFT JOIN tokens ta ON ta.address = p.token0
+      LEFT JOIN tokens tb ON tb.address = p.token1
+      WHERE p.proto IN ('univ3','pancakev3') AND COALESCE(s.tvl_usd, st.liq_usd, 0) >= 10000
+      ORDER BY COALESCE(s.tvl_usd, st.liq_usd) DESC LIMIT 150`).all() as {
+      address: string; token0: string; token1: string; fee_ppm: number; tick_spacing: number | null;
+      tvl: number; sym0: string | null; sym1: string | null;
+    }[];
+    for (const row of rows) {
+      const identity = row.address.toLowerCase();
+      if (seeded.has(identity)) continue;
+      const bounds = midnightVolumes(identity, input.nowTs - (WINDOW_DAYS + 1) * DAY_SECONDS);
+      if (bounds.length < SNAPSHOT_MIN_DAYS + 1) continue;
+      const daily = dailyFromMidnightBounds(bounds);
+      if (daily.length < SNAPSHOT_MIN_DAYS) continue;
+      const series = new Map(daily.map((d) => [d.day, d.vol]));
+      const family = familyFor(row.token0, row.token1, row.sym0 ?? '?', row.sym1 ?? '?');
+      seeded.add(identity);
+      addTokenVolume(row.token0, series);
+      addTokenVolume(row.token1, series);
+      family.members.push({
+        identity,
+        proto: 'univ3',
+        name: `${row.sym0 ?? '?'}/${row.sym1 ?? '?'}`,
+        feeBps: row.fee_ppm != null ? row.fee_ppm / 100 : null,
+        tickSpacing: row.tick_spacing,
+        tvlUsd: row.tvl || null,
+        gaugeAlive: false,
+        series,
+        ageDays: series.size,
+      });
+    }
+  } catch (e) {
+    log(`[pair-volume] catalog-snapshot leg skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Keep families a ranked pool belongs to, or that a snapshot-derived member
+  // with real recent volume belongs to (the pools-page universe); cap by
+  // latest pair volume. Single-member families are kept: "this pair has only
+  // one monitored pool" is a real answer, and the retreat diagnosis still
+  // reads through the pair total (events simply cannot fire —
+  // detectMigrationEvent needs two).
   const kept = [...families.values()]
-    .filter((f) => f.members.some((m) => input.rankedIdentities.has(m.identity)))
+    .filter((f) => f.members.some((m) =>
+      input.rankedIdentities.has(m.identity)
+      || (m.series.size >= SNAPSHOT_MIN_DAYS && ([...m.series.values()].at(-1) ?? 0) >= SNAPSHOT_MIN_LAST_DAY_USD)
+    ))
     .map((f) => ({ f, last: Math.max(0, ...f.members.map((m) => [...m.series.values()].at(-1) ?? 0)) }))
     .sort((a, b) => b.last - a.last)
     .slice(0, MAX_FAMILIES);
