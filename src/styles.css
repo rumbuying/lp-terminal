@@ -3270,8 +3270,11 @@ th.sortable.on { color: var(--acc); }
   cursor: pointer;
   color: var(--dim);
   font-size: 0.7rem;
+  display: inline-block;
 }
 .pr-expand-btn:hover { color: var(--fg); }
+tr.pr-row { cursor: pointer; }
+tr.pr-row:hover td { background: rgba(var(--acc-rgb), 0.04); }
 .pr-expand > td {
   background: var(--panel2);
   border-top: 1px dashed var(--line);

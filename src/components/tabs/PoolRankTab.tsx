@@ -40,7 +40,13 @@ function RecBadge(props: { address: string; entry: RecStatusEntry; inputs: RecSt
   return (
     <button
       className={`pr-rec ${props.entry.status}`}
-      onClick={() => { queueRecFocus(props.address); props.onOpen() }}
+      onClick={(e) => {
+        // the row itself toggles the attribution panel — a badge click must
+        // not also collapse it
+        e.stopPropagation()
+        queueRecFocus(props.address)
+        props.onOpen()
+      }}
       title={title}
     >
       {props.entry.status === 'recommended'
@@ -204,14 +210,22 @@ export function PoolRankTab(props: { onOpenPool: () => void; onOpenRecommendatio
                 {rows.map((row, index) => {
                   const key = row.address.toLowerCase()
                   const isOpen = expanded === key
+                  const toggle = () => setExpanded(isOpen ? null : key)
                   return (
                     <Fragment key={key}>
-                      <tr className={isOpen ? 'pr-open-row' : undefined}>
+                      {/* the WHOLE row toggles the attribution panel (user ask:
+                          the corner triangle was too small a target); the two
+                          embedded controls stop propagation so they keep
+                          their own destinations */}
+                      <tr
+                        className={`pr-row ${isOpen ? 'pr-open-row' : ''}`}
+                        onClick={toggle}
+                      >
                         <td className="dim mono-sm hide-m">{index + 1}</td>
                         <td>
                           <button
                             className="pr-open"
-                            onClick={() => openInPools(row.address)}
+                            onClick={(e) => { e.stopPropagation(); openInPools(row.address) }}
                             title={t('poolRank.openTip')}
                           >
                             <span className="mono-sm">{row.pool}</span>
@@ -266,14 +280,17 @@ export function PoolRankTab(props: { onOpenPool: () => void; onOpenRecommendatio
                           </td>
                         )}
                         <td className="num">
-                          <button
+                          {/* visual affordance only — the click bubbles to the
+                              row's toggle; kept focusable so Enter still works */}
+                          <span
                             className="pr-expand-btn"
+                            role="button"
                             aria-expanded={isOpen}
-                            onClick={() => setExpanded(isOpen ? null : key)}
+                            aria-label={t('poolRank.expandTip')}
                             title={t('poolRank.expandTip')}
                           >
                             {isOpen ? '▼' : '▶'}
-                          </button>
+                          </span>
                         </td>
                       </tr>
                       {isOpen && (
