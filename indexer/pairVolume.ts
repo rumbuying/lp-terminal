@@ -354,8 +354,11 @@ export function buildPairVolumeSnapshot(input: {
   }
 
   // Keep only families a ranked pool belongs to; cap by latest pair volume.
+  // Single-member families are kept: "this pair has only one monitored pool"
+  // is a real answer, and the retreat diagnosis still reads through the pair
+  // total (events simply cannot fire — detectMigrationEvent needs two).
   const kept = [...families.values()]
-    .filter((f) => f.members.some((m) => input.rankedIdentities.has(m.identity)) && f.members.length >= 2)
+    .filter((f) => f.members.some((m) => input.rankedIdentities.has(m.identity)))
     .map((f) => ({ f, last: Math.max(0, ...f.members.map((m) => [...m.series.values()].at(-1) ?? 0)) }))
     .sort((a, b) => b.last - a.last)
     .slice(0, MAX_FAMILIES);

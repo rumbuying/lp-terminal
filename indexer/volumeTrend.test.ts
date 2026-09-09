@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   classifyVolumeTrend,
+  consecutiveFallDays,
   consecutiveRiseDays,
   detectMigrationEvent,
   diagnosePair,
@@ -97,6 +98,25 @@ test('consecutiveRiseDays honours the ±5% tolerance', () => {
   assert.equal(consecutiveRiseDays([1000]), null)
 })
 
+test('consecutive runs break at missing days, not across them', () => {
+  assert.equal(consecutiveRiseDays([1000, null, 1500, 1600]), 1, 'the null gap ends the run')
+  assert.equal(consecutiveFallDays([4000, null, 3000, 2500]), 1)
+})
+
+test('consecutiveFallDays counts real drops only', () => {
+  assert.equal(consecutiveFallDays([1000, 950, 900, 850]), 3, '5% drops are falls')
+  assert.equal(consecutiveFallDays([1000, 990]), 0, 'a 1% dip is neutral, not a fall')
+  assert.equal(consecutiveFallDays([1000, 1100, 1045]), 1, 'a rise then a 5% fall')
+})
+
+test('logSlope7dPct drops dust days instead of regressing through them', () => {
+  // a $3 artifact day followed by a real ramp: the raw log slope is astronomic
+  const dusty = [3, ...ramp(6, 1000, 1.2)]
+  const slope = logSlope7dPct(dusty)
+  assert.ok(slope !== null && slope < 1000, `slope must stay sane, got ${slope}`)
+  assert.equal(logSlope7dPct([3, 3, 3, 3, 3, 3, 1000, 1200]), null, 'too few meaningful days after the dust cut')
+})
+
 test('trailingBaselineRatios needs 3 prior days before it says anything', () => {
   const ratios = trailingBaselineRatios([1000, 1000, 1000, 1000])
   assert.deepEqual(ratios, [null, null, null, 1])
@@ -178,10 +198,17 @@ test('trend sort weight ranks verified rising above new_hot above stable', () =>
   assert.ok(trendSortWeight.collapsing > trendSortWeight.unknown)
 })
 
-test('classification is deterministic and stable on nulls interleaved at the tail', () => {
+test('a gap day conservatively downgrades a run-based rise, slope still sane', () => {
   const base = ramp(12, 1000, 1.15)
   const a: VolumeTrend = classifyVolumeTrend({ dailyVol: base, ageDaysLowerBound: 30 })
-  const b: VolumeTrend = classifyVolumeTrend({ dailyVol: [...base.slice(0, -2), null, base[base.length - 1]], ageDaysLowerBound: 30 })
+  const gapped = classifyVolumeTrend({ dailyVol: [...base.slice(0, -2), null, base[base.length - 1]], ageDaysLowerBound: 30 })
   assert.equal(a.class, 'rising')
-  assert.equal(b.class, a.class, 'a missing final-1 day must not flip the class')
+  assert.ok(
+    gapped.class === 'rising' || gapped.class === 'stable',
+    'a gap may conservatively downgrade rising to stable, never to a decline',
+  )
+  assert.ok(gapped.slope7dPct !== null, 'the slope survives the gap')
+  assert.ok((gapped.slope7dPct ?? 0) > TREND_RISE_MIN, 'and still reads as a ramp')
 })
+
+const TREND_RISE_MIN = 20

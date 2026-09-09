@@ -46,6 +46,9 @@ export const TREND_THRESHOLDS = {
   minDailySamples: 5,
   /** 7d-mean daily volume below this is dust (matches poolRank's line). */
   minBaselineDailyUsd: 50,
+  /** days below this fraction of the window peak are dust for the slope
+   * regression — a near-zero artifact day would dominate a log fit */
+  slopeDustFractionOfPeak: 0.005,
   /** Length of the dailyVol echo the UI sparklines draw. */
   echoDays: 14,
 } as const
@@ -75,14 +78,22 @@ const clean = (daily: readonly (number | null)[]): number[] =>
 /**
  * OLS slope of log(volume) over the last ≤7 valid days, ×7 → weekly % growth.
  * Null when fewer than 5 valid days: five points is the minimum that can tell
- * a ramp from a wiggle (PRD FR-CALC-1).
+ * a ramp from a wiggle (PRD FR-CALC-1). Days below 0.1% of the window's peak
+ * are dropped first — a near-zero artifact day (an indexer gap, a pre-listing
+ * whisper of flow) dominates a log regression otherwise and turns the slope
+ * into an astronomical lie.
  */
 export function logSlope7dPct(daily: readonly (number | null)[]): number | null {
-  const vals = clean(daily).slice(-7)
-  if (vals.length < TREND_THRESHOLDS.minDailySamples) return null
-  const n = vals.length
-  const xs = vals.map((_, i) => i)
-  const ys = vals.map((v) => Math.log(v))
+  const vals = clean(daily)
+  if (!vals.length) return null
+  const peak = Math.max(...vals)
+  const meaningful = vals.filter((v) => v >= peak * TREND_THRESHOLDS.slopeDustFractionOfPeak)
+  if (meaningful.length < TREND_THRESHOLDS.minDailySamples) return null
+  const window = meaningful.slice(-7)
+  const n = window.length
+  if (n < TREND_THRESHOLDS.minDailySamples) return null
+  const xs = window.map((_, i) => i)
+  const ys = window.map((v) => Math.log(v))
   const mx = xs.reduce((a, b) => a + b, 0) / n
   const my = ys.reduce((a, b) => a + b, 0) / n
   let num = 0
@@ -99,23 +110,24 @@ export function logSlope7dPct(daily: readonly (number | null)[]): number | null 
 
 /** Days counted back from the end with volume ≥ prev × 1.05; null when <2 days. */
 export function consecutiveRiseDays(daily: readonly (number | null)[]): number | null {
-  return runLength(daily, TREND_THRESHOLDS.dayStepUp)
+  return runLength(daily, (curr, prev) => curr / prev >= TREND_THRESHOLDS.dayStepUp)
 }
 
 /** Days counted back from the end with volume ≤ prev × 0.95; null when <2 days. */
 export function consecutiveFallDays(daily: readonly (number | null)[]): number | null {
-  return runLength(daily, TREND_THRESHOLDS.dayStepDown)
+  return runLength(daily, (curr, prev) => curr / prev <= TREND_THRESHOLDS.dayStepDown)
 }
 
-function runLength(daily: readonly (number | null)[], ratio: number): number | null {
-  const vals = clean(daily)
-  if (vals.length < 2) return null
+function runLength(daily: readonly (number | null)[], dayMatches: (curr: number, prev: number) => boolean): number | null {
   let run = 0
-  for (let i = vals.length - 1; i > 0; i--) {
-    if (vals[i] / vals[i - 1] >= ratio) run++
+  for (let i = daily.length - 1; i > 0; i--) {
+    const curr = daily[i]
+    const prev = daily[i - 1]
+    if (!finitePos(curr) || !finitePos(prev)) break
+    if (dayMatches(curr, prev)) run++
     else break
   }
-  return run
+  return daily.length >= 2 ? run : null
 }
 
 /**
