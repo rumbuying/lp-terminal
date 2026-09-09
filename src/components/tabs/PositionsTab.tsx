@@ -28,6 +28,7 @@ import { largestFundable } from "../../lib/clDeposit";
 import { fmtApr } from "../../lib/apr";
 import { fmtAmount, fmtNum, fmtUsd, shortAddr } from "../../lib/format";
 import { PositionTrendWarning } from "./PositionTrendWarning";
+import { PoolVolumeMini } from "./PoolVolumeMini";
 import { effectiveClFeePpm, poolIdentity } from "../../lib/poolIdentity";
 import {
   buildV2RemoveLiquidityCall,
@@ -870,6 +871,7 @@ export function ClCard({
               CL {(effectiveClFeePpm(pos.pool) / 10_000).toFixed(2)}% · ts
               {pos.pool.tickSpacing}
             </Badge>
+            <PoolVolumeMini identity={isV4 ? pos.pool.poolId ?? null : pos.pool.address} />
           </>
         )}
         <a

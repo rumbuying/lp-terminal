@@ -118,6 +118,7 @@ export const zh: typeof en = {
     },
     caveat: { v2: 'v2 池不在监测范围 — “退潮”不排除量流向 v2 池' },
     diagTokenHeat: '代币热度：{{sym0}} {{heat0}} · {{sym1}} {{heat1}}（该 token 全部池子的总量趋势）',
+    volumeMiniTip: '近 14 天日成交量 · 当前约 ${{vol}}/天 · 到池排名页展开行可看完整归因',
     panel: {
       pairTotal: 'pair 日总量（45 天）',
       shareStack: '各池份额（堆叠）',

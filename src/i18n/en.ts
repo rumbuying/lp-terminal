@@ -117,6 +117,7 @@ export const en = {
     },
     caveat: { v2: 'v2 venues are not monitored — "retreat" cannot rule out flow hiding in a v2 pool' },
     diagTokenHeat: 'token heat: {{sym0}} {{heat0}} · {{sym1}} {{heat1}} (the token\'s whole-book volume trend)',
+    volumeMiniTip: 'last 14 days of daily volume · about ${{vol}}/day now · expand the row on POOL RANK for full attribution',
     panel: {
       pairTotal: 'PAIR DAILY VOLUME (45d)',
       shareStack: 'POOL SHARE (STACKED)',

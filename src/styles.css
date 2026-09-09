@@ -3302,3 +3302,11 @@ tr.pr-focus td { background: rgba(var(--acc-rgb), 0.06); }
   margin: 6px 0 2px;
 }
 .pos-trend-warn a { color: inherit; text-decoration: underline; }
+/* pool volume mini on position/strategy cards */
+.pv-mini {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+.pv-mini .pr-trend { gap: 4px; }
