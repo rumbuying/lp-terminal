@@ -8,7 +8,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'lp-terminal-logtail-'))
 const previousDb = process.env.INDEXER_DB
 process.env.INDEXER_DB = join(tmp, 'catalog.db')
 
-const { logtailWindow } = await import('./logtail')
+const { collectLogtailDirtyAddresses, logtailWindow } = await import('./logtail')
 
 after(() => {
   if (previousDb === undefined) delete process.env.INDEXER_DB
@@ -44,4 +44,35 @@ test('a tick that fell behind reads the newest blocks it can, and reports the re
   // the caller's cue to do nothing at all, and neither case invents a shortfall.
   assert.deepEqual(logtailWindow(7_000, 7_000, 5_000), { from: 7_001, dropped: 0 })
   assert.deepEqual(logtailWindow(7_000, 6_990, 5_000), { from: 7_001, dropped: 0 })
+})
+
+test('a dense logical window splits at the provider cap without losing or duplicating pools', async () => {
+  const fetched: Array<[number, number]> = []
+  const shrunk: number[] = []
+  const dirty = await collectLogtailDirtyAddresses({
+    fromBlock: 10,
+    toBlock: 15,
+    maxWindowBlocks: 6,
+    fetchWindow: async (from, to) => {
+      fetched.push([from, to])
+      if (to - from + 1 > 2) throw new Error('logs matched by query exceeds limit of 10000')
+      return [
+        { address: `0x${from.toString(16).padStart(40, '0')}` },
+        { address: '0xABCDEF0000000000000000000000000000000000' },
+      ]
+    },
+    onShrink: (blocks) => shrunk.push(blocks),
+  })
+
+  assert.deepEqual(fetched, [[10, 15], [10, 12], [10, 10], [11, 11], [12, 12], [13, 13], [14, 14], [15, 15]])
+  assert.deepEqual(shrunk, [3, 1])
+  assert.deepEqual(dirty, [
+    '0x000000000000000000000000000000000000000a',
+    '0xabcdef0000000000000000000000000000000000',
+    '0x000000000000000000000000000000000000000b',
+    '0x000000000000000000000000000000000000000c',
+    '0x000000000000000000000000000000000000000d',
+    '0x000000000000000000000000000000000000000e',
+    '0x000000000000000000000000000000000000000f',
+  ])
 })

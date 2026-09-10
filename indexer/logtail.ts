@@ -1,9 +1,11 @@
 // Event-driven state refresh. A pool's reserves change only when it emits an
 // event, so we don't reread on a timer — we ask the chain which pools changed.
-// One eth_getLogs (v2 Sync, v3 Swap/Mint/Burn, any address) since the last block
-// we processed yields exactly the pools that traded; we reread only those. Cost
-// tracks trading activity, not catalog size — this is what lets the repeating
-// census over a multi-million-pool long tail go away.
+// One logical eth_getLogs scan (v2 Sync, v3 Swap/Mint/Burn, any address) since
+// the last block we processed yields exactly the pools that traded; providers
+// may split that scan when their result-count cap rejects a dense window. We
+// reread only the emitted pools. Cost tracks trading activity, not catalog size
+// — this is what lets the repeating census over a multi-million-pool long tail
+// go away.
 //
 // Two deliberate choices:
 //  - reread state, don't apply the logs' own deltas: whatever the chain returns
@@ -12,6 +14,7 @@
 //  - fixed cadence rather than browser demand. CDN hits do not reach the
 //    indexer, so an HTTP-driven gate cannot be a reliable freshness signal.
 import { numberToHex, toEventSelector } from 'viem'
+import { scanAdaptiveLogWindows } from './adaptiveLogs'
 import { TUNE, log } from './config'
 import { pc } from './rpc'
 import { computeTvlFor, sweepState } from './state'
@@ -55,6 +58,30 @@ export function logtailWindow(
   return { from, dropped: Math.max(0, from - cursor - 1) }
 }
 
+type LogtailRow = { address: string }
+
+/** Collect one logical tail window without assuming a provider can return the
+ * whole dense result set at once. Address de-duplication spans every physical
+ * sub-window, so a pool that emits repeatedly is still swept exactly once. */
+export async function collectLogtailDirtyAddresses(options: {
+  fromBlock: number
+  toBlock: number
+  maxWindowBlocks: number
+  fetchWindow: (fromBlock: number, toBlock: number) => Promise<LogtailRow[]>
+  onShrink?: (windowBlocks: number) => void
+}): Promise<string[]> {
+  const dirty = new Set<string>()
+  await scanAdaptiveLogWindows<LogtailRow[]>({
+    ...options,
+    commitWindow: ({ rows }) => {
+      for (const row of rows) dirty.add(row.address.toLowerCase())
+    },
+    singleBlockError:
+      'RPC rejects even a one-block logtail eth_getLogs request; configure a logs-capable indexer RPC',
+  })
+  return [...dirty]
+}
+
 /** reread every catalog pool that emitted a tracked event since the last run */
 export async function logtail(): Promise<void> {
   const head = Number(await pc.getBlockNumber())
@@ -67,12 +94,18 @@ export async function logtail(): Promise<void> {
         `${dropped} unread (lower LOGTAIL_MS or raise LOGTAIL_MAX_BLOCKS)`,
     )
 
-  const logs = (await pc.request({
-    method: 'eth_getLogs',
-    params: [{ fromBlock: numberToHex(from), toBlock: numberToHex(head), topics: [TOPICS] }],
-  })) as { address: string }[]
-
-  const dirty = [...new Set(logs.map((l) => l.address.toLowerCase()))]
+  const dirty = await collectLogtailDirtyAddresses({
+    fromBlock: from,
+    toBlock: head,
+    maxWindowBlocks: TUNE.logtailMaxBlocks,
+    fetchWindow: async (lo, hi) =>
+      (await pc.request({
+        method: 'eth_getLogs',
+        params: [{ fromBlock: numberToHex(lo), toBlock: numberToHex(hi), topics: [TOPICS] }],
+      })) as LogtailRow[],
+    onShrink: (windowBlocks) =>
+      log(`[logtail] RPC result limit reached; shrinking window to ${windowBlocks} blocks`),
+  })
   if (dirty.length) {
     const swept = await sweepState(dirty) // sweepState ignores addresses not in the catalog
     computeTvlFor(dirty)
