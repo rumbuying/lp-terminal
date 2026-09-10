@@ -293,6 +293,29 @@ test('reprice: a poisoned price does not survive the next pass', () => {
   assert.equal(priceOf(WETH), null);
 });
 
+test('reprice never promotes an expired seed or refreshes its provenance clock', () => {
+  const staleSeed = A(0x701);
+  const child = A(0x702);
+  const pool = A(0x703);
+  upsertTokenMeta(staleSeed, 'OLD', 18, true);
+  upsertTokenMeta(child, 'CHILD', 18, true);
+  insertPool({ address: pool, proto: 'univ2', token0: staleSeed, token1: child, feePpm: 3_000 });
+  upsertState(pool, { reserve0: units(1_000, 18), reserve1: units(2_000, 18), totalSupply: 1n });
+
+  const old = Math.floor(Date.now() / 1_000) - 5 * 3_600;
+  setTokenPrice(staleSeed, 10, 100_000, 'gt', old);
+  reprice();
+  assert.equal(priceOf(child), null, 'an expired GT mark cannot remain a credible root');
+  assert.equal(poolTvl(pool).tvl_usd, null);
+
+  const observedAt = Math.floor(Date.now() / 1_000) - 60;
+  setTokenPrice(staleSeed, 10, 100_000, 'gt', observedAt);
+  reprice();
+  assert.equal(priceOf(child), 5);
+  const derived = db.prepare('SELECT price_updated FROM tokens WHERE address=?').get(child) as { price_updated: number };
+  assert.equal(derived.price_updated, observedAt, 'reprice must retain the oldest real source time');
+});
+
 test('reprice crosses state, quote-token and TVL page boundaries', () => {
   const count = 1_005;
   for (let i = 0; i < count; i++) {

@@ -51,6 +51,7 @@ export function makeRebalancePlan(args: {
   snapshot: StrategyPositionSnapshot
   now?: number
   triggerSide?: TriggerSide
+  manualExecution?: true
   rangeScale?: number
 }): StrategyExecutionPlan {
   const now = args.now ?? Math.floor(Date.now() / 1000)
@@ -128,7 +129,8 @@ export function makeRebalancePlan(args: {
     { index: 15, kind: 'approve_nft', intent: { spender: config.staking.gauge!, mintedTokenId: !config.execution.lowTransactionMode, approvalForAll: config.execution.lowTransactionMode } },
     { index: 16, kind: 'stake', intent: { gauge: config.staking.gauge!, mintedTokenId: true } },
   )
-  const payload = { strategyId: config.id, strategyRevision: config.revision, createdAt: now, action: policy.action, snapshot, nextRange, rangeScale, steps }
+  const manual = args.manualExecution ? { manualExecution: true as const } : {}
+  const payload = { strategyId: config.id, strategyRevision: config.revision, createdAt: now, action: policy.action, snapshot, nextRange, rangeScale, steps, ...manual }
   const hash = keccak256(stringToHex(stable(payload)))
   return {
     version: 1,
@@ -139,6 +141,7 @@ export function makeRebalancePlan(args: {
     createdAt: now,
     expiresAt: now + config.safeguards.maxPlanAgeSeconds,
     triggerSide: side,
+    ...manual,
     action: policy.action,
     snapshot,
     nextRange,

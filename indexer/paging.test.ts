@@ -13,6 +13,7 @@ const {
   clPoolCount,
   clPoolRowsPage,
   enqueueHydrationDemand,
+  expireMarketStats,
   explainMissingClMetaPlan,
   explainRecentUnhydratedPlan,
   hydrationDemandCount,
@@ -155,6 +156,24 @@ test('large-catalog boot/hot selectors stay capped and prioritize useful rows', 
   assert.equal(hotAddrs(1).length, 1);
   assert.deepEqual(hotAddrs(1), [top]);
   assert.equal(bootstrapAddrs(0).length, 0);
+});
+
+test('expired market stats leave the hot set and lose their ranking values', () => {
+  const pool = A(0x904);
+  insertPool({ address: pool, proto: 'pancakev2', token0: A(0xb01), token1: A(0xb02), feePpm: 2_500 });
+  upsertStats(pool, { m5: 1, h1: 2, h6: 3, h24: 4 }, 5, 6, 'geckoterminal');
+  const old = Math.floor(Date.now() / 1_000) - 3_600;
+  db.prepare('UPDATE pools SET added_ts=? WHERE address=?').run(old, pool);
+  db.prepare('UPDATE pool_stats SET updated=? WHERE address=?').run(old, pool);
+
+  assert.equal(hotAddrs().includes(pool), false);
+  assert.deepEqual(expireMarketStats(), { addressPools: 1, v4Pools: 0 });
+  const row = db.prepare(`SELECT vol5m_usd,vol1h_usd,vol6h_usd,vol24h_usd,
+    txns24h,liq_usd,source,updated FROM pool_stats WHERE address=?`).get(pool) as Record<string, unknown>;
+  assert.deepEqual({ ...row }, {
+    vol5m_usd: null, vol1h_usd: null, vol6h_usd: null, vol24h_usd: null,
+    txns24h: null, liq_usd: null, source: 'geckoterminal', updated: old,
+  });
 });
 
 test('recent and API-demand hydration stay bounded and failed rows back off', () => {

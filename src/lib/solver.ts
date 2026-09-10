@@ -366,6 +366,9 @@ const isUnsignedDecimal = (value: unknown): value is string =>
 const allowanceHolderAbi = parseAbi([
   'function exec(address operator, address token, uint256 amount, address target, bytes data)',
 ])
+const settlerTakerAbi = parseAbi([
+  'function execute((address recipient,address buyToken,uint256 minAmountOut) slippage,bytes[] actions,bytes32 zidAndAffiliate) returns (bool)',
+])
 
 const parseWireAddress = (value: unknown, field: string): Address => {
   if (typeof value !== 'string') {
@@ -414,6 +417,7 @@ const parseExecutionBinding = (body: WireQuote): {
   const transactionValue = BigInt(tx.value)
   const quotedAmount = isUnsignedDecimal(body.amountIn) ? BigInt(body.amountIn) : null
   const nativeInput = typeof body.tokenIn === 'string' && body.tokenIn.toLowerCase() === NATIVE.toLowerCase()
+  let settlerData: Hex
   if (nativeInput) {
     if (
       body.allowanceTarget !== null ||
@@ -423,36 +427,57 @@ const parseExecutionBinding = (body: WireQuote): {
     ) {
       throw new SolverQuoteError('solver native transaction has an invalid Settler binding', 502)
     }
-    return { settler, allowanceTarget: null }
+    settlerData = tx.data as Hex
+  } else {
+    const allowanceTarget = parseWireAddress(body.allowanceTarget, 'allowanceTarget')
+    if (CHAIN.solverAllowanceTarget === null || allowanceTarget !== CHAIN.solverAllowanceTarget) {
+      throw new SolverQuoteError('solver ERC-20 transaction has an untrusted allowance target', 502)
+    }
+    if (to !== allowanceTarget || transactionValue !== 0n) {
+      throw new SolverQuoteError('solver ERC-20 transaction has an invalid allowance binding', 502)
+    }
+    try {
+      const decoded = decodeFunctionData({
+        abi: allowanceHolderAbi,
+        data: tx.data as Hex,
+      })
+      const [operator, token, amount, target, data] = decoded.args
+      if (
+        getAddress(operator) !== settler ||
+        getAddress(target) !== settler ||
+        typeof body.tokenIn !== 'string' ||
+        getAddress(token) !== getAddress(body.tokenIn) ||
+        !isUnsignedDecimal(body.amountIn) ||
+        amount !== BigInt(body.amountIn)
+      ) {
+        throw new Error('AllowanceHolder args do not match the quote')
+      }
+      settlerData = data
+    } catch {
+      throw new SolverQuoteError('solver ERC-20 transaction has an invalid Settler binding', 502)
+    }
   }
 
-  const allowanceTarget = parseWireAddress(body.allowanceTarget, 'allowanceTarget')
-  if (CHAIN.solverAllowanceTarget === null || allowanceTarget !== CHAIN.solverAllowanceTarget) {
-    throw new SolverQuoteError('solver ERC-20 transaction has an untrusted allowance target', 502)
-  }
-  if (to !== allowanceTarget || transactionValue !== 0n) {
-    throw new SolverQuoteError('solver ERC-20 transaction has an invalid allowance binding', 502)
-  }
   try {
     const decoded = decodeFunctionData({
-      abi: allowanceHolderAbi,
-      data: tx.data as Hex,
+      abi: settlerTakerAbi,
+      data: settlerData,
     })
-    const [operator, token, amount, target] = decoded.args
+    const [slippage] = decoded.args
     if (
-      getAddress(operator) !== settler ||
-      getAddress(target) !== settler ||
-      typeof body.tokenIn !== 'string' ||
-      getAddress(token) !== getAddress(body.tokenIn) ||
-      !isUnsignedDecimal(body.amountIn) ||
-      amount !== BigInt(body.amountIn)
+      typeof body.recipient !== 'string' ||
+      getAddress(slippage.recipient) !== getAddress(body.recipient) ||
+      typeof body.tokenOut !== 'string' ||
+      getAddress(slippage.buyToken) !== getAddress(body.tokenOut) ||
+      !isUnsignedDecimal(body.minAmountOutNet) ||
+      slippage.minAmountOut !== BigInt(body.minAmountOutNet)
     ) {
-      throw new Error('AllowanceHolder args do not match the quote')
+      throw new Error('Settler slippage args do not match the quote')
     }
   } catch {
-    throw new SolverQuoteError('solver ERC-20 transaction has an invalid Settler binding', 502)
+    throw new SolverQuoteError('solver transaction has an invalid execution bounds binding', 502)
   }
-  return { settler, allowanceTarget }
+  return { settler, allowanceTarget: nativeInput ? null : parseWireAddress(body.allowanceTarget, 'allowanceTarget') }
 }
 
 const isObservationUnavailableReason = (

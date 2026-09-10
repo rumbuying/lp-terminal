@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chooseLookback, rankRecommendations, replayRange, scoreCandidate } from './model'
+import { chooseLookback, historyCoverage, rankRecommendations, replayRange, scoreCandidate } from './model'
 import type { RecommendationCandidate, RecommendationItem, RecommendationMode, RecommendationRankPrior, RecommendationRisk } from './types'
 
 const now = 1_800_000_000
@@ -59,6 +59,16 @@ test('mature history still rejects a current 1h spike and validates long windows
   assert.ok(result?.errors.d7 !== undefined)
 })
 
+test('a long first-to-last market span with large gaps cannot claim walk-forward validation', () => {
+  const marketHistory = Array.from({ length: 31 }, (_, index) => ({
+    ts: now - (30 - index) * 12 * 3_600,
+    vol1hUsd: 1_000, vol6hUsd: 6_000, vol24hUsd: 24_000,
+  }))
+  const result = chooseLookback(candidate({ marketHistory }), now)
+  assert.notEqual(result?.reason, 'walk_forward')
+  assert.deepEqual(result?.errors, {})
+})
+
 test('wider ranges recenter no more often on the same path', () => {
   const ticks = Array.from({ length: 120 }, (_, i) => ({ ts: now - 120 * 60 + i * 60, tick: 100_000 + (i % 20) * 20 }))
   const narrow = replayRange(candidate(), 1, ticks)
@@ -85,9 +95,9 @@ test('capital above two percent of TVL is rejected', () => {
 })
 
 test('one-way rallies are stress-tested with a reflected reversal path', () => {
-  const tickHistory = Array.from({ length: 7 * 24 + 1 }, (_, index) => ({
-    ts: now - (7 * 24 - index) * 3_600,
-    tick: 95_000 + Math.round(index * (5_000 / (7 * 24))),
+  const tickHistory = Array.from({ length: 7 * 24 * 6 + 1 }, (_, index) => ({
+    ts: now - (7 * 24 * 6 - index) * 600,
+    tick: 95_000 + Math.round(index * (5_000 / (7 * 24 * 6))),
   }))
   const scored = scoreCandidate({
     candidate: candidate({ tickHistory }), capitalUsd: 1_000, mode: 'fees', risk: 'balanced', now,
@@ -95,7 +105,49 @@ test('one-way rallies are stress-tested with a reflected reversal path', () => {
   })
   const wide = scored.find((item) => item.range.lowerPct === 10)
   assert.ok(wide)
-  assert.ok(wide.projection24h.cvar95Usd < -10)
+  assert.ok(wide.projection24h.historicalIlTailUsd < -10)
+})
+
+test('coverage counts populated buckets and exposes long gaps instead of trusting first-to-last span', () => {
+  const sparse = historyCoverage([
+    { ts: now - 86_400 },
+    { ts: now },
+  ], now - 86_400, now, 300)
+  assert.ok(sparse.ratio < 0.01)
+  assert.ok((sparse.maxGapSeconds ?? 0) >= 86_400)
+  const dense = historyCoverage(CALM_TICKS, now - 86_400, now, 300)
+  assert.equal(dense.ratio, 1)
+  assert.equal(dense.maxGapSeconds, 300)
+})
+
+test('a first-and-last tick pair cannot pass the 24h history gate', () => {
+  const rows = scoreCandidate({
+    candidate: candidate({
+      tickHistory: [{ ts: now - 86_400, tick: 100_000 }, { ts: now, tick: 100_000 }],
+      poolRank: rankPrior(),
+    }),
+    capitalUsd: 1_000, mode: 'fees', risk: 'balanced', now, cost: COST,
+  })
+  assert.ok(rows.length > 0)
+  assert.ok(rows.every((row) => row.gateReasons.includes('insufficient_tick_history')))
+  assert.ok(rows.every((row) => row.gateReasons.includes('insufficient_risk_history')))
+  assert.ok(rows.every((row) => row.gateReasons.includes('insufficient_market_history')))
+  assert.ok(rows.every((row) => row.confidence.level === 'low'))
+})
+
+test('hourly points across seven days are not dense enough to manufacture tail-risk evidence', () => {
+  const sparse = Array.from({ length: 7 * 24 + 1 }, (_, index) => ({
+    ts: now - (7 * 24 - index) * 3_600,
+    tick: 95_000 + index * 20,
+  }))
+  const wide = scoreCandidate({
+    candidate: candidate({ tickHistory: sparse, poolRank: rankPrior() }),
+    capitalUsd: 1_000, mode: 'fees', risk: 'balanced', now, cost: COST,
+  }).find((item) => item.range.lowerPct === 10)
+  assert.ok(wide)
+  assert.equal(wide.projection24h.historicalIlTailUsd, 0)
+  assert.equal(wide.projection24h.inventoryDrawdownTailUsd, 0)
+  assert.ok(wide.gateReasons.includes('insufficient_risk_history'))
 })
 
 test('bands that would exceed the balanced daily recenter budget are observation-only', () => {
@@ -113,14 +165,55 @@ test('bands that would exceed the balanced daily recenter budget are observation
   assert.ok(narrow.gateReasons.includes('excessive_reopens'))
 })
 
+test('fee projection discounts rolling volume by observed in-range time', () => {
+  const rows = scoreCandidate({
+    candidate: candidate({ tickHistory: CALM_TICKS, poolRank: rankPrior() }),
+    capitalUsd: 1_000, mode: 'fees', risk: 'balanced', now, cost: COST,
+  })
+  const narrow = rows.find((item) => item.range.lowerPct === 1)
+  const wide = rows.find((item) => item.range.lowerPct === 5)
+  assert.ok(narrow && wide)
+  assert.ok(narrow.projection24h.feeExposurePct < wide.projection24h.feeExposurePct)
+  assert.ok(narrow.projection24h.modeledVolumeInRangeUsd < wide.projection24h.modeledVolumeInRangeUsd)
+  assert.ok(rows.every((item) => item.warnings.includes('volume_distribution_unavailable')))
+})
+
+test('out-of-range time discounts swap fees but not emissions on still-staked liquidity', () => {
+  const rewardPool = {
+    protocol: 'up33' as const, gaugeAlive: true, periodFinish: now + 86_400, upUsd: 1,
+    rewardRate: '1000000000000000000', stakedLiquidity: '50000000000000000000',
+    poolRank: rankPrior(),
+  }
+  const narrow = scoreCandidate({
+    candidate: candidate({ tickHistory: CALM_TICKS, ...rewardPool }),
+    capitalUsd: 1_000, mode: 'rewards', risk: 'balanced', now, cost: COST,
+  }).find((item) => item.range.lowerPct === 1)
+  assert.ok(narrow)
+  assert.ok(narrow.projection24h.feeExposurePct < 1)
+  assert.ok(narrow.projection24h.rewardUsd > 0)
+})
+
+test('historical active liquidity is used conservatively but never mislabeled as tick distribution', () => {
+  const wide = scoreWide({
+    poolRank: rankPrior(),
+    marketHistory: [{
+      ts: now - 60, vol1hUsd: 1_000, vol6hUsd: 6_000, vol24hUsd: 24_000,
+      activeLiquidity: '200000000000000000000', tick: 100_000, source: 'test',
+    }],
+  })
+  assert.equal(wide.market.activeLiquidityBasis, 'historical_active_liquidity')
+  assert.equal(wide.market.historicalActiveLiquidity, '200000000000000000000')
+  assert.equal(wide.market.tickLiquidityDistribution, 'unavailable')
+})
+
 test('ranking excludes low confidence and negative-net candidates from recommendations', () => {
   const base = {
     rank: 0, pool: '0x1', protocol: 'univ3', pair: 'A/B', mode: 'fees',
     lookback: { window: 'h6', hourlyVolumeUsd: 1, confidence: 1, reason: 'bootstrap_6h', errors: {} },
     range: { lowerPct: 2, upperPct: 2, tickLower: 0, tickUpper: 10, actualLowerPct: 2, actualUpperPct: 2 },
-    projection24h: { grossFeeUsd: 2, rewardUsd: 0, gasUsd: 0, executionUsd: 0, netUsd: 2, riskAdjustedNetUsd: 2, reopens: 0, inRangePct: 100, cvar95Usd: 0, coverageRatio: null },
-    confidence: { level: 'medium', score: 0.6 }, market: { tvlUsd: 1, vol1hUsd: 1, vol6hUsd: 1, vol24hUsd: 1, feePpm: 1, statsUpdatedAt: now, tickCoverageHours: 24 },
-    cost: { protocol: 'univ3', gasUsdPerCycle: 0, executionBpsPerCycle: 0, cycleSeconds: 1, sampleCycles: 1, source: 'default' }, gateReasons: [], warnings: [],
+    projection24h: { grossFeeUsd: 2, rewardUsd: 0, gasUsd: 0, executionUsd: 0, entryCostUsd: 0, incomeRetentionUsd: 0, expectedLvrUsd: 0, netUsd: 2, riskAdjustedNetUsd: 2, reopens: 0, feeExposurePct: 100, modeledVolumeInRangeUsd: 1, historicalIlTailUsd: 0, inventoryDrawdownTailUsd: 0, coverageRatio: null },
+    confidence: { level: 'medium', score: 0.6 }, market: { tvlUsd: 1, vol1hUsd: 1, vol6hUsd: 1, vol24hUsd: 1, feePpm: 1, statsUpdatedAt: now, tickCoverageHours: 24, tickCoverage: historyCoverage(CALM_TICKS, now - 86_400, now, 300), riskTickCoverage: historyCoverage(CALM_TICKS, now - 7 * 86_400, now, 1_800), marketCoverage: historyCoverage([], now - 7 * 86_400, now, 3_600), activeLiquidityBasis: 'spot_active_liquidity', historicalActiveLiquidity: null, activeLiquidityCoverageRatio: 0, tickLiquidityDistribution: 'unavailable', volumeDistribution: 'unavailable' },
+    cost: { protocol: 'univ3', gasUsdPerCycle: 0, executionBpsPerCycle: 0, cycleSeconds: 1, sampleCycles: 1, source: 'protocol' }, gateReasons: [], warnings: [],
   } as RecommendationItem
   const low = { ...base, pool: '0x2', confidence: { level: 'low' as const, score: 0.2 }, projection24h: { ...base.projection24h, riskAdjustedNetUsd: 3 } }
   const negative = { ...base, pool: '0x3', projection24h: { ...base.projection24h, netUsd: -1, riskAdjustedNetUsd: -1 } }
@@ -134,8 +227,8 @@ test('ranking uses a wider eligible band when the highest-net narrow band fails 
     rank: 0, pool: '0x1', protocol: 'univ3', pair: 'A/B', mode: 'fees',
     lookback: { window: 'h24', hourlyVolumeUsd: 1, confidence: 1, reason: 'walk_forward', errors: {} },
     range: { lowerPct: 1, upperPct: 1, tickLower: 0, tickUpper: 10, actualLowerPct: 1, actualUpperPct: 1 },
-    projection24h: { grossFeeUsd: 12, rewardUsd: 0, gasUsd: 1, executionUsd: 1, netUsd: 10, riskAdjustedNetUsd: 8, reopens: 20, inRangePct: 99, cvar95Usd: -4, coverageRatio: 2.5 },
-    confidence: { level: 'high', score: 0.9 }, market: { tvlUsd: 1, vol1hUsd: 1, vol6hUsd: 1, vol24hUsd: 1, feePpm: 1, statsUpdatedAt: now, tickCoverageHours: 24 },
+    projection24h: { grossFeeUsd: 12, rewardUsd: 0, gasUsd: 1, executionUsd: 1, entryCostUsd: 1, incomeRetentionUsd: 0, expectedLvrUsd: 0, netUsd: 10, riskAdjustedNetUsd: 8, reopens: 20, feeExposurePct: 99, modeledVolumeInRangeUsd: 1, historicalIlTailUsd: -4, inventoryDrawdownTailUsd: -3, coverageRatio: 2.5 },
+    confidence: { level: 'high', score: 0.9 }, market: { tvlUsd: 1, vol1hUsd: 1, vol6hUsd: 1, vol24hUsd: 1, feePpm: 1, statsUpdatedAt: now, tickCoverageHours: 24, tickCoverage: historyCoverage(CALM_TICKS, now - 86_400, now, 300), riskTickCoverage: historyCoverage(CALM_TICKS, now - 7 * 86_400, now, 1_800), marketCoverage: historyCoverage([], now - 7 * 86_400, now, 3_600), activeLiquidityBasis: 'spot_active_liquidity', historicalActiveLiquidity: null, activeLiquidityCoverageRatio: 0, tickLiquidityDistribution: 'unavailable', volumeDistribution: 'unavailable' },
     cost: { protocol: 'univ3', gasUsdPerCycle: 1, executionBpsPerCycle: 1, cycleSeconds: 1, sampleCycles: 30, source: 'pool' },
     gateReasons: ['excessive_reopens'], warnings: [],
   } as RecommendationItem
@@ -187,13 +280,12 @@ test('rewards projections reconcile against the rank snapshot emission APR', () 
   assert.ok(!consistent.warnings.includes('emit_apr_divergence'))
 })
 
-test('a missing or malformed rank prior changes nothing', () => {
+test('a missing or malformed rank prior prevents promotion instead of assuming zero LVR', () => {
   const absent = scoreWide()
   assert.equal(absent.poolRank, undefined)
-  assert.ok(!absent.warnings.some((w) => ['below_lvr_floor', 'volume_above_baseline', 'emit_apr_divergence'].includes(w)))
+  assert.ok(absent.gateReasons.includes('lvr_unavailable'))
   const malformed = scoreWide({ poolRank: { ...rankPrior(), coverage: Number.NaN } as unknown as RecommendationRankPrior })
-  assert.ok(!malformed.gateReasons.includes('pool_below_lvr_floor'))
-  assert.ok(!malformed.warnings.includes('below_lvr_floor'))
+  assert.ok(malformed.gateReasons.includes('lvr_unavailable'))
 })
 
 test('a fresh prior rides along on the scored item for the UI', () => {
@@ -203,19 +295,60 @@ test('a fresh prior rides along on the scored item for the UI', () => {
 })
 
 test('a fading volume trend caps confidence and flags volume_fading; a verified rise nudges it', () => {
-  const baseline = scoreWide()
-  const fading = scoreWide({ volumeTrend: { class: 'fading', vsBaseline: 0.4, slope7dPct: -40 } })
+  const tickHistory = Array.from({ length: 7 * 24 * 6 + 1 }, (_, index) => ({
+    ts: now - (7 * 24 * 6 - index) * 600,
+    tick: 100_000 + (index % 2 === 0 ? -100 : 100),
+  }))
+  const marketHistory = Array.from({ length: 7 * 24 + 1 }, (_, index) => ({
+    ts: now - (7 * 24 - index) * 3_600,
+    vol1hUsd: 1_000, vol6hUsd: 6_000, vol24hUsd: 24_000,
+  }))
+  const evidence = { tickHistory, marketHistory, poolRank: rankPrior() }
+  const baseline = scoreWide(evidence)
+  const fading = scoreWide({ ...evidence, volumeTrend: { class: 'fading', vsBaseline: 0.4, slope7dPct: -40 } })
   assert.ok(fading.confidence.score <= 0.5, 'fading caps displayed confidence at 0.5')
   assert.ok(fading.confidence.score < baseline.confidence.score)
   assert.ok(fading.warnings.includes('volume_fading'))
-  const cliff = scoreWide({ volumeTrend: { class: 'collapsing', vsBaseline: 0.2, slope7dPct: -70 } })
+  const cliff = scoreWide({ ...evidence, volumeTrend: { class: 'collapsing', vsBaseline: 0.2, slope7dPct: -70 } })
   assert.ok(cliff.confidence.score <= 0.5 && cliff.warnings.includes('volume_fading'))
-  const rising = scoreWide({ volumeTrend: { class: 'rising', vsBaseline: 1.4, slope7dPct: 30 } })
+  const rising = scoreWide({ ...evidence, volumeTrend: { class: 'rising', vsBaseline: 1.4, slope7dPct: 30 } })
   assert.ok(rising.confidence.score > baseline.confidence.score, 'a verified rise nudges confidence up')
   assert.ok(rising.confidence.score <= 1)
   assert.ok(!rising.warnings.includes('volume_fading'))
-  const hot = scoreWide({ volumeTrend: { class: 'new_hot', vsBaseline: 1.5, slope7dPct: 60 } })
+  const hot = scoreWide({ ...evidence, volumeTrend: { class: 'new_hot', vsBaseline: 1.5, slope7dPct: 60 } })
   assert.equal(hot.confidence.score, baseline.confidence.score, 'new_hot gets no boost (decision 1)')
-  const unknown = scoreWide({ volumeTrend: { class: 'unknown', vsBaseline: null, slope7dPct: null } })
+  const unknown = scoreWide({ ...evidence, volumeTrend: { class: 'unknown', vsBaseline: null, slope7dPct: null } })
   assert.equal(unknown.confidence.score, baseline.confidence.score)
+})
+
+test('a rising rank trend cannot bypass incomplete local recommendation history', () => {
+  const baseline = scoreWide()
+  const rising = scoreWide({ volumeTrend: { class: 'rising', vsBaseline: 1.4, slope7dPct: 30 } })
+  assert.equal(rising.confidence.score, baseline.confidence.score)
+  assert.ok(rising.gateReasons.includes('insufficient_risk_history'))
+  assert.ok(rising.gateReasons.includes('insufficient_market_history'))
+})
+
+test('projected net subtracts entry costs, 10% reserve, and expected LVR', () => {
+  const wide = scoreWide({ poolRank: rankPrior({ coverage: 2 }) })
+  const cycles = wide.projection24h.reopens + 1
+  assert.equal(wide.projection24h.gasUsd, cycles * COST.gasUsdPerCycle)
+  assert.equal(wide.projection24h.executionUsd, cycles * 1_000 * COST.executionBpsPerCycle / 10_000)
+  assert.equal(wide.projection24h.entryCostUsd, COST.gasUsdPerCycle + 1_000 * COST.executionBpsPerCycle / 10_000)
+  assert.equal(wide.projection24h.incomeRetentionUsd, wide.projection24h.grossFeeUsd * 0.1)
+  assert.equal(wide.projection24h.expectedLvrUsd, wide.projection24h.grossFeeUsd / 2)
+  const expectedNet = wide.projection24h.grossFeeUsd
+    - wide.projection24h.incomeRetentionUsd
+    - wide.projection24h.gasUsd
+    - wide.projection24h.executionUsd
+    - wide.projection24h.expectedLvrUsd!
+  assert.ok(Math.abs(wide.projection24h.netUsd - expectedNet) < 1e-12)
+})
+
+test('missing observed costs is a hard opening gate and never uses defaults', () => {
+  const unavailable = { protocol: 'univ3' as const, gasUsdPerCycle: 0, executionBpsPerCycle: 0, cycleSeconds: 0, sampleCycles: 0, source: 'unavailable' as const }
+  const rows = scoreCandidate({ candidate: candidate({ tickHistory: CALM_TICKS, poolRank: rankPrior() }), capitalUsd: 1_000, mode: 'fees', risk: 'balanced', now, cost: unavailable })
+  assert.ok(rows.length > 0)
+  assert.ok(rows.every((row) => row.gateReasons.includes('cost_unavailable')))
+  assert.ok(rows.every((row) => row.projection24h.gasUsd === 0 && row.projection24h.executionUsd === 0))
 })

@@ -5,9 +5,13 @@ export type RecommendationObservationReason =
   | 'non_positive_net'
   | 'excessive_reopens'
   | 'insufficient_tick_history'
+  | 'insufficient_risk_history'
+  | 'insufficient_market_history'
   | 'non_positive_risk_adjusted_net'
   | 'unanchored_quote_risk'
   | 'pool_below_lvr_floor'
+  | 'lvr_unavailable'
+  | 'cost_unavailable'
 
 export type RecommendationDisplayItem = {
   item: RecommendationItem

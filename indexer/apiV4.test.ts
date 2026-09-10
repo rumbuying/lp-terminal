@@ -275,6 +275,16 @@ test('recommendation candidates keep v4 PoolId distinct from the singleton addre
   assert.equal(candidate.poolId, id(1))
   assert.equal(candidate.hooks, hooks)
   assert.equal(candidate.tickHistory.at(-1)?.tick, 0)
+
+  store.db.prepare('UPDATE v4_market_stats SET tvl_usd=?,liq_usd=? WHERE pool_id=?')
+    .run(1_000_000_000, 1, id(1))
+  assert.equal(
+    api.getRecommendationCandidates(new URLSearchParams({ limit: '10' }))
+      .candidates.some((row) => row.poolId === id(1)),
+    false,
+    'an old derived TVL cannot override the fresh external depth gate',
+  )
+  store.upsertV4MarketStats(id(1), { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 20, 100_000, 'test')
 })
 
 test('v4 search returns raw Graph accounting and isolated display metadata', () => {
@@ -290,6 +300,10 @@ test('v4 search returns raw Graph accounting and isolated display metadata', () 
     symbol: 'AAA',
     decimals: 18,
     priceUsd: null,
+    priceSource: null,
+    priceUpdatedAt: null,
+    priceStatus: 'unavailable',
+    priceTtlSeconds: 14_400,
   })
   const dropped = api.getV4Pools(
     new URLSearchParams({ proto: 'univ4', q: id(3), limit: '10' }),

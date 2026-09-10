@@ -12,18 +12,19 @@ const item = (pool: string, mode: RecommendationItem['mode'], status: 'items' | 
   mode,
   lookback: { window: 'h6', hourlyVolumeUsd: 10, confidence: 0.6, reason: 'bootstrap_6h', errors: {} },
   range: { lowerPct: 2, upperPct: 2, tickLower: -120, tickUpper: 120, actualLowerPct: 2, actualUpperPct: 2 },
-  projection24h: { grossFeeUsd: 5, rewardUsd: 0, gasUsd: 1, executionUsd: 1, netUsd, riskAdjustedNetUsd: netUsd, reopens: 1, inRangePct: 90, cvar95Usd: -2, coverageRatio: 1 },
+  projection24h: { grossFeeUsd: 5, rewardUsd: 0, gasUsd: 1, executionUsd: 1, entryCostUsd: 1, incomeRetentionUsd: 0, expectedLvrUsd: 0, netUsd, riskAdjustedNetUsd: netUsd, reopens: 1, feeExposurePct: 90, modeledVolumeInRangeUsd: 100, historicalIlTailUsd: -2, inventoryDrawdownTailUsd: -1, coverageRatio: 1 },
   confidence: { level: 'medium', score: 0.7 },
-  market: { tvlUsd: 1000, vol1hUsd: 10, vol6hUsd: 60, vol24hUsd: 240, feePpm: 3000, statsUpdatedAt: 1, tickCoverageHours: 24 },
+  market: { tvlUsd: 1000, vol1hUsd: 10, vol6hUsd: 60, vol24hUsd: 240, feePpm: 3000, statsUpdatedAt: 1, tickCoverageHours: 24, tickCoverage: { windowSeconds: 86400, coveredSeconds: 86400, ratio: 1, sampleCount: 288, firstAt: 1, lastAt: 86401, maxGapSeconds: 300 }, riskTickCoverage: { windowSeconds: 604800, coveredSeconds: 604800, ratio: 1, sampleCount: 336, firstAt: 1, lastAt: 604801, maxGapSeconds: 1800 }, marketCoverage: { windowSeconds: 604800, coveredSeconds: 604800, ratio: 1, sampleCount: 168, firstAt: 1, lastAt: 604801, maxGapSeconds: 3600 }, activeLiquidityBasis: 'spot_active_liquidity', historicalActiveLiquidity: null, activeLiquidityCoverageRatio: 0, tickLiquidityDistribution: 'unavailable', volumeDistribution: 'unavailable' },
   cost: { protocol: 'univ3', gasUsdPerCycle: 1, executionBpsPerCycle: 2, cycleSeconds: 60, sampleCycles: 2, source: 'pool' },
   gateReasons: status === 'observed' ? ['excessive_reopens'] : [],
   warnings: [],
 })
 
 const response = (items: RecommendationItem[], observed: RecommendationItem[] = []): RecommendationResponse => ({
-  modelVersion: 'lp-rec-v3',
+  modelVersion: 'lp-rec-v5',
   generatedAt: 1,
   marketAsOf: 1,
+  marketFreshness: { status: 'fresh', observedAt: 1, ttlSeconds: 600 },
   capitalUsd: 1000,
   mode: 'fees',
   risk: 'balanced',

@@ -33,11 +33,6 @@ export function RecommendationsTab(props: { onOpenPool: () => void }) {
     const response = data[mode]
     return response?.capitalUsd === requestedCapitalUsd && response.risk === risk ? response : null
   }
-  const recommendationLoaded = MODES.every((mode) => freshData(mode) !== null || errors[mode] !== null)
-  const best = recommendationLoaded
-    ? MODES.flatMap((mode) => freshData(mode)?.items ?? [])
-      .sort((a, b) => b.projection24h.riskAdjustedNetUsd - a.projection24h.riskAdjustedNetUsd)[0]
-    : undefined
 
   // POOL RANK → recommender handoff: remember which pool to land on; the
   // scroll/flash runs once the cards matching it have loaded (and re-runs if
@@ -117,19 +112,6 @@ export function RecommendationsTab(props: { onOpenPool: () => void }) {
           </div>
         ) : (
           <>
-            {best ? (
-              <section className="recommendation-best" aria-label={t('pools.recBestNow')}>
-                <div>
-                  <span className="recommendation-best-kicker">{t('pools.recBestNow')}</span>
-                  <h3>{best.pair} <ProtoBadge proto={terminalProtocolFor(best.protocol)} mini /></h3>
-                  <p>{best.mode === 'fees' ? t('pools.recModeFees') : t('pools.recModeRewards')} · {best.lookback.window.toUpperCase()} · ±{best.range.lowerPct}% · {best.projection24h.reopens.toFixed(1)} {t('pools.recReopens')}</p>
-                </div>
-                <div className="recommendation-best-return"><span>{t('pools.recNet24h')}</span><b>{fmtUsd(best.projection24h.netUsd)}</b><small>{t('pools.recAfterRisk', { value: fmtUsd(best.projection24h.riskAdjustedNetUsd) })}</small></div>
-                <Btn onClick={() => apply(best.mode, best, 'recommended')}>{t('pools.recOpenBest')}</Btn>
-              </section>
-            ) : recommendationLoaded && !loading.fees && !loading.rewards ? (
-              <div className="recommendation-no-open amber"><strong>{t('pools.recNoBest')}</strong><span>{t('pools.recNoBestDetail')}</span></div>
-            ) : null}
             <div className="recommendation-mode-sections">
               {MODES.map((mode) => (
                 <RecommendationModeSection
@@ -177,8 +159,12 @@ function RecommendationModeSection(props: {
       if (reason === 'non_positive_net') return t('pools.recObservedNonPositive')
       if (reason === 'excessive_reopens') return t('pools.recObservedReopens')
       if (reason === 'insufficient_tick_history') return t('pools.recObservedHistory')
+      if (reason === 'insufficient_risk_history') return t('pools.recObservedRiskHistory')
+      if (reason === 'insufficient_market_history') return t('pools.recObservedMarketHistory')
       if (reason === 'unanchored_quote_risk') return t('pools.recObservedQuoteRisk')
       if (reason === 'pool_below_lvr_floor') return t('pools.recObservedLvrFloor')
+      if (reason === 'lvr_unavailable') return t('pools.recObservedLvrUnavailable')
+      if (reason === 'cost_unavailable') return t('pools.recObservedCostUnavailable')
       return t('pools.recObservedRiskNet')
     })
     return t('pools.recObservedReason', { reason: labels.join(' · ') || t('pools.recObservedBelowCutoff') })
@@ -190,8 +176,12 @@ function RecommendationModeSection(props: {
     if (code === 'below_lvr_floor') return t('pools.recWarnLvrFloor')
     if (code === 'volume_above_baseline') return t('pools.recWarnVolumeBaseline')
     if (code === 'emit_apr_divergence') return t('pools.recWarnEmitApr')
-    if (code === 'cost_default') return t('pools.recWarnCostDefault')
     if (code === 'volume_fading') return t('pools.recWarnVolumeFading')
+    if (code === 'cost_unavailable') return t('pools.recWarnCostUnavailable')
+    if (code === 'market_history_incomplete') return t('pools.recWarnMarketHistory')
+    if (code === 'risk_history_incomplete') return t('pools.recWarnRiskHistory')
+    if (code === 'volume_distribution_unavailable') return t('pools.recWarnVolumeDistribution')
+    if (code === 'tick_liquidity_distribution_unavailable') return t('pools.recWarnTickLiquidity')
     return null
   }
 
@@ -252,7 +242,7 @@ function RecommendationModeSection(props: {
                 <div className="recommendation-main">
                   <div><span>{t('pools.recWindow')}</span><b>{item.lookback.window.toUpperCase()}</b><small>{windowReason(item)}</small></div>
                   <div><span>{t('pools.recRange')}</span><b>±{item.range.lowerPct}%</b><small>{item.range.tickLower} → {item.range.tickUpper}</small></div>
-                  <div><span>{t('pools.recNet24h')}</span><b className={item.projection24h.netUsd >= 0 ? 'green' : 'red'}>{fmtUsd(item.projection24h.netUsd)}</b><small>{item.projection24h.reopens.toFixed(1)} {t('pools.recReopens')}</small></div>
+                  <div><span>{t('pools.recNet24h')}</span><b className={item.projection24h.riskAdjustedNetUsd >= 0 ? 'green' : 'red'}>{fmtUsd(item.projection24h.riskAdjustedNetUsd)}</b><small>{t('pools.recRawNet', { value: fmtUsd(item.projection24h.netUsd) })} · {item.projection24h.reopens.toFixed(1)} {t('pools.recReopens')}</small></div>
                 </div>
                 {(() => {
                   const extraWarnings = item.warnings.map(warningLabel).filter((label): label is string => label !== null)
@@ -265,9 +255,16 @@ function RecommendationModeSection(props: {
                     <span>{props.mode === 'fees' ? t('pools.recGrossFees') : t('pools.recRewards')}<b>{fmtUsd(props.mode === 'fees' ? item.projection24h.grossFeeUsd : item.projection24h.rewardUsd)}</b></span>
                     <span>{t('pools.recGas')}<b>−{fmtUsd(item.projection24h.gasUsd)}</b></span>
                     <span>{t('pools.recExecution')}<b>−{fmtUsd(item.projection24h.executionUsd)}</b></span>
-                    <span>{t('pools.recTailRisk')}<b>{fmtUsd(item.projection24h.cvar95Usd)}</b></span>
+                    <span>{t('pools.recEntryIncluded')}<b>{fmtUsd(item.projection24h.entryCostUsd)}</b></span>
+                    <span>{t('pools.recIncomeRetention')}<b>−{fmtUsd(item.projection24h.incomeRetentionUsd)}</b></span>
+                    <span>{t('pools.recExpectedLvr')}<b>{item.projection24h.expectedLvrUsd == null ? '—' : `−${fmtUsd(item.projection24h.expectedLvrUsd)}`}</b></span>
+                    <span>{t('pools.recIlTail')}<b>{fmtUsd(item.projection24h.historicalIlTailUsd)}</b></span>
+                    <span>{t('pools.recInventoryTail')}<b>{fmtUsd(item.projection24h.inventoryDrawdownTailUsd)}</b></span>
+                    <span>{t('pools.recFeeExposure')}<b>{item.projection24h.feeExposurePct.toFixed(1)}%</b></span>
+                    <span>{t('pools.recModeledInBandVolume')}<b>{fmtUsd(item.projection24h.modeledVolumeInRangeUsd)}</b></span>
                     <span>1H / 6H / 24H<b>{item.market.vol1hUsd == null ? '—' : fmtUsd(item.market.vol1hUsd)} / {item.market.vol6hUsd == null ? '—' : fmtUsd(item.market.vol6hUsd)} / {item.market.vol24hUsd == null ? '—' : fmtUsd(item.market.vol24hUsd)}</b></span>
-                    <span>{t('pools.recCoverage')}<b>{item.market.tickCoverageHours.toFixed(1)}h · {item.cost.sampleCycles} cycles</b></span>
+                    <span>{t('pools.recCoverage')}<b>{t('pools.recHistoryCoverage', { tick: Math.round(item.market.tickCoverage.ratio * 100), risk: Math.round(item.market.riskTickCoverage.ratio * 100), market: Math.round(item.market.marketCoverage.ratio * 100), cycles: item.cost.sampleCycles })}</b></span>
+                    <span>{t('pools.recLiquidityBasis')}<b>{item.market.activeLiquidityBasis === 'historical_active_liquidity' ? t('pools.recHistoricalActiveLiquidity') : t('pools.recSpotActiveLiquidity')}</b></span>
                   </div>
                 </details>
                 <Btn onClick={() => props.onApply(item, status)}>{status === 'recommended' ? t('pools.recApply') : t('pools.recInspect')}</Btn>

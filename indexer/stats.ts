@@ -11,6 +11,7 @@ import { CHAIN, GT, TUNE, log, sleep } from './config';
 import { plausibleUsd } from './state';
 import {
   db,
+  expireMarketStats,
   poolRow,
   setTokenPrice,
   upsertStats,
@@ -234,8 +235,15 @@ export async function up33StatsCycle(): Promise<string[]> {
 }
 
 export async function statsCycle(): Promise<string[]> {
-  const [gt, up33, catalog] = await Promise.all([gtCycle(), up33StatsCycle(), catalogStatsCycle()]);
-  return [...new Set([...gt, ...up33, ...catalog])];
+  try {
+    const [gt, up33, catalog] = await Promise.all([gtCycle(), up33StatsCycle(), catalogStatsCycle()]);
+    return [...new Set([...gt, ...up33, ...catalog])];
+  } finally {
+    // Every source participates in the same freshness contract. A provider
+    // failure must not leave an old rolling window looking current merely
+    // because no replacement row was written during this cycle.
+    expireMarketStats();
+  }
 }
 
 /** The POOLS-page universe — the top univ3/PancakeSwap-v3 pools by

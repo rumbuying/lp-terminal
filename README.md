@@ -423,7 +423,8 @@ trigger-maintained counters. Relevant defaults are exposed as `TAIL_MS`,
 `INDEXER_BOOTSTRAP_POOL_LIMIT`, `INDEXER_PROGRESSIVE_TIER_LIMIT`,
 `INDEXER_CATALOG_FRESH_ADDRESS_LIMIT`, `HYDRATION_DEMAND_N`,
 `HYDRATION_DEMAND_MAX`, `RECENT_HYDRATION_N`, `LANDING_CANDIDATE_N`,
-`REPRICE_MS` and `INDEXER_SQLITE_BUSY_TIMEOUT_MS`.
+`REPRICE_MS`, `PRICE_SEED_FRESH_MS`, `MARKET_STATS_FRESH_MS`,
+`POOL_RANK_GT_CACHE_MAX_AGE_MS` and `INDEXER_SQLITE_BUSY_TIMEOUT_MS`.
 
 Local environment comes from the workspace-level **`../.env`** (via Vite
 `envDir`; this repo shares RPC settings with sibling projects):
@@ -634,8 +635,12 @@ because real TVL, not pool count, bounds it.
 
 `RECOMMEND` ranks pools for a chosen capital amount, objective (fees or rewards)
 and risk level. The model walk-forward selects a usable volume horizon, replays
-candidate ranges over retained tick history, subtracts measured/default gas and
-execution costs, and applies hard opening gates. A recommendation remains
+candidate ranges over retained tick history, subtracts observed gas and
+execution costs, and applies hard opening gates. The current model does not
+invent default execution costs: it charges one initial entry plus projected
+recenters from complete observed cycle samples, subtracts the 10% income
+reserve and expected LVR implied by the fresh pool-rank prior, and leaves a
+candidate observation-only when either cost or LVR evidence is unavailable. A recommendation remains
 observable when gated, but only ungated rows appear as actionable picks. Opening
 one sends the exact PoolId (for v4), ticks, percentages and capital assumption
 into the POOLS liquidity panel; it does not silently replace the range with a UI
@@ -655,6 +660,14 @@ wallet sessions and admin tokens are scoped by chain, every executor response
 is checked against the selected chain id, and the canonical gateway uses
 `/_chain/<chain>/executor/*`; a compatibility host fails closed for a chain it
 does not serve.
+
+When combined realized LP-fee and staking-reward income is greater than one
+settlement dollar, the executor keeps 10% outside the next LP deployment. That
+reserve remains in the strategy owner's execution wallet; it is not sent to a
+platform treasury and platform revenue for this policy is zero. The creation
+screen discloses this custody rule, while performance responses retain the old
+`incomeTax*` fields only as compatibility aliases and expose the reserve and
+custody explicitly.
 
 The normal frontend keeps browser-wallet signing. Enabling unattended execution
 adds a hot signer: either an AES-256-GCM encrypted local vault protected by a

@@ -37,28 +37,24 @@ test('quote daily return refuses mixed quotes and incomplete snapshots', () => {
 
 test('stable daily return is Σ pnlUsdg / Σ opening usdg and matches its sign', () => {
   // 11.5 USDG of P/L on 2000 USDG of day-start assets → +0.575%
-  const row = (pnlUsdgRaw: string | null, openingAssetsUsdgRaw: string | null, openingAssetsStable: number | null) =>
-    ({ pnlUsdgRaw, openingAssetsUsdgRaw, openingAssetsStable })
-  const pct = stableDailyReturnPct([row('11500000', '2000000000', null)])!
+  const row = (pnlUsdgRaw: string | null, openingAssetsUsdgRaw: string | null) =>
+    ({ pnlUsdgRaw, openingAssetsUsdgRaw })
+  const pct = stableDailyReturnPct([row('11500000', '2000000000')])!
   assert.ok(Math.abs(pct - 0.575) < 1e-9)
   // negative P/L yields a negative rate — never the inverted-sign artifact
-  const negative = stableDailyReturnPct([row('-500000', '2000000000', null)])!
+  const negative = stableDailyReturnPct([row('-500000', '2000000000')])!
   assert.ok(negative < 0 && Math.abs(negative - -0.025) < 1e-9)
   // a row whose quote-unit P/L is negative but USDG P/L positive stays positive
-  const quotedLoss = stableDailyReturnPct([row('11500000', '2000000000', null)])!
+  const quotedLoss = stableDailyReturnPct([row('11500000', '2000000000')])!
   assert.ok(quotedLoss > 0)
 })
 
-test('stable daily return falls back to a current-price opening estimate', () => {
-  const pct = stableDailyReturnPct([
-    { pnlUsdgRaw: '11500000', openingAssetsUsdgRaw: null, openingAssetsStable: 2000 },
-  ])!
-  assert.ok(Math.abs(pct - 0.575) < 1e-9)
+test('stable daily return refuses a current-price substitute for a missing opening mark', () => {
   assert.equal(stableDailyReturnPct([
-    { pnlUsdgRaw: '11500000', openingAssetsUsdgRaw: null, openingAssetsStable: null },
+    { pnlUsdgRaw: '11500000', openingAssetsUsdgRaw: null },
   ]), null)
   assert.equal(stableDailyReturnPct([
-    { pnlUsdgRaw: null, openingAssetsUsdgRaw: '2000000000', openingAssetsStable: null },
+    { pnlUsdgRaw: null, openingAssetsUsdgRaw: '2000000000' },
   ]), null)
   assert.equal(stableDailyReturnPct([]), null)
 })

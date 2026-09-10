@@ -93,6 +93,11 @@ export const TUNE = {
   fullSweepMs: envMs('ACTIVE_SWEEP_MS', 14_400_000), // ACTIVE pools (≥$100 TVL or <48h old), every 4h
   censusMs: envMs('CENSUS_MS', 86_400_000), // daily full-state longstop for small catalogs only
   statsMs: envMs('STATS_MS', 300_000), // GeckoTerminal enrichment cycle (external HTTP, off the RPC queue)
+  // External observations remain visible with an explicit stale marker after
+  // these windows, but may no longer seed prices, rankings or recommendations.
+  priceSeedFreshMs: envMs('PRICE_SEED_FRESH_MS', 14_400_000), // 4h
+  marketStatsFreshMs: envMs('MARKET_STATS_FRESH_MS', 900_000), // three 5m cycles
+  poolRankGtCacheMaxAgeMs: envMs('POOL_RANK_GT_CACHE_MAX_AGE_MS', 86_400_000), // two rank cycles
   analyticsMs: envMs('ANALYTICS_MS', 60_000), // recommendation tick/state samples
   analyticsN: envMs('ANALYTICS_N', 80), // bounded address and v4 cohorts per chain
   repriceMs: envMs('REPRICE_MS', 86_400_000), // giant-catalog full price graph, isolated in a worker

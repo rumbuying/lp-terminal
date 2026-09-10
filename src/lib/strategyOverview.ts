@@ -8,9 +8,6 @@ export type DailyStableReturnRow = {
   pnlUsdgRaw: string | null
   /** Day-start assets recorded by the executor in USDG raw units (6 decimals). */
   openingAssetsUsdgRaw: string | null
-  /** Fallback USDG estimate of day-start assets (current price) when the day
-      opened before the executor recorded a USDG snapshot for this row. */
-  openingAssetsStable: number | null
 }
 
 export type DailyCycleInput = {
@@ -58,8 +55,8 @@ export function quoteDailyReturnPct(rows: DailyQuoteReturnRow[]): number | null 
  * Daily portfolio return in USDG: Σ day USDG P/L / Σ opening USDG assets.
  * Both terms are settlement-denominated, so the result shares the sign of the
  * USDG "当日盈亏" total — a positive USDG P/L can never show a negative rate.
- * Rows whose pnlUsdgRaw is unknown are skipped; rows recorded before the
- * executor captured day-open USDG assets fall back to a current-price estimate.
+ * Rows without an occurrence-time USDG P/L and day-open asset mark are skipped.
+ * A current token price must never rewrite a historical daily denominator.
  */
 export function stableDailyReturnPct(rows: DailyStableReturnRow[]): number | null {
   let pnlUsdg = 0n
@@ -71,8 +68,6 @@ export function stableDailyReturnPct(rows: DailyStableReturnRow[]): number | nul
       const raw = Number(row.openingAssetsUsdgRaw)
       if (Number.isFinite(raw) && raw > 0) opening = raw / 1e6
     }
-    if (opening === null && row.openingAssetsStable !== null && Number.isFinite(row.openingAssetsStable) && row.openingAssetsStable > 0)
-      opening = row.openingAssetsStable
     if (opening === null) continue
     pnlUsdg += BigInt(row.pnlUsdgRaw)
     openingUsdg += opening

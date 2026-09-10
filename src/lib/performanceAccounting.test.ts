@@ -35,14 +35,17 @@ test('gas quote allocation preserves the exact quoted total', () => {
   assert.deepEqual(allocateProRata(7n, [0n, 2n, 5n]), [0n, 2n, 5n])
 })
 
-test('directly retained income tax becomes an explicit ledger fact', () => {
+test('directly retained income becomes an explicit owner-wallet custody fact', () => {
   const entry = incomeTaxRetentionEntry({
     id: 'tax-1', strategyId: 'strategy-1', cycleId: 'cycle-1', jobId: 'job-1', ts: 1,
     token: '0x0000000000000000000000000000000000000001', amount: 123n,
   })
   assert.equal(entry?.kind, 'income_tax')
   assert.equal(entry?.amount, '123')
-  assert.deepEqual(entry?.meta, { purpose: 'fee_tax', source: 'direct_retention' })
+  assert.deepEqual(entry?.meta, {
+    purpose: 'fee_tax', source: 'direct_retention', rateBps: 1000,
+    custody: 'owner_wallet', platformRevenue: false,
+  })
 })
 
 test('withdrawing profit changes custody without erasing lifetime P/L', () => {

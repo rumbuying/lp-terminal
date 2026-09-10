@@ -49,6 +49,9 @@ export type ApiPool23 = {
   txns24h: number | null
   gtLiqUsd: number | null
   statsSource: string | null
+  statsUpdatedAt?: number | null
+  statsStatus?: 'fresh' | 'stale' | 'unavailable'
+  statsTtlSeconds?: number
 }
 
 export type ApiPoolV4 = {
@@ -67,6 +70,9 @@ export type ApiPoolV4 = {
   txns24h?: number | null
   gtLiqUsd?: number | string | null
   statsSource?: string | null
+  statsUpdatedAt?: number | null
+  statsStatus?: 'fresh' | 'stale' | 'unavailable'
+  statsTtlSeconds?: number
   rawTvl0: number | string | null
   rawTvl1: number | string | null
   rawDays: {
@@ -108,6 +114,11 @@ export type ApiResponse = {
       /** Present for v2/v3 chain-read metadata; v4 Graph display rows omit it. */
       metaOk?: boolean
       priceUsd: number | null
+      lastPriceUsd?: number | null
+      priceSource?: string | null
+      priceUpdatedAt?: number | null
+      priceStatus?: 'fresh' | 'stale' | 'unavailable'
+      priceTtlSeconds?: number
     }
   >
 }

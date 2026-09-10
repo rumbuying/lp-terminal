@@ -6,6 +6,7 @@ import { broadcastClient, publicClient } from './chain'
 import { EXECUTOR } from './config'
 import { executorPaused, markStep, markTransaction } from './store'
 import { isTransientRpcFailure, retryDelay } from './rpc-retry'
+import { captureConfirmedGasValuation, recordConfirmedGasReceipt } from './gas-accounting'
 
 export type SafeTx = { to: Address; data: Hex; value?: bigint }
 
@@ -145,7 +146,11 @@ export async function sendTracked(args: { config: StrategyConfig; jobId: string;
     markTransaction({ jobId: args.jobId, stepIndex: args.stepIndex, txIndex, state: 'failed', txHash: hash, txTo: args.tx.to, calldataHash, blockNumber: receipt.blockNumber, errorCode: 'E_TX_REVERTED' })
     throw new Error('E_TX_REVERTED')
   }
+  // Persist the exact gas fact before marking the transaction complete. Price
+  // enrichment is best-effort and may never invalidate an on-chain success.
+  recordConfirmedGasReceipt(args.config, args.jobId, receipt)
   markStep({ jobId: args.jobId, index: args.stepIndex, state: 'confirmed', txHash: hash, blockNumber: receipt.blockNumber, result: { gasUsed: receipt.gasUsed.toString() } })
   markTransaction({ jobId: args.jobId, stepIndex: args.stepIndex, txIndex, state: 'confirmed', txHash: hash, txTo: args.tx.to, calldataHash, blockNumber: receipt.blockNumber, result: { gasUsed: receipt.gasUsed.toString() } })
+  await captureConfirmedGasValuation(args.config, args.jobId, receipt)
   return receipt
 }

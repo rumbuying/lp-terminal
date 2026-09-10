@@ -30,6 +30,7 @@ type Prepared = {
 type SolverQuote = {
   amountOutNet: bigint
   minAmountOutNet: bigint
+  settler: Address | null
   allowanceTarget: Address | null
   tx: { requiredFrom?: Address; to: Address; value: bigint; data: Hex } | null
 }
@@ -47,6 +48,7 @@ const basePrepared: Prepared = {
 const baseQuote: SolverQuote = {
   amountOutNet: 1_000n,
   minAmountOutNet: 990n,
+  settler: SETTLER,
   allowanceTarget: SPENDER,
   tx: { to: SETTLER, value: 0n, data: '0xfeed' },
 }
@@ -122,8 +124,8 @@ mock.module('./solver', {
 })
 mock.module('./solverPreflight', {
   namedExports: {
-    preflightSolverTransaction: async (_client: unknown, _account: Address, tx: unknown) => {
-      preflighted.push(tx)
+    preflightSolverTransaction: async (_client: unknown, _account: Address, tx: unknown, settler: Address) => {
+      preflighted.push({ tx, settler })
       return GAS
     },
   },
@@ -261,6 +263,7 @@ test('the solver transaction is sent exactly as quoted, with the preflight gas',
   const result = await executeSolverSwap(solverIntent)
 
   assert.equal(preflighted.length, 1)
+  assert.equal((preflighted[0] as { settler: Address }).settler, SETTLER)
   assert.deepEqual(sent, [
     { account: SENDER, to: SETTLER, data: '0xfeed', value: 0n, gas: GAS, chainId: 56 },
   ])
@@ -299,6 +302,13 @@ test('a solver re-quote below the caller minimum halts after the approval', asyn
   assert.deepEqual(sent, [])
 })
 
+test('a solver quote with an execution floor below the displayed minimum is refused', async () => {
+  begin()
+  quoteAt = () => ({ ...baseQuote, minAmountOutNet: 989n })
+  await assert.rejects(executeSolverSwap(solverIntent), SlippageError)
+  assert.deepEqual(sent, [])
+})
+
 test('a solver allowance target that moved after approval stops the swap', async () => {
   begin()
   allowance = 'approved'
@@ -322,6 +332,13 @@ test('a solver quote with no transaction is refused', async () => {
   quoteAt = () => ({ ...baseQuote, tx: null })
 
   await assert.rejects(executeSolverSwap(solverIntent), /carried no transaction/)
+  assert.deepEqual(sent, [])
+})
+
+test('a solver quote with no Settler identity is refused', async () => {
+  begin()
+  quoteAt = () => ({ ...baseQuote, settler: null })
+  await assert.rejects(executeSolverSwap(solverIntent), /no Settler identity/)
   assert.deepEqual(sent, [])
 })
 

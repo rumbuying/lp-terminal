@@ -22,7 +22,8 @@
 //             forgoes ALL fees to voters, so feeApr and emitApr are
 //             alternatives, never additive.
 //   sigma     daily log-return stdev of the pool's exchange rate (subgraph
-//             sqrtPrice for UP33, token-currency OHLCV closes for v3).
+//             2 × log(sqrtPrice) changes for UP33, token-currency OHLCV
+//             closes for v3; only adjacent daily observations contribute).
 //   coverage  feeApr ÷ (sigmaAnnual²/8) — the loss-versus-rebalancing floor.
 //             Concentrating multiplies fee capture and LVR by the same factor,
 //             so the ratio is a property of the POOL, not of the position:
@@ -36,6 +37,7 @@
 // Robinhood-only for now: every source above is pinned to this chain's
 // deployment. Other chains need their own sources before the flag can open.
 import { CHAIN, GT, log, now, sleep, TUNE } from './config';
+import { dataFreshness, type DataFreshness } from './freshness';
 import { clGaugeAbi, clPoolAbi, voterAbi } from '../src/abi';
 import { mc, ok, safeError, type Call } from './rpc';
 import { kvGet, kvSet } from './store';
@@ -43,6 +45,8 @@ import { classifyVolumeTrend, type VolumeTrend } from './volumeTrend';
 import { buildPairVolumeSnapshot, storePairVolumeSnapshot, type MigrationEventItem } from './pairVolume';
 
 export const POOL_RANK_ENABLED = CHAIN.key === 'robinhood';
+/** v3 adds source provenance so cached GT data cannot be republished as fresh. */
+export const POOL_RANK_MODEL_VERSION = 3;
 
 const UP33_CL_SUBGRAPH =
   'https://api.goldsky.com/api/public/project_cmhef02640198x7p2cz2w70u8/subgraphs/up-robinhood-v3-mainnet/0.1.1/gn';
@@ -113,7 +117,10 @@ export type PoolRankRow = {
 };
 
 export type PoolRankSnapshot = {
+  modelVersion: typeof POOL_RANK_MODEL_VERSION;
   generatedAt: number;
+  sourceStatus: DataFreshness;
+  sourceAsOf: number | null;
   durationMs: number;
   windowDays: number;
   upPriceUsd: number | null;
@@ -141,12 +148,36 @@ export function dailyLogReturns(closes: readonly number[]): number[] {
 
 /** Sample stdev of daily log returns; null when the history is too short. */
 export function dailySigma(closes: readonly number[]): number | null {
-  const rets = dailyLogReturns(closes);
+  return sigmaOfReturns(dailyLogReturns(closes));
+}
+
+function sigmaOfReturns(rets: readonly number[]): number | null {
   if (rets.length < 7) return null;
   const mean = rets.reduce((sum, r) => sum + r, 0) / rets.length;
   const variance = rets.reduce((sum, r) => sum + (r - mean) ** 2, 0) / (rets.length - 1);
   const sigma = Math.sqrt(variance);
   return Number.isFinite(sigma) && sigma > 0 ? sigma : null;
+}
+
+/** Missing days are unknown, not zero returns or multi-day "daily" returns.
+ * Duplicate timestamps make a source ambiguous and invalidate the series.
+ * A fixed Q96/decimal scale cancels in log returns; never square raw Q96s. */
+export function timestampedDailySigma(
+  samples: readonly { ts: number; close: number }[],
+  logScale: 1 | 2 = 1,
+): number | null {
+  if (samples.some((row) => !Number.isSafeInteger(row.ts) || row.ts < 0)) return null;
+  const rows = [...samples].sort((a, b) => a.ts - b.ts);
+  const returns: number[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const prev = rows[i - 1], curr = rows[i];
+    if (curr.ts === prev.ts) return null;
+    if (curr.ts - prev.ts !== 86_400) continue;
+    if (!(prev.close > 0 && curr.close > 0 && Number.isFinite(prev.close) && Number.isFinite(curr.close))) continue;
+    const value = logScale * Math.log(curr.close / prev.close);
+    if (Number.isFinite(value)) returns.push(value);
+  }
+  return sigmaOfReturns(returns);
 }
 
 export const annualizeSigma = (sigmaDaily: number): number => sigmaDaily * Math.sqrt(YEAR_DAYS);
@@ -185,6 +216,13 @@ function fullDayDailyVol(entries: readonly { ts: number; vol: number }[], limit 
 // ── GeckoTerminal access (paced, kv-cached, stale-on-failure) ──────────────
 
 let lastGtCall = 0;
+let gtSourceStatus: DataFreshness = 'fresh';
+let gtSourceAsOf: number | null = null;
+
+const recordGtSource = (status: DataFreshness, observedAt: number | null): void => {
+  if (status === 'unavailable' || (status === 'stale' && gtSourceStatus === 'fresh')) gtSourceStatus = status;
+  if (observedAt !== null) gtSourceAsOf = gtSourceAsOf === null ? observedAt : Math.min(gtSourceAsOf, observedAt);
+};
 
 type GtCandle = [timestamp: number, open: number, high: number, low: number, close: number, volume: number];
 
@@ -200,7 +238,9 @@ async function gtFetch(path: string, cacheKey: string): Promise<unknown | null> 
       if (r.status === 429) throw new Error(`gt rate limited (${r.status})`);
       if (!r.ok) throw new Error(`gt ${r.status}`);
       const body = (await r.json()) as unknown;
-      kvSet(kv.cache(cacheKey), JSON.stringify({ at: now(), body }));
+      const observedAt = now();
+      kvSet(kv.cache(cacheKey), JSON.stringify({ at: observedAt, body }));
+      recordGtSource('fresh', observedAt);
       return body;
     } catch (e) {
       log(`[pool-rank] ${cacheKey}: ${safeError(e)}`);
@@ -212,12 +252,19 @@ async function gtFetch(path: string, cacheKey: string): Promise<unknown | null> 
   if (cached) {
     try {
       const parsed = JSON.parse(cached) as { at: number; body: unknown };
+      const status = dataFreshness(parsed.at, TUNE.poolRankGtCacheMaxAgeMs);
+      if (status === 'unavailable' || status === 'stale') {
+        recordGtSource('unavailable', Number.isFinite(parsed.at) ? parsed.at : null);
+        return null;
+      }
       log(`[pool-rank] ${cacheKey}: serving cache from ${new Date(parsed.at * 1000).toISOString()}`);
+      recordGtSource('stale', parsed.at);
       return parsed.body;
     } catch {
       return null;
     }
   }
+  recordGtSource('unavailable', null);
   return null;
 }
 
@@ -398,8 +445,10 @@ export function up33Rows(pools: SubgraphPool[], onchain: Map<string, Up33Onchain
     const oc = onchain.get(pool.id.toLowerCase());
     const feePpm = oc?.feePpm ?? null;
     const tvlUsd = Number(pool.totalValueLockedUSD);
-    const closes = days.slice(0, 31).map((d) => Number(d.sqrtPrice)).reverse();
-    const sigmaDaily = dailySigma(closes);
+    const sigmaDaily = timestampedDailySigma(
+      days.slice(0, 31).map((d) => ({ ts: Number(d.date), close: Number(d.sqrtPrice) })),
+      2,
+    );
     const daysActive = days.filter((d) => BigInt(d.txCount || '0') > 0n).length;
     const volAll = days.reduce((sum, d) => sum + Number(d.volumeUSD), 0);
     const lifetimeAvg = volAll / Math.max(daysActive, 1);
@@ -499,7 +548,7 @@ async function univ3Rows(network: string, dex: string): Promise<{
       continue;
     }
     candles.set(candidate.address.toLowerCase(), usdCandles);
-    const sigmaDaily = dailySigma(tokenCandles.map((c) => c[4]));
+    const sigmaDaily = timestampedDailySigma(tokenCandles.map((c) => ({ ts: c[0], close: c[4] })));
     // Same independent-buckets rule as the UP33 leg: GT's latest daily candle
     // for the running UTC day is partial and must not reach the classifier.
     const daily = fullDayDailyVol(usdCandles.map((c) => ({ ts: c[0], vol: c[5] })));
@@ -569,7 +618,10 @@ export function getPoolRankSnapshot(): PoolRankSnapshot | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as PoolRankSnapshot;
-    return Array.isArray(parsed?.rows) && Number.isFinite(parsed?.generatedAt) ? parsed : null;
+    return parsed?.modelVersion === POOL_RANK_MODEL_VERSION
+      && Array.isArray(parsed.rows) && Number.isFinite(parsed.generatedAt)
+      && ['fresh', 'stale', 'unavailable'].includes(parsed.sourceStatus)
+      && (parsed.sourceAsOf === null || Number.isFinite(parsed.sourceAsOf)) ? parsed : null;
   } catch {
     return null;
   }
@@ -578,7 +630,11 @@ export function getPoolRankSnapshot(): PoolRankSnapshot | null {
 export type PoolRankApi = {
   enabled: boolean;
   ready: boolean;
+  status: DataFreshness;
   generatedAt: number | null;
+  sourceAsOf: number | null;
+  sourceAgeSeconds: number | null;
+  sourceTtlSeconds: number;
   ageSeconds: number | null;
   nextRefreshSeconds: number | null;
   rows: PoolRankRow[];
@@ -611,10 +667,25 @@ function withTrend(rows: PoolRankRow[]): PoolRankRow[] {
 export function getPoolRankApi(): PoolRankApi {
   const snapshot = getPoolRankSnapshot();
   const successAt = Number(kvGet(kv.successAt) ?? 0);
+  const timestamp = now();
+  const generatedStatus = dataFreshness(snapshot?.generatedAt, 2 * TUNE.poolRankMs, timestamp);
+  const sourceStatus = snapshot
+    ? dataFreshness(snapshot.sourceAsOf, TUNE.poolRankGtCacheMaxAgeMs, timestamp)
+    : 'unavailable';
+  const status: DataFreshness = !snapshot || snapshot.sourceStatus === 'unavailable'
+    || generatedStatus === 'unavailable' || sourceStatus === 'unavailable'
+    ? 'unavailable'
+    : snapshot.sourceStatus === 'fresh' && generatedStatus === 'fresh' && sourceStatus === 'fresh'
+      ? 'fresh'
+      : 'stale';
   return {
     enabled: POOL_RANK_ENABLED,
     ready: snapshot !== null,
+    status,
     generatedAt: snapshot?.generatedAt ?? null,
+    sourceAsOf: snapshot?.sourceAsOf ?? null,
+    sourceAgeSeconds: snapshot?.sourceAsOf ? Math.max(0, timestamp - snapshot.sourceAsOf) : null,
+    sourceTtlSeconds: Math.floor(TUNE.poolRankGtCacheMaxAgeMs / 1_000),
     ageSeconds: snapshot ? Math.max(0, now() - snapshot.generatedAt) : null,
     nextRefreshSeconds:
       successAt > 0 ? Math.max(0, Math.round((TUNE.poolRankMs - (Date.now() - successAt * 1000)) / 1000)) : null,
@@ -632,6 +703,8 @@ export async function runPoolRankCycle(): Promise<PoolRankSnapshot> {
   const runningSince = Number(kvGet(kv.running) ?? 0);
   if (runningSince && Date.now() - runningSince < RUNNING_TTL_MS) throw new Error('pool rank cycle already running');
   const started = Date.now();
+  gtSourceStatus = 'fresh';
+  gtSourceAsOf = null;
   kvSet(kv.running, String(Date.now()));
   try {
     const network = CHAIN.slugs.gecko?.network ?? CHAIN.key;
@@ -664,7 +737,10 @@ export async function runPoolRankCycle(): Promise<PoolRankSnapshot> {
       log(`[pool-rank] pair volume snapshot failed: ${safeError(e)}`);
     }
     const snapshot: PoolRankSnapshot = {
+      modelVersion: POOL_RANK_MODEL_VERSION,
       generatedAt: now(),
+      sourceStatus: gtSourceStatus,
+      sourceAsOf: gtSourceAsOf,
       durationMs: Date.now() - started,
       windowDays: OHLCV_DAYS,
       upPriceUsd,

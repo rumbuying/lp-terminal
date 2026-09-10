@@ -220,6 +220,27 @@ test('token search bounds the work in front of its pool-count subquery', () => {
   );
 });
 
+test('price APIs distinguish fresh, stale and unavailable observations', () => {
+  const token = address(0xc001);
+  const missing = address(0xc002);
+  store.upsertTokenMeta(token, 'CLOCK', 18, true);
+  try {
+    const old = Math.floor(Date.now() / 1_000) - 5 * 3_600;
+    store.setTokenPrice(token, 12, 50_000, 'gt', old);
+    const stale = api.getPrices(new URLSearchParams({ addresses: `${token},${missing}` }));
+    assert.equal(stale.schemaVersion, 2);
+    assert.equal(stale.prices[token].status, 'stale');
+    assert.equal(stale.prices[token].updatedAt, old);
+    assert.equal(stale.prices[missing].status, 'unavailable');
+    assert.equal((api.getTokens(new URLSearchParams({ q: token })).tokens[0] as { price_status: string }).price_status, 'stale');
+
+    store.setTokenPrice(token, 13, 60_000, 'gt');
+    assert.equal(api.getPrices(new URLSearchParams({ addresses: token })).prices[token].status, 'fresh');
+  } finally {
+    store.db.prepare('DELETE FROM tokens WHERE address=?').run(token);
+  }
+});
+
 test('recommendation candidates expose fresh v3 state without changing the public catalog protocol contract', () => {
   const pool = address(0xd001);
   store.insertPool({
@@ -253,6 +274,27 @@ test('recommendation candidates expose fresh v3 state without changing the publi
       () => api.canonicalPoolsRequest(new URLSearchParams({ proto: 'up33cl' })),
       /invalid pool protocol/,
     );
+
+    // A previously derived TVL is not freshness evidence. Recommendation
+    // sizing uses the same fresh external observation as its volume gate.
+    store.setTvl(pool, 1_000_000_000, false);
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 1, 'test');
+    assert.equal(
+      api.getRecommendationCandidates(new URLSearchParams({ limit: '10' }))
+        .candidates.some((row) => row.pool === pool),
+      false,
+    );
+    store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 100_000, 'test');
+
+    const old = Math.floor(Date.now() / 1_000) - 3_600;
+    store.db.prepare('UPDATE pool_stats SET updated=? WHERE address=?').run(old, pool);
+    const stale = api.getRecommendationCandidates(new URLSearchParams({ limit: '10' }));
+    assert.equal(stale.candidates.some((row) => row.pool === pool), false);
+    const displayed = api.getPools(new URLSearchParams({ q: pool, limit: '10' })).pools
+      .find((row) => row.address === pool) as Record<string, unknown>;
+    assert.equal(displayed.statsStatus, 'stale');
+    assert.equal(displayed.statsUpdatedAt, old);
+    assert.equal(displayed.vol24hUsd, null);
   } finally {
     store.db.prepare('DELETE FROM pools WHERE address = ?').run(pool);
   }
@@ -288,7 +330,8 @@ test('fresh rank snapshots ride on recommendation candidates; stale ones do not'
     };
     const secondsNow = Math.floor(Date.now() / 1_000);
     const snapshot = (generatedAt: number) => JSON.stringify({
-      generatedAt, durationMs: 1_000, windowDays: 45, upPriceUsd: 1, rows: [rankRow], dropped: [],
+      modelVersion: 3, generatedAt, sourceStatus: 'fresh', sourceAsOf: generatedAt,
+      durationMs: 1_000, windowDays: 45, upPriceUsd: 1, rows: [rankRow], dropped: [],
     });
     const candidatesOf = () =>
       api.getRecommendationCandidates(new URLSearchParams({ limit: '10' })).candidates;
@@ -303,6 +346,12 @@ test('fresh rank snapshots ride on recommendation candidates; stale ones do not'
     const rankedAddresses = new Set([pool.toLowerCase()]);
     const unranked = candidatesOf().find((row) => row.pool !== pool && !rankedAddresses.has(String(row.pool).toLowerCase()));
     if (unranked) assert.equal(unranked.poolRank, undefined);
+
+    const staleSource = JSON.parse(snapshot(secondsNow)) as Record<string, unknown>;
+    staleSource.sourceStatus = 'stale';
+    staleSource.sourceAsOf = secondsNow - 60;
+    store.kvSet('pool_rank_snapshot', JSON.stringify(staleSource));
+    assert.equal(candidatesOf().find((row) => row.pool === pool)?.poolRank, undefined);
 
     // older than two rank cycles: the prior stops being a prior
     store.kvSet('pool_rank_snapshot', snapshot(secondsNow - 3 * 43_200));
@@ -334,7 +383,8 @@ test('rank seeds give a high-coverage pool a second entry past the volume orderi
     });
     const secondsNow = Math.floor(Date.now() / 1_000);
     store.kvSet('pool_rank_snapshot', JSON.stringify({
-      generatedAt: secondsNow, durationMs: 1_000, windowDays: 45, upPriceUsd: 1,
+      modelVersion: 3, generatedAt: secondsNow, sourceStatus: 'fresh', sourceAsOf: secondsNow,
+      durationMs: 1_000, windowDays: 45, upPriceUsd: 1,
       rows: [rankRow(topPool, 1.2), rankRow(seedPool, 3.0)], dropped: [],
     }));
 
@@ -351,7 +401,8 @@ test('rank seeds give a high-coverage pool a second entry past the volume orderi
 
     // stale snapshot: the seed entry closes and the pool leaves the universe
     store.kvSet('pool_rank_snapshot', JSON.stringify({
-      generatedAt: secondsNow - 3 * 43_200, durationMs: 1_000, windowDays: 45, upPriceUsd: 1,
+      modelVersion: 3, generatedAt: secondsNow - 3 * 43_200, sourceStatus: 'fresh', sourceAsOf: secondsNow - 3 * 43_200,
+      durationMs: 1_000, windowDays: 45, upPriceUsd: 1,
       rows: [rankRow(topPool, 1.2), rankRow(seedPool, 3.0)], dropped: [],
     }));
     const staleCandidates = api.getRecommendationCandidates(new URLSearchParams({ limit: '1' })).candidates;
@@ -373,7 +424,8 @@ test('rankSeedIdentities caps at the coverage top, best first, and closes when s
     emitApr: null, volumePersistence: 1, daysActive: 40,
   });
   store.kvSet('pool_rank_snapshot', JSON.stringify({
-    generatedAt: secondsNow, durationMs: 1, windowDays: 45, upPriceUsd: 1,
+    modelVersion: 3, generatedAt: secondsNow, sourceStatus: 'fresh', sourceAsOf: secondsNow,
+    durationMs: 1, windowDays: 45, upPriceUsd: 1,
     rows: Array.from({ length: 25 }, (_, i) => rankRow(i, 1 + i)), dropped: [],
   }));
   const seeds = api.rankSeedIdentities();
@@ -382,7 +434,8 @@ test('rankSeedIdentities caps at the coverage top, best first, and closes when s
   assert.equal(seeds[19], address(0xee00 + 5));
 
   store.kvSet('pool_rank_snapshot', JSON.stringify({
-    generatedAt: secondsNow - 3 * 43_200, durationMs: 1, windowDays: 45, upPriceUsd: 1,
+    modelVersion: 3, generatedAt: secondsNow - 3 * 43_200, sourceStatus: 'fresh', sourceAsOf: secondsNow - 3 * 43_200,
+    durationMs: 1, windowDays: 45, upPriceUsd: 1,
     rows: Array.from({ length: 25 }, (_, i) => rankRow(i, 1 + i)), dropped: [],
   }));
   assert.deepEqual(api.rankSeedIdentities(), []);
@@ -421,6 +474,10 @@ test('candidate history and responses are cached; a clear restores freshness', (
       .candidates.find((row: { pool: string }) => row.pool === pool);
     assert.ok(held);
     assert.equal(held.tickHistory.at(-1)?.tick, 0, 'memoized history does not tear mid-TTL');
+    assert.equal(held.tickHistory.at(-1)?.blockNumber, '123', 'tick evidence retains its chain block');
+    assert.equal(held.marketHistory.at(-1)?.activeLiquidity, '1000000');
+    assert.equal(held.marketHistory.at(-1)?.tick, 0);
+    assert.equal(held.marketHistory.at(-1)?.source, 'test');
 
     api.clearRecommendationCaches();
     const fresh = JSON.parse(api.getRecommendationCandidatesCached(params))

@@ -59,6 +59,7 @@ let afterNextAcceptedTransaction: (() => void) | undefined
 let afterAcceptedCall: ((functionName: string) => void) | undefined
 let lastEthCallError: string | undefined
 let kyberUnavailable = false
+let quoteOutputBps = 10_000n
 let rpcReadFailOnce = false
 let earnedUnavailable = false
 const rpcMethodCounts = new Map<string, number>()
@@ -429,7 +430,7 @@ const kyberServer = createServer(async (req, res) => {
     const amountIn = url.searchParams.get('amountIn')!
     const inToken = url.searchParams.get('tokenIn') as Address
     const outToken = url.searchParams.get('tokenOut') as Address
-    body = { code: 0, data: { routerAddress: router, routeSummary: { tokenIn: inToken, tokenOut: outToken, amountIn, amountOut: amountIn, route: [[]] } } }
+    body = { code: 0, data: { routerAddress: router, routeSummary: { tokenIn: inToken, tokenOut: outToken, amountIn, amountOut: (BigInt(amountIn) * quoteOutputBps / 10_000n).toString(), route: [[]] } } }
   } else if (req.method === 'POST' && url.pathname.endsWith('/route/build')) {
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(Buffer.from(chunk))
@@ -458,6 +459,9 @@ try {
   process.env.LP_EXECUTOR_RPC = `http://127.0.0.1:${rpcAddress.port}`
   process.env.LP_EXECUTOR_KYBER_BASE = `http://127.0.0.1:${kyberAddress.port}`
   process.env.LP_EXECUTOR_CONFIRMATIONS = '1'
+  // Failure-injection scenarios exercise durable recovery, not the sender's
+  // availability retry loop (covered separately by rpc-retry tests).
+  process.env.LP_EXECUTOR_RPC_RETRY_COUNT = '0'
 
   const store = await import('../executor/store')
   const vault = await import('../executor/vault')
@@ -538,6 +542,16 @@ try {
     }
     const completed = store.db.prepare(`SELECT id FROM jobs WHERE strategy_id=? AND state='completed' ORDER BY created_at DESC LIMIT 1`).get(config.id) as { id: string }
     const steps = store.jobSteps(completed.id)
+    const funds = store.getJobContext<{ principal0: string; principal1: string; fee0: string; fee1: string }>(completed.id, 'funds')!
+    assert.equal(funds.principal0, '0')
+    assert.equal(funds.principal1, '1000', 'split Collect must not reclassify exit principal as fees')
+    assert.equal(funds.fee1, '0')
+    if (suffix === 'final-requote') {
+      const finalPlan = store.getJobContext<{ swaps: { amountIn: string; quotedOut: string }[] }>(completed.id, 'swap_plan')!
+      assert.ok(finalPlan.swaps.length > 0)
+      for (const record of finalPlan.swaps)
+        assert.equal(BigInt(record.quotedOut), BigInt(record.amountIn) * 10_100n / 10_000n, 'journal must contain the post-approval quote')
+    }
     assert.equal(steps.filter((step) => step.state === 'confirmed').length, 12)
     const confirmedSwaps = store.jobTransactions(completed.id).filter((tx) => tx.state === 'confirmed' && Number(tx.step_index) === 5)
     if (confirmedSwaps.length) {
@@ -564,6 +578,55 @@ try {
     return completedConfig
   }
 
+  // A queued automatic exit is no longer valid if price returns in range or
+  // crosses the opposite boundary. Prove this through the real runner/store:
+  // no transaction, unchanged NFT, released reservations, back to monitoring.
+  for (const [suffix, tokenId, changedTick] of [
+    ['queued-back-in-range', 90n, 0], ['queued-opposite-boundary', 91n, -101],
+  ] as const) {
+    poolTick = 101
+    const config = createStrategy(suffix, tokenId)
+    await monitorOnce({ ignoreSchedule: true })
+    assert.equal(store.strategyById(config.id)?.state, 'planned')
+    const job = store.runnableJobs().find((row) => row.config.id === config.id)!
+    assert.ok(job)
+    const txCount = transactions.size
+    poolTick = changedTick
+    await runOnce()
+    assert.equal(store.strategyById(config.id)?.state, 'monitoring')
+    assert.equal(transactions.size, txCount)
+    assert.equal(positions.get(tokenId)?.liquidity, 1_000n)
+    assert.equal(store.jobTransactions(job.id).length, 0)
+    assert.equal((store.db.prepare("SELECT COUNT(*) AS n FROM daily_turnover_reservations WHERE job_id=? AND state='reserved'").get(job.id) as { n: number }).n, 0)
+    assert.equal(store.jobSteps(job.id)[0].error_code, 'E_TRIGGER_CHANGED')
+    store.upsertStrategy({ ...config, enabled: false })
+  }
+
+  poolTick = 101
+  const manualBase = createStrategy('queued-manual', 92n)
+  const manualConfig = { ...manualBase, execution: { ...manualBase.execution, dryRun: true } }
+  store.upsertStrategy(manualConfig)
+  const { preflightStrategy } = await import('../executor/preflight')
+  const manualPlan = (await preflightStrategy(manualConfig, { manualExecution: true })).plan
+  assert.equal(manualPlan.triggerSide, 'upper')
+  assert.equal(manualPlan.manualExecution, true)
+  assert.equal(store.createPlannedJob(manualPlan), true)
+  store.setStrategyState(manualConfig.id, 'planned')
+  poolTick = 0
+  await runOnce()
+  assert.equal(store.strategyById(manualConfig.id)?.state, 'dry_run_ready')
+  store.upsertStrategy({ ...manualConfig, enabled: false })
+
+  // Once decrease has landed, return-to-range must NOT cancel recovery.
+  afterNextAcceptedTransaction = () => { poolTick = 99 }
+  await runScenario('recovery-back-in-range', 93n, 'swap_before')
+
+  afterAcceptedCall = (name) => {
+    if (name === 'approve') { quoteOutputBps = 10_100n; afterAcceptedCall = undefined }
+  }
+  await runScenario('final-requote', 94n)
+  quoteOutputBps = 10_000n
+
   await runScenario('success', 1n)
   await runScenario('lower-success', 12n, undefined, -101)
   const carryConfig = await runScenario('principal-carry', 22n, undefined, 101, 'univ3', false, false, 100n, '1000000000')
@@ -586,7 +649,7 @@ try {
   assert.equal(secondCarry[low(token1)].principal, 1n)
   assert.equal(secondCarry[low(token0)].heldFee, 0n)
   assert.equal(secondCarry[low(token1)].heldFee, 100n)
-  const widenedCycle = store.db.prepare(`SELECT range_scale FROM cycles WHERE strategy_id=? ORDER BY completed_at DESC,id DESC LIMIT 1`).get(carryConfig.id) as { range_scale: number }
+  const widenedCycle = store.db.prepare(`SELECT range_scale FROM cycles WHERE strategy_id=? AND new_token_id=?`).get(carryConfig.id, store.strategyById(carryConfig.id)!.config.activeTokenId) as { range_scale: number }
   assert.equal(widenedCycle.range_scale, 4)
   store.upsertStrategy({ ...store.strategyById(carryConfig.id)!.config, enabled: false })
   poolTick = 101

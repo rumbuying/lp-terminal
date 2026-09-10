@@ -1,10 +1,12 @@
 import type { Hex, TransactionReceipt } from 'viem'
 import { clGaugeAbi, clPmAbi } from '../src/abi'
 import { ADDR, requireGov } from '../src/config/addresses'
+import { applySlippage } from '../src/lib/clmath'
 import { grantStrategyAllowance, revokeStrategyAllowance } from './allowance'
 import { publicClient, readTokenBalances } from './chain'
 import { gatedKyberTx, quoteWithNativeFallback, routeAudit } from './kyber'
 import { quoteRewardToWeth } from './reward'
+import { prepareFinalSwap } from './final-swap'
 import { receiptTokenDelta } from './receipts'
 import { sendTracked } from './signer'
 import { nftApprovalCall, nftOperatorApprovalCall, stakeCall, unstakeCall } from './steps'
@@ -37,9 +39,12 @@ export type StakingRewardContext = {
   withdrawTxHash?: Hex
   swapTxHash?: Hex
   quoteSwapTxHash?: Hex
-  wethRoute?: unknown
-  quoteRoute?: unknown
+  wethRoute?: { amountOut?: string; minOut?: string; [key: string]: unknown }
+  quoteRoute?: { amountOut?: string; minOut?: string; [key: string]: unknown }
 }
+
+const replayMinOut = (route: StakingRewardContext['wethRoute'], quotedOut: bigint, slippageBps: number) =>
+  route?.minOut !== undefined ? BigInt(route.minOut) : quotedOut > 0n ? applySlippage(quotedOut, slippageBps) : 1n
 
 /** Idempotently withdraw the old NFT and settle newly claimed UP through WETH into quote. */
 export async function ensureUnstakedAndRewardConverted(job: RunnableJob, privateKey: `0x${string}`): Promise<StakingRewardResult> {
@@ -78,14 +83,22 @@ export async function ensureUnstakedAndRewardConverted(job: RunnableJob, private
   if (swapReceipt) {
     rewardWeth = receiptTokenDelta(swapReceipt, ADDR.WNATIVE, job.config.owner)
     const spent = -receiptTokenDelta(swapReceipt, requireGov().UP, job.config.owner)
-    if (spent !== rewardUp || rewardWeth <= 0n) throw new Error('E_REWARD_ACCOUNTING')
+    if (spent !== rewardUp || rewardWeth < replayMinOut(prior?.wethRoute, quotedWeth, job.config.safeguards.maxSlippageBps)) throw new Error('E_REWARD_ACCOUNTING')
   } else {
-    const quote = await quoteRewardToWeth(rewardUp)
+    let quote = await quoteRewardToWeth(rewardUp)
     quotedWeth = BigInt(quote.routeSummary.amountOut)
     setJobContext(job.id, 'staking_reward', { rewardUp: rewardUp.toString(), rewardWeth: '0', rewardQuote: '0', quotedWeth: quotedWeth.toString(), quotedQuote: '0', settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash })
-    const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: requireGov().UP, tokenOut: ADDR.WNATIVE, sender: job.config.owner, recipient: job.config.owner, amountIn: rewardUp, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-    setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'), wethRoute: routeAudit(quote.routeSummary, gated) })
-    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: requireGov().UP, spender: gated.approvalTarget, amount: rewardUp, forceExact: gated.exactApproval }))
+    const approvalGate = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: requireGov().UP, tokenOut: ADDR.WNATIVE, sender: job.config.owner, recipient: job.config.owner, amountIn: rewardUp, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: requireGov().UP, spender: approvalGate.approvalTarget, amount: rewardUp, forceExact: approvalGate.exactApproval }))
+    const final = await prepareFinalSwap({ config: job.config, snapshot: job.plan.snapshot,
+      tokenIn: requireGov().UP, tokenOut: ADDR.WNATIVE, amountIn: rewardUp,
+      slippageBps: job.config.safeguards.maxSlippageBps, approvedTarget: approvalGate.approvalTarget,
+      quoteFn: (_tokenIn, _tokenOut, amountIn) => quoteRewardToWeth(amountIn) })
+    quote = final.quote
+    quotedWeth = BigInt(quote.routeSummary.amountOut)
+    const gated = final.tx
+    setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'),
+      quotedWeth: quotedWeth.toString(), wethRoute: routeAudit(quote.routeSummary, gated) })
     const before = await readTokenBalances(job.config.owner, [requireGov().UP, ADDR.WNATIVE])
     swapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 14, txIndex: nextTransactionIndex(job.id, 14), privateKey, tx: gated })
     receipts.push(swapReceipt)
@@ -106,14 +119,22 @@ export async function ensureUnstakedAndRewardConverted(job: RunnableJob, private
   if (quoteSwapReceipt) {
     const spent = -receiptTokenDelta(quoteSwapReceipt, ADDR.WNATIVE, job.config.owner)
     rewardQuote = receiptTokenDelta(quoteSwapReceipt, job.config.quoteToken, job.config.owner)
-    if (spent !== rewardWeth || rewardQuote <= 0n) throw new Error('E_REWARD_ACCOUNTING')
+    if (spent !== rewardWeth || rewardQuote < replayMinOut(prior?.quoteRoute, quotedQuote, job.config.safeguards.maxSlippageBps)) throw new Error('E_REWARD_ACCOUNTING')
   } else {
-    const quote = await quoteWithNativeFallback(ADDR.WNATIVE, job.config.quoteToken, rewardWeth)
+    let quote = await quoteWithNativeFallback(ADDR.WNATIVE, job.config.quoteToken, rewardWeth)
     quotedQuote = BigInt(quote.routeSummary.amountOut)
     setJobContext(job.id, 'staking_reward', { rewardUp: rewardUp.toString(), rewardWeth: rewardWeth.toString(), rewardQuote: '0', quotedWeth: quotedWeth.toString(), quotedQuote: quotedQuote.toString(), settlementToken: job.config.quoteToken, withdrawTxHash: withdrawReceipt.transactionHash, swapTxHash: swapReceipt.transactionHash })
-    const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: ADDR.WNATIVE, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn: rewardWeth, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
-    setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'), quoteRoute: routeAudit(quote.routeSummary, gated) })
-    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.WNATIVE, spender: gated.approvalTarget, amount: rewardWeth, forceExact: gated.exactApproval }))
+    const approvalGate = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: ADDR.WNATIVE, tokenOut: job.config.quoteToken, sender: job.config.owner, recipient: job.config.owner, amountIn: rewardWeth, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn: false })
+    receipts.push(...await grantStrategyAllowance({ config: job.config, jobId: job.id, stepIndex: 13, txIndexStart: nextTransactionIndex(job.id, 13), privateKey, token: ADDR.WNATIVE, spender: approvalGate.approvalTarget, amount: rewardWeth, forceExact: approvalGate.exactApproval }))
+    const final = await prepareFinalSwap({ config: job.config, snapshot: job.plan.snapshot,
+      tokenIn: ADDR.WNATIVE, tokenOut: job.config.quoteToken, amountIn: rewardWeth,
+      slippageBps: job.config.safeguards.maxSlippageBps, approvedTarget: approvalGate.approvalTarget,
+      quoteFn: quoteWithNativeFallback })
+    quote = final.quote
+    quotedQuote = BigInt(quote.routeSummary.amountOut)
+    const gated = final.tx
+    setJobContext(job.id, 'staking_reward', { ...getJobContext<Partial<StakingRewardContext>>(job.id, 'staking_reward'),
+      quotedQuote: quotedQuote.toString(), quoteRoute: routeAudit(quote.routeSummary, gated) })
     const before = await readTokenBalances(job.config.owner, [ADDR.WNATIVE, job.config.quoteToken])
     quoteSwapReceipt = await sendTracked({ config: job.config, jobId: job.id, stepIndex: 14, txIndex: 1, privateKey, tx: gated })
     receipts.push(quoteSwapReceipt)

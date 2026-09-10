@@ -65,6 +65,7 @@ test('v4 original-mint cost basis derives native from tx value and ERC-20 from t
   const basis = await reconstructOriginalMintCostBasis(config, snapshot, '7', '1000')
 
   assert.equal(basis.kind, 'original_mint')
+  assert.equal(basis.basisVersion, 2)
   assert.equal(basis.tokenId, '7')
   assert.equal(basis.amount0, '1000000') // native side = the mint tx's own value
   assert.equal(basis.amount1, '500000') // ERC-20 side = the owner's receipt outflow
@@ -72,7 +73,7 @@ test('v4 original-mint cost basis derives native from tx value and ERC-20 from t
   assert.equal(basis.tick, 0)
   // native is the quote token (1:1) and TOKEN converts 1:1 at sqrtPrice = 2^96
   assert.equal(basis.valueQuoteRaw, '1500000')
-  assert.equal(basis.openingGasQuoteRaw, (21_000n * 1_000_000_000n).toString())
+  assert.equal(basis.openingGasWeiRaw, (21_000n * 1_000_000_000n).toString())
   assert.equal(basis.blockNumber, '0')
   assert.equal(basis.observedAt, 1_234_567_890)
 })

@@ -11,10 +11,10 @@ const candidateLimit = Math.min(80, Math.max(1, Number(process.env.RECOMMENDATIO
 const usdg = ADDR.STABLE.toLowerCase()
 
 const fallbackCosts: Record<RecommendationProtocol, RecommendationCostProfile> = {
-  univ3: { protocol: 'univ3', gasUsdPerCycle: 0.061, executionBpsPerCycle: 14, cycleSeconds: 17, sampleCycles: 20, source: 'protocol' },
-  up33: { protocol: 'up33', gasUsdPerCycle: 0.08, executionBpsPerCycle: 15, cycleSeconds: 25, sampleCycles: 0, source: 'default' },
-  'pancakeswap-v3': { protocol: 'pancakeswap-v3', gasUsdPerCycle: 0.05, executionBpsPerCycle: 12, cycleSeconds: 20, sampleCycles: 0, source: 'default' },
-  univ4: { protocol: 'univ4', gasUsdPerCycle: 0.06, executionBpsPerCycle: 12, cycleSeconds: 25, sampleCycles: 0, source: 'default' },
+  univ3: { protocol: 'univ3', gasUsdPerCycle: 0, executionBpsPerCycle: 0, cycleSeconds: 0, sampleCycles: 0, source: 'unavailable' },
+  up33: { protocol: 'up33', gasUsdPerCycle: 0, executionBpsPerCycle: 0, cycleSeconds: 0, sampleCycles: 0, source: 'unavailable' },
+  'pancakeswap-v3': { protocol: 'pancakeswap-v3', gasUsdPerCycle: 0, executionBpsPerCycle: 0, cycleSeconds: 0, sampleCycles: 0, source: 'unavailable' },
+  univ4: { protocol: 'univ4', gasUsdPerCycle: 0, executionBpsPerCycle: 0, cycleSeconds: 0, sampleCycles: 0, source: 'unavailable' },
 }
 
 const response = await fetch(`${base}/api/recommendation-candidates?limit=${candidateLimit}&min_tvl=10000&min_volume=10000`)
@@ -48,7 +48,8 @@ const summary = (item: RecommendationItem) => ({
   forecastHourlyVolumeUsd: Math.round(item.lookback.hourlyVolumeUsd),
   net24hUsd: Number(item.projection24h.netUsd.toFixed(2)),
   riskAdjustedNet24hUsd: Number(item.projection24h.riskAdjustedNetUsd.toFixed(2)),
-  cvar95Usd: Number(item.projection24h.cvar95Usd.toFixed(2)),
+  historicalIlTailUsd: Number(item.projection24h.historicalIlTailUsd.toFixed(2)),
+  inventoryDrawdownTailUsd: Number(item.projection24h.inventoryDrawdownTailUsd.toFixed(2)),
   reopens24h: Number(item.projection24h.reopens.toFixed(1)),
   confidence: Number(item.confidence.score.toFixed(2)),
   gateReasons: item.gateReasons,

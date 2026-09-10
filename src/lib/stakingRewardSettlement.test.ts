@@ -24,6 +24,8 @@ const storedReceipts = new Map<Hex, TransactionReceipt>()
 const transactionRows: { step_index: number; tx_index: number; state: string; tx_hash: Hex }[] = []
 let context: Record<string, unknown> | undefined
 let unstaked = false
+let rewardQuoteCalls = 0
+let settlementQuoteCalls = 0
 
 mock.module('../../executor/chain', {
   namedExports: {
@@ -35,6 +37,7 @@ mock.module('../../executor/chain', {
         throw new Error(`unexpected read ${functionName}`)
       },
     },
+    readPoolState: async () => { throw new Error('reward fixture has no impact reference') },
     readTokenBalances: async (_owner: Address, tokens: Address[]) => Object.fromEntries(tokens.map((token) => [token.toLowerCase(), balances[token.toLowerCase()] ?? 0n])),
   },
 })
@@ -46,14 +49,21 @@ mock.module('../../executor/allowance', {
 })
 mock.module('../../executor/reward', {
   namedExports: {
-    quoteRewardToWeth: async (amountIn: bigint) => ({ routeSummary: { tokenIn: GOV.UP, tokenOut: ADDR.WNATIVE, amountIn: amountIn.toString(), amountOut: amountIn.toString(), route: [[]] } }),
+    quoteRewardToWeth: async (amountIn: bigint) => {
+      rewardQuoteCalls += 1
+      return { routeSummary: { tokenIn: GOV.UP, tokenOut: ADDR.WNATIVE, amountIn: amountIn.toString(), amountOut: amountIn.toString(), route: [[]] } }
+    },
   },
 })
 mock.module('../../executor/kyber', {
   namedExports: {
-    quoteWithNativeFallback: async (_tokenIn: Address, _tokenOut: Address, amountIn: bigint) => ({ routeSummary: { tokenIn: ADDR.WNATIVE, tokenOut: quoteToken, amountIn: amountIn.toString(), amountOut: '90', route: [[]] } }),
+    quoteKyber: async () => { throw new Error('custom reward quote function must be used') },
+    quoteWithNativeFallback: async (_tokenIn: Address, _tokenOut: Address, amountIn: bigint) => {
+      settlementQuoteCalls += 1
+      return { routeSummary: { tokenIn: ADDR.WNATIVE, tokenOut: quoteToken, amountIn: amountIn.toString(), amountOut: '90', route: [[]] } }
+    },
     gatedKyberTx: async ({ tokenIn, tokenOut }: { tokenIn: Address; tokenOut: Address }) => ({ to: router, approvalTarget: router, exactApproval: false, data: '0x' as Hex, value: 0n, minOut: tokenIn.toLowerCase() === GOV.UP.toLowerCase() ? 100n : 90n, tokenOut }),
-    routeAudit: () => ({ source: 'kyber' }),
+    routeAudit: (route: { amountOut: string }, gated: { minOut: bigint }) => ({ source: 'kyber', amountOut: route.amountOut, minOut: gated.minOut.toString() }),
   },
 })
 mock.module('../../executor/receipts', {
@@ -117,9 +127,10 @@ test('settles a staking reward through WETH into a non-WETH strategy quote token
       positionManager: '0x0000000000000000000000000000000000000005',
       activeTokenId: '1',
       staking: { enabled: true, gauge },
-      safeguards: { maxSlippageBps: 100 },
+      safeguards: { maxSlippageBps: 100, maxPlanAgeSeconds: 30 },
       execution: { lowTransactionMode: false },
     },
+    plan: { snapshot: { token0: GOV.UP, token1: quoteToken } },
   } as any
   const result = await ensureUnstakedAndRewardConverted(job, hash(99))
   assert.deepEqual(sent, [{ stepIndex: 12, txIndex: 0 }, { stepIndex: 14, txIndex: 0 }, { stepIndex: 14, txIndex: 1 }])
@@ -129,8 +140,13 @@ test('settles a staking reward through WETH into a non-WETH strategy quote token
   assert.equal(result.quotedQuote, 90n)
   assert.equal(context?.settlementToken, quoteToken)
   assert.equal(context?.quoteSwapTxHash, hash(3))
+  assert.equal(rewardQuoteCalls, 2, 'UP/WETH is quoted again after approval')
+  assert.equal(settlementQuoteCalls, 2, 'WETH/quote is quoted again after approval')
 
   const replayed = await ensureUnstakedAndRewardConverted(job, hash(99))
   assert.equal(replayed.rewardQuote, 90n)
   assert.deepEqual(sent, [{ stepIndex: 12, txIndex: 0 }, { stepIndex: 14, txIndex: 0 }, { stepIndex: 14, txIndex: 1 }])
+
+  context = { ...context, quoteRoute: { ...(context?.quoteRoute as object), minOut: '91' } }
+  await assert.rejects(ensureUnstakedAndRewardConverted(job, hash(99)), /E_REWARD_ACCOUNTING/)
 })

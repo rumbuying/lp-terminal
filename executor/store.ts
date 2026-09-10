@@ -105,6 +105,22 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   quote_value TEXT,
   meta_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS gas_valuations (
+  tx_hash TEXT PRIMARY KEY,
+  strategy_id TEXT NOT NULL REFERENCES strategies(id),
+  job_id TEXT NOT NULL REFERENCES jobs(id),
+  block_number TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  gas_wei TEXT NOT NULL,
+  quote_token TEXT NOT NULL,
+  quote_value_raw TEXT,
+  settlement_token TEXT NOT NULL,
+  settlement_value_raw TEXT,
+  valuation_version INTEGER NOT NULL,
+  quote_source TEXT,
+  settlement_source TEXT,
+  error TEXT
+);
 CREATE TABLE IF NOT EXISTS cycles (
   id TEXT PRIMARY KEY,
   strategy_id TEXT NOT NULL REFERENCES strategies(id),
@@ -727,6 +743,86 @@ export function markTransaction(args: { jobId: string; stepIndex: number; txInde
     args.state === 'sent' ? now : null, args.state === 'confirmed' ? now : null, args.blockNumber?.toString() ?? null,
     args.result === undefined ? null : JSON.stringify(args.result), args.errorCode ?? null,
   )
+}
+
+export type GasValuationMark = {
+  txHash: string
+  strategyId: string
+  jobId: string
+  blockNumber: string
+  observedAt: number
+  gasWei: string
+  quoteToken: string
+  quoteValueRaw?: string
+  settlementToken: string
+  settlementValueRaw?: string
+  valuationVersion: 1
+  quoteSource?: 'exact_native' | 'confirmation_quote'
+  settlementSource?: 'exact_native' | 'confirmation_quote'
+  error?: string
+}
+
+/**
+ * Persist the receipt fact before attempting any external valuation. An
+ * interrupted quote therefore becomes an explicit missing mark instead of a
+ * reason to silently reprice historical gas with today's market.
+ */
+export function recordGasReceipt(mark: Omit<GasValuationMark, 'quoteValueRaw' | 'settlementValueRaw' | 'quoteSource' | 'settlementSource' | 'error'>) {
+  db.prepare(`INSERT OR IGNORE INTO gas_valuations(
+    tx_hash,strategy_id,job_id,block_number,observed_at,gas_wei,quote_token,settlement_token,valuation_version
+  ) VALUES(?,?,?,?,?,?,?,?,?)`).run(
+    mark.txHash, mark.strategyId, mark.jobId, mark.blockNumber, mark.observedAt, mark.gasWei,
+    mark.quoteToken, mark.settlementToken, mark.valuationVersion,
+  )
+}
+
+/** Fill only the immutable mark belonging to the original receipt. */
+export function completeGasValuation(mark: GasValuationMark) {
+  db.prepare(`UPDATE gas_valuations SET
+    quote_value_raw=COALESCE(quote_value_raw,?),settlement_value_raw=COALESCE(settlement_value_raw,?),
+    quote_source=COALESCE(quote_source,?),settlement_source=COALESCE(settlement_source,?),error=?
+    WHERE tx_hash=? AND valuation_version=? AND job_id=? AND block_number=? AND observed_at=? AND gas_wei=?
+      AND quote_value_raw IS NULL AND settlement_value_raw IS NULL AND quote_source IS NULL AND settlement_source IS NULL AND error IS NULL`).run(
+    mark.quoteValueRaw ?? null,
+    mark.settlementValueRaw ?? null,
+    mark.quoteSource ?? null,
+    mark.settlementSource ?? null,
+    mark.error ?? null,
+    mark.txHash,
+    mark.valuationVersion,
+    mark.jobId,
+    mark.blockNumber,
+    mark.observedAt,
+    mark.gasWei,
+  )
+}
+
+export function gasValuation(txHash: string): GasValuationMark | undefined {
+  const row = db.prepare(`SELECT tx_hash,strategy_id,job_id,block_number,observed_at,gas_wei,quote_token,quote_value_raw,
+    settlement_token,settlement_value_raw,valuation_version,quote_source,settlement_source,error
+    FROM gas_valuations WHERE tx_hash=?`).get(txHash) as {
+      tx_hash: string; strategy_id: string; job_id: string; block_number: string; observed_at: number; gas_wei: string
+      quote_token: string; quote_value_raw: string | null; settlement_token: string; settlement_value_raw: string | null
+      valuation_version: number; quote_source: GasValuationMark['quoteSource'] | null
+      settlement_source: GasValuationMark['settlementSource'] | null; error: string | null
+    } | undefined
+  if (!row || row.valuation_version !== 1) return undefined
+  return {
+    txHash: row.tx_hash,
+    strategyId: row.strategy_id,
+    jobId: row.job_id,
+    blockNumber: row.block_number,
+    observedAt: row.observed_at,
+    gasWei: row.gas_wei,
+    quoteToken: row.quote_token,
+    quoteValueRaw: row.quote_value_raw ?? undefined,
+    settlementToken: row.settlement_token,
+    settlementValueRaw: row.settlement_value_raw ?? undefined,
+    valuationVersion: 1,
+    quoteSource: row.quote_source ?? undefined,
+    settlementSource: row.settlement_source ?? undefined,
+    error: row.error ?? undefined,
+  }
 }
 export function setJobContext(jobId: string, key: string, value: unknown) {
   db.prepare(`INSERT INTO job_context(job_id,context_key,value_json,updated_at) VALUES(?,?,?,?)

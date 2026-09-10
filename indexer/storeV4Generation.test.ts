@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 const oldGeneration = `0x${'11'.repeat(32)}`;
@@ -36,6 +37,43 @@ function runStoreProcess(dbPath: string, source: string): void {
     `store child failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   );
 }
+
+test('a deployed V4 market table gains the independent stats freshness column', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'lp-terminal-v4-stats-migration-'));
+  const dbPath = join(tmp, 'catalog.db');
+  try {
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE indexer_identity (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        chain_key TEXT NOT NULL,
+        chain_id INTEGER NOT NULL
+      );
+      INSERT INTO indexer_identity VALUES (1, 'bsc', 56);
+      CREATE TABLE v4_market_stats (
+        pool_id TEXT PRIMARY KEY,
+        vol5m_usd REAL, vol1h_usd REAL, vol6h_usd REAL, vol24h_usd REAL,
+        txns24h INTEGER, liq_usd REAL, tvl_usd REAL,
+        tvl_approx INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL, updated INTEGER NOT NULL
+      );
+    `);
+    legacy.close();
+
+    runStoreProcess(
+      dbPath,
+      `
+        import assert from 'node:assert/strict';
+        import * as store from './indexer/store.ts';
+        const columns = store.db.prepare('PRAGMA table_info(v4_market_stats)').all();
+        assert.equal(columns.filter((column) => column.name === 'stats_updated').length, 1);
+        store.db.close();
+      `,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 test('interrupted V4 replacement survives restart, rebuild, switch and old-generation GC', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'lp-terminal-v4-membership-'));

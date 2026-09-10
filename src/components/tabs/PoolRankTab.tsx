@@ -188,6 +188,12 @@ export function PoolRankTab(props: { onOpenPool: () => void; onOpenRecommendatio
         <Btn onClick={() => void query.refetch()} busy={query.isFetching}>{t('poolRank.refresh')}</Btn>
       </div>
 
+      {data?.ready && data.status !== 'fresh' && (
+        <div className="amber mono-sm" style={{ marginBottom: 10 }}>
+          {data.status === 'stale' ? t('poolRank.stale') : t('poolRank.unavailable')}
+        </div>
+      )}
+
       {!data?.ready ? (
         <div className="dim">{t('poolRank.empty')}</div>
       ) : (

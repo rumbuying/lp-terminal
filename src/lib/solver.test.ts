@@ -103,10 +103,20 @@ const activeFallbackObservation = {
 } as const
 
 const productionTokenIn = '0x0000000000000000000000000000000000000011'
+const productionTokenOut = '0x0000000000000000000000000000000000000022'
 const productionAmountIn = '500000000000000000'
 const productionSettler = '0x0000000000000000000000000000000000000044'
+const productionRecipient = '0x0000000000000000000000000000000000000066'
+const productionMinOut = '122839505'
 const productionAllowanceTarget = CHAIN.solverAllowanceTarget
 if (!productionAllowanceTarget) throw new Error('solver test chain has no AllowanceHolder')
+const settlerData = (recipient: `0x${string}`, tokenOut: `0x${string}`, minAmountOut: string) => encodeFunctionData({
+  abi: parseAbi([
+    'function execute((address recipient,address buyToken,uint256 minAmountOut) slippage,bytes[] actions,bytes32 zidAndAffiliate) returns (bool)',
+  ]),
+  functionName: 'execute',
+  args: [{ recipient, buyToken: tokenOut, minAmountOut: BigInt(minAmountOut) }, [], `0x${'00'.repeat(32)}`],
+})
 const productionTxData = encodeFunctionData({
   abi: parseAbi([
     'function exec(address operator, address token, uint256 amount, address target, bytes data)',
@@ -117,7 +127,7 @@ const productionTxData = encodeFunctionData({
     productionTokenIn,
     BigInt(productionAmountIn),
     productionSettler,
-    '0x1234',
+    settlerData(productionRecipient, productionTokenOut, productionMinOut),
   ],
 })
 
@@ -126,14 +136,15 @@ const productionQuote = {
   block: 17065553,
   settler: productionSettler,
   tokenIn: productionTokenIn,
-  tokenOut: '0x0000000000000000000000000000000000000022',
+  tokenOut: productionTokenOut,
+  recipient: productionRecipient,
   amountIn: productionAmountIn,
   amountOutGross: '123456789',
   priceImpactBps: 12,
   midAmountOut: '124000000',
   feeBps: 0,
   amountOutNet: '123456789',
-  minAmountOutNet: '122839505',
+  minAmountOutNet: productionMinOut,
   deadline: 1_800_000_000,
   route: [{
     shareBps: 10_000,
@@ -194,16 +205,17 @@ function responseForRequest(
   const sender = typeof request.sender === 'string' ? request.sender : null
   const tokenIn = request.tokenIn as `0x${string}`
   const requestAmountIn = BigInt(request.amountIn as string)
-  const boundTx = {
+  const boundTx = recipient ? {
     ...productionQuote.tx,
     data: encodeFunctionData({
       abi: parseAbi([
         'function exec(address operator, address token, uint256 amount, address target, bytes data)',
       ]),
       functionName: 'exec',
-      args: [productionSettler, tokenIn, requestAmountIn, productionSettler, '0x1234'],
+      args: [productionSettler, tokenIn, requestAmountIn, productionSettler,
+        settlerData(recipient as `0x${string}`, request.tokenOut as `0x${string}`, netAfterFee(grossMinimum, feeBps).toString())],
     }),
-  }
+  } : null
   return {
     ...productionQuote,
     tokenIn: request.tokenIn,
@@ -218,7 +230,7 @@ function responseForRequest(
     amountOutNet: netAfterFee(gross, feeBps).toString(),
     minAmountOutNet: netAfterFee(grossMinimum, feeBps).toString(),
     tx: recipient
-      ? { ...boundTx, requiredFrom: sender ?? recipient }
+      ? { ...boundTx!, requiredFrom: sender ?? recipient }
       : null,
     ...overrides,
   }
@@ -292,6 +304,20 @@ test('rejects transaction targets and AllowanceHolder calldata not bound to the 
   )
 })
 
+test('rejects calldata whose recipient, output token, or minimum differs from the quote', () => {
+  for (const data of [
+    settlerData('0x0000000000000000000000000000000000000099', productionTokenOut, productionMinOut),
+    settlerData(productionRecipient, '0x0000000000000000000000000000000000000099', productionMinOut),
+    settlerData(productionRecipient, productionTokenOut, String(BigInt(productionMinOut) - 1n)),
+  ]) {
+    const outer = encodeFunctionData({ abi: parseAbi([
+      'function exec(address operator, address token, uint256 amount, address target, bytes data)',
+    ]), functionName: 'exec', args: [productionSettler, productionTokenIn, BigInt(productionAmountIn), productionSettler, data] })
+    assert.throws(() => parseSolverQuoteResponse({ ...productionQuote, tx: { ...productionQuote.tx, data: outer } }),
+      /invalid execution bounds binding/)
+  }
+})
+
 test('rejects an ERC-20 approval target outside the chain trust anchor', () => {
   const maliciousTarget = '0x0000000000000000000000000000000000000055'
   assert.throws(
@@ -316,7 +342,7 @@ test('binds native transactions directly to the Settler without an allowance tar
       ...productionQuote.tx,
       to: productionSettler,
       value: productionAmountIn,
-      data: '0x12345678',
+      data: settlerData(productionRecipient, productionTokenOut, productionMinOut),
     },
   })
   assert.equal(native.settler, productionSettler)

@@ -10,7 +10,8 @@ import test, { after } from 'node:test';
 const tmp = mkdtempSync(join(tmpdir(), 'lp-terminal-poolrank-'));
 process.env.INDEXER_DB = join(tmp, 'catalog.db');
 
-const { annualizeSigma, coverageOf, dailyLogReturns, dailySigma, getPoolRankApi, up33Rows, volumePersistence } = await import('./poolRank');
+const { annualizeSigma, coverageOf, dailyLogReturns, dailySigma, timestampedDailySigma, getPoolRankApi, getPoolRankSnapshot, POOL_RANK_MODEL_VERSION, up33Rows, volumePersistence } = await import('./poolRank');
+const { kvSet } = await import('./store');
 type SubgraphPool = Parameters<typeof up33Rows>[0][number];
 type Up33Onchain = Parameters<typeof up33Rows>[1] extends Map<string, infer V> ? V : never;
 
@@ -56,15 +57,15 @@ test('volumePersistence reads 0 for an empty lifetime, not Infinity', () => {
   assert.ok(Math.abs(volumePersistence(2, 1) - 2) < 1e-12);
 });
 
-const day = (volumeUSD: number, sqrtPrice: number, txCount = 5): { date: number; volumeUSD: string; sqrtPrice: string; txCount: string } => ({
-  date: 0,
+const day = (volumeUSD: number, sqrtPrice: number, index: number, txCount = 5): { date: number; volumeUSD: string; sqrtPrice: string; txCount: string } => ({
+  date: 1_800_000_000 - index * 86_400,
   volumeUSD: String(volumeUSD),
   sqrtPrice: String(sqrtPrice),
   txCount: String(txCount),
 });
 
 function makePool(overrides: Partial<SubgraphPool> = {}): SubgraphPool {
-  const oscillating = Array.from({ length: 20 }, (_, i) => day(1000, i % 2 === 0 ? 1e12 : 1.02e12));
+  const oscillating = Array.from({ length: 20 }, (_, i) => day(1000, i % 2 === 0 ? 1e12 : 1.02e12, i));
   return {
     id: '0xpool',
     tickSpacing: 60,
@@ -103,7 +104,7 @@ test('up33Rows drops corrupted price series instead of ranking them', () => {
   const corrupt = makePool({
     id: '0xcursed',
     // a 25× one-day jump is a pulled pool re-anchoring, not a market
-    poolDayData: Array.from({ length: 20 }, (_, i) => day(1000, i === 10 ? 2.5e13 : 1e12)),
+    poolDayData: Array.from({ length: 20 }, (_, i) => day(1000, i === 10 ? 2.5e13 : 1e12, i)),
   });
   const { rows, dropped } = up33Rows([corrupt], new Map([['0xcursed', onchain()]]), null);
   assert.equal(rows.length, 0);
@@ -124,4 +125,67 @@ test('the API getter answers disabled/empty before the first cycle lands', () =>
   assert.equal(api.ready, false);
   assert.deepEqual(api.rows, []);
   assert.equal(api.generatedAt, null);
+});
+
+test('UP33 sigma measures price returns, independent of Q96 and token decimal scales', () => {
+  const prices = [100, 102, 99, 103, 98, 104, 97, 105, 96];
+  const expectedSigma = dailySigma(prices)!;
+  for (const scale of [1, 2 ** 96, 2 ** 96 * 1e6]) {
+    const pool = makePool({ poolDayData: prices.map((p, i) => day(1000, Math.sqrt(p) * scale, prices.length - 1 - i)).reverse() });
+    const row = up33Rows([pool], new Map([['0xpool', onchain()]]), null).rows[0];
+    assert.ok(row);
+    assert.ok(Math.abs(row.sigmaDaily / expectedSigma - 1) < 1e-10);
+    assert.ok(Math.abs(row.coverage / coverageOf(row.feeApr, expectedSigma)! - 1) < 1e-10);
+    // The old calculation overreported coverage by exactly four.
+    assert.ok(Math.abs(coverageOf(row.feeApr, expectedSigma / 2)! / row.coverage - 4) < 1e-10);
+  }
+});
+
+test('timestamped sigma never compresses missing days, intraday points or invalid closes', () => {
+  const closes = [100, 102, 99, 103, 98, 104, 97, 105];
+  const samples = closes.map((close, i) => ({ ts: i * 86_400, close }));
+  assert.equal(timestampedDailySigma([...samples].reverse()), dailySigma(closes));
+  assert.equal(timestampedDailySigma(samples.map((r, i) => ({ ...r, ts: r.ts + (i >= 4 ? 86_400 : 0) }))), null);
+  assert.equal(timestampedDailySigma(samples.map((r) => ({ ...r, ts: r.ts / 2 }))), null);
+  assert.equal(timestampedDailySigma([...samples, samples[0]]), null);
+  for (const close of [0, -1, NaN, Infinity])
+    assert.equal(timestampedDailySigma(samples.map((r, i) => i === 4 ? { ...r, close } : r)), null);
+  assert.equal(timestampedDailySigma([{ ts: NaN, close: 100 }, ...samples]), null);
+});
+
+test('an old rank snapshot cannot publish wrong-unit coverage after an upgrade', () => {
+  const snapshot = {
+    generatedAt: 1_800_000_000, sourceStatus: 'fresh', sourceAsOf: 1_800_000_000,
+    durationMs: 1, windowDays: 45, upPriceUsd: null, rows: [], dropped: [],
+  };
+  try {
+    for (const modelVersion of [undefined, 1, 999]) {
+      kvSet('pool_rank_snapshot', JSON.stringify({ ...snapshot, modelVersion }));
+      assert.equal(getPoolRankSnapshot(), null);
+      assert.equal(getPoolRankApi().ready, false);
+    }
+    kvSet('pool_rank_snapshot', JSON.stringify({ ...snapshot, modelVersion: POOL_RANK_MODEL_VERSION }));
+    assert.equal(getPoolRankApi().ready, true);
+  } finally { kvSet('pool_rank_snapshot', ''); }
+});
+
+test('rank API preserves source freshness instead of laundering a cache fallback', () => {
+  const timestamp = Math.floor(Date.now() / 1_000);
+  const snapshot = {
+    modelVersion: POOL_RANK_MODEL_VERSION,
+    generatedAt: timestamp,
+    sourceStatus: 'stale',
+    sourceAsOf: timestamp - 60,
+    durationMs: 1,
+    windowDays: 45,
+    upPriceUsd: 1,
+    rows: [],
+    dropped: [],
+  };
+  try {
+    kvSet('pool_rank_snapshot', JSON.stringify(snapshot));
+    assert.equal(getPoolRankApi().status, 'stale');
+    kvSet('pool_rank_snapshot', JSON.stringify({ ...snapshot, sourceStatus: 'unavailable', sourceAsOf: null }));
+    assert.equal(getPoolRankApi().status, 'unavailable');
+  } finally { kvSet('pool_rank_snapshot', ''); }
 });

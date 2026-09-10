@@ -246,6 +246,8 @@ export type StrategyExecutionPlan = {
   createdAt: number
   expiresAt: number
   triggerSide: TriggerSide
+  /** Explicit admin execution; automatic jobs must revalidate their trigger. */
+  manualExecution?: true
   action: StrategyPlanAction
   snapshot: StrategyPositionSnapshot
   nextRange: { tickLower: number; tickUpper: number }

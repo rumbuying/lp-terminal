@@ -367,7 +367,7 @@ export function StrategyTab() {
     if (!wallet) return setExecutorError(t('strategy.accountMissingForOwner'))
     const stakingFlow = strategy.staking?.enabled ? '系统还会先解质押并把本次领取的 UP 卖为留存 WETH，重建后重新质押。' : ''
     const guardFlow = strategy.safeguards.enabled ? t('strategy.safeguardsOnNote') : t('strategy.safeguardsOffNote')
-    if (!window.confirm(`将启动 #${strategy.activeTokenId ?? ''} 的真实自动策略。价格离开 −${strategy.range.lowerPct}% / +${strategy.range.upperPct}% 后，系统会撤出、兑换并重建仓位。${stakingFlow}${guardFlow}继续？`)) return
+    if (!window.confirm(`将启动 #${strategy.activeTokenId ?? ''} 的真实自动策略。价格离开 −${strategy.range.lowerPct}% / +${strategy.range.upperPct}% 后，系统会撤出、兑换并重建仓位。${stakingFlow}${guardFlow}\n\n${t('strategy.incomeRetentionDisclosure')}\n\n继续？`)) return
     setExecutorBusy(true)
     setExecutorError(null)
     try {
@@ -876,11 +876,9 @@ export function StrategyTab() {
   // the same row set as the P/L total above (rows whose day P/L is known).
   const dashboardDailyReturn = pnlUnit === 'stable'
     ? stableDailyReturnPct(dashboardTodayKnown.map((row) => {
-        const performance = performanceByStrategy.get(row.strategyId)
         return {
           pnlUsdgRaw: row.pnlUsdgRaw,
           openingAssetsUsdgRaw: row.openingAssetsUsdgRaw,
-          openingAssetsStable: performance ? stableValue(row.openingAssetsRaw, performance) : null,
         }
       }))
     : dashboardTodayQuoteAddresses.size === 1
@@ -1236,6 +1234,7 @@ export function StrategyTab() {
                 <Btn tone="danger" onClick={() => remove(strategy)} busy={executorBusy} disabled={!!remote && !canManage}>{t('strategy.delete')}</Btn>
               </div>
             </div>
+            <div className="dim mono-sm">{t('strategy.incomeRetentionDisclosure')}</div>
             <div className="kv mono-sm">
               <span>{t('strategy.tokenId')} {strategy.activeTokenId ?? '—'}</span>
               <span>{t('strategy.rangeBase', { lower: compactNumber(strategy.range.lowerPct), upper: compactNumber(strategy.range.upperPct) })}</span>
@@ -1417,8 +1416,8 @@ export function StrategyTab() {
                 {performance.rewardValuationError && <div className="amber mono-sm">{t('strategy.perfRewardValuationError', { message: performance.rewardValuationError })}</div>}
                 {performance.stableValuationError && <div className="amber mono-sm">{t('strategy.perfStablePnlUnavailable')}</div>}
                 {performance.stable?.baselineSource && <div className="dim mono-sm">{t(performance.stable.baselineSource === 'recorded_at_start' ? 'strategy.perfStableBasisRecorded' : 'strategy.perfStableBasisHistorical')}</div>}
-                {performance.warnings?.includes('gas_quote_unavailable') && <div className="amber mono-sm">{t('strategy.perfGasQuoteUnavailable', { symbol: performance.quote?.symbol ?? '' })}</div>}
-                {performance.warnings?.includes('gas_quote_current_price') && <div className="dim mono-sm">{t('strategy.perfGasCurrentQuoteNote', { symbol: performance.quote?.symbol ?? '' })}</div>}
+                {performance.warnings?.includes('gas_historical_price_unavailable') && <div className="amber mono-sm">{t('strategy.perfGasHistoricalUnavailable', { symbol: performance.quote?.symbol ?? '' })}</div>}
+                {performance.warnings?.includes('pnl_baseline_mint_unavailable') && <div className="amber mono-sm">{t('strategy.perfBasisUnavailable')}</div>}
                 {performance.baseline && <div className="dim mono-sm">
                   {t(performance.baseline.kind === 'strategy_start' ? 'strategy.perfBasisStartNote' : performance.baseline.kind === 'original_mint' ? 'strategy.perfBasisMintNote' : 'strategy.perfBasisNote', { tokenId: performance.baseline.tokenId ?? '—', date: new Date(performance.baseline.at * 1000).toLocaleString(), tick: performance.baseline.tick })}
                   {performance.baseline.txHash ? <>{' '}<a href={`https://robinhoodchain.blockscout.com/tx/${performance.baseline.txHash}`} target="_blank" rel="noreferrer">↗</a></> : null}

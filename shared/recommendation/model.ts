@@ -5,6 +5,7 @@ import type {
   LookbackWindow,
   RecommendationCandidate,
   RecommendationCostProfile,
+  RecommendationHistoryCoverage,
   RecommendationItem,
   RecommendationMode,
   RecommendationRankPrior,
@@ -12,8 +13,9 @@ import type {
   RecommendationTickSample,
   WindowDecision,
 } from './types'
+import { INCOME_RETENTION_BPS, INCOME_RETENTION_THRESHOLD_USD } from '../strategy/income-retention'
 
-export const RECOMMENDATION_MODEL_VERSION = 'lp-rec-v3' as const
+export const RECOMMENDATION_MODEL_VERSION = 'lp-rec-v5' as const
 export const RECOMMENDATION_BANDS = [1, 2, 3, 5, 8, 10] as const
 /**
  * How the indexer's pool-rank table enters the projection, in one sentence:
@@ -42,6 +44,9 @@ const DAY = 86_400
 const YEAR_DAYS = 365
 const VALIDATION_STEP = HOUR
 const EPS = 1e-9
+const RECENT_TICK_BUCKET = 300
+const RISK_TICK_BUCKET = 1_800
+const MARKET_BUCKET = HOUR
 
 const finite = (value: number | null | undefined): value is number => value != null && Number.isFinite(value)
 const median = (values: number[]): number => {
@@ -125,8 +130,10 @@ export function chooseLookback(candidate: RecommendationCandidate, now: number):
 
   const history = validationHistory(candidate.marketHistory)
   const span = history.length > 1 ? history.at(-1)!.ts - history[0].ts : 0
+  const validationCoverage = historyCoverage(history, now - 7 * DAY, now, MARKET_BUCKET)
   const losses: Partial<Record<LookbackWindow, number[]>> = {}
-  if (span >= 7 * DAY - HOUR) {
+  if (span >= 7 * DAY - HOUR && validationCoverage.ratio >= 0.7
+    && (validationCoverage.maxGapSeconds ?? Infinity) <= 6 * HOUR) {
     for (let i = 0; i < history.length; i++) {
       const actual = futureOneHour(history, i)
       if (actual === null) continue
@@ -203,7 +210,10 @@ export function replayRange(candidate: RecommendationCandidate, pct: number, sam
   const rows = [...samples].sort((a, b) => a.ts - b.ts)
   if (!rows.length) {
     const range = rangeAt(candidate, candidate.tick, pct)
-    return { reopens: 0, coverageHours: 0, range, downsideRatios: [] as number[], hodlRelativeRatios: [] as number[] }
+    return {
+      reopens: 0, coverageHours: 0, observedTimeInRangeRatio: 0, range,
+      downsideRatios: [] as number[], hodlRelativeRatios: [] as number[],
+    }
   }
   const firstTick = rows[0].tick
   let centerTick = rows[0].tick
@@ -212,6 +222,9 @@ export function replayRange(candidate: RecommendationCandidate, pct: number, sam
   let principalRatio = 1
   const downsideRatios: number[] = []
   const hodlRelativeRatios: number[] = []
+  let observedSeconds = 0
+  let inRangeSeconds = 0
+  let previousTs = rows[0].ts
   for (const row of rows) {
     const priceRatio = Math.pow(1.0001, row.tick - centerTick)
     const lo = Math.pow(1.0001, range.tickLower - centerTick)
@@ -231,16 +244,63 @@ export function replayRange(candidate: RecommendationCandidate, pct: number, sam
     const hodlRatio = (1 + riskPriceRatio) / 2
     downsideRatios.push(lpRatio - 1)
     hodlRelativeRatios.push(lpRatio / Math.max(hodlRatio, EPS) - 1)
-    if (rangeSide(row.tick, range.tickLower, range.tickUpper) !== 'in') {
+    const side = rangeSide(row.tick, range.tickLower, range.tickUpper)
+    const elapsed = Math.max(0, Math.min(RECENT_TICK_BUCKET, row.ts - previousTs))
+    observedSeconds += elapsed
+    if (side === 'in') inRangeSeconds += elapsed
+    previousTs = row.ts
+    if (side !== 'in') {
       principalRatio *= valueRatio
       centerTick = row.tick
       range = rangeAt(candidate, centerTick, pct)
       reopens++
     }
   }
-  const coverageHours = rows.length > 1 ? (rows.at(-1)!.ts - rows[0].ts) / HOUR : 0
+  const coverageHours = observedSeconds / HOUR
   const scale = coverageHours > 0 ? 24 / coverageHours : 1
-  return { reopens: reopens * scale, coverageHours, range: rangeAt(candidate, candidate.tick, pct), downsideRatios, hodlRelativeRatios }
+  return {
+    reopens: reopens * scale,
+    coverageHours,
+    observedTimeInRangeRatio: observedSeconds > 0 ? inRangeSeconds / observedSeconds : 0,
+    range: rangeAt(candidate, candidate.tick, pct),
+    downsideRatios,
+    hodlRelativeRatios,
+  }
+}
+
+/** Fixed-window bucket coverage. Unlike first-to-last span, this does not turn
+ * a pair of observations separated by a day-long outage into 24h of evidence. */
+export function historyCoverage<T extends { ts: number }>(
+  samples: readonly T[],
+  start: number,
+  end: number,
+  bucketSeconds: number,
+): RecommendationHistoryCoverage {
+  const windowSeconds = Math.max(0, end - start)
+  const rows = [...samples]
+    .filter((row) => Number.isFinite(row.ts) && row.ts >= start && row.ts <= end)
+    .sort((a, b) => a.ts - b.ts)
+  const unique = new Set(rows.map((row) => Math.min(
+    Math.max(0, Math.floor((row.ts - start) / bucketSeconds)),
+    Math.max(0, Math.ceil(windowSeconds / bucketSeconds) - 1),
+  )))
+  const coveredSeconds = Math.min(windowSeconds, unique.size * bucketSeconds)
+  if (!rows.length) return {
+    windowSeconds, coveredSeconds: 0, ratio: 0, sampleCount: 0,
+    firstAt: null, lastAt: null, maxGapSeconds: null,
+  }
+  let maxGapSeconds = Math.max(0, rows[0].ts - start, end - rows.at(-1)!.ts)
+  for (let index = 1; index < rows.length; index++)
+    maxGapSeconds = Math.max(maxGapSeconds, rows[index].ts - rows[index - 1].ts)
+  return {
+    windowSeconds,
+    coveredSeconds,
+    ratio: windowSeconds > 0 ? coveredSeconds / windowSeconds : 0,
+    sampleCount: rows.length,
+    firstAt: rows[0].ts,
+    lastAt: rows.at(-1)!.ts,
+    maxGapSeconds,
+  }
 }
 
 function reflectedPath(samples: RecommendationTickSample[]): RecommendationTickSample[] {
@@ -256,33 +316,43 @@ function reflectedPath(samples: RecommendationTickSample[]): RecommendationTickS
  * Evaluate many historical entry times plus the reflected price path. The
  * reflection is deliberately not a forecast: it is a stress case that stops a
  * recent one-way rally from looking safe merely because its reversal has not
- * happened yet. Each path contributes its worst USD drawdown or relative-HODL
- * shortfall, whichever is worse.
+ * happened yet. Inventory drawdown and LP-vs-HODL IL remain separate series.
  */
-function riskPathRatios(candidate: RecommendationCandidate, pct: number, samples: RecommendationTickSample[]): number[] {
+function riskPathRatios(candidate: RecommendationCandidate, pct: number, samples: RecommendationTickSample[]): {
+  inventoryDrawdownRatios: number[]
+  ilRatios: number[]
+} {
   const rows = [...samples].sort((a, b) => a.ts - b.ts)
-  if (rows.length < 2) return []
+  if (rows.length < 2) return { inventoryDrawdownRatios: [], ilRatios: [] }
   const paths: RecommendationTickSample[][] = []
+  const completeDay = (path: RecommendationTickSample[]) => {
+    if (path.length < 2) return false
+    const start = path[0].ts
+    const coverage = historyCoverage(path, start, start + DAY, RISK_TICK_BUCKET)
+    return coverage.ratio >= 0.75 && (coverage.maxGapSeconds ?? Infinity) <= HOUR
+  }
   let nextStart = rows[0].ts
   for (let i = 0; i < rows.length; i++) {
     if (rows[i].ts < nextStart) continue
     const end = rows[i].ts + DAY
     const path: RecommendationTickSample[] = []
     for (let j = i; j < rows.length && rows[j].ts <= end; j++) path.push(rows[j])
-    if (path.length > 1 && path.at(-1)!.ts - path[0].ts >= 20 * HOUR) paths.push(path)
+    if (completeDay(path)) paths.push(path)
     nextStart = rows[i].ts + 6 * HOUR
   }
   const recent = rows.filter((row) => row.ts >= rows.at(-1)!.ts - DAY)
-  if (recent.length > 1 && recent.at(-1)!.ts - recent[0].ts >= 20 * HOUR) paths.push(recent)
+  if (completeDay(recent)) paths.push(recent)
 
-  const ratios: number[] = []
+  const inventoryDrawdownRatios: number[] = []
+  const ilRatios: number[] = []
   for (const path of paths) {
     for (const scenario of [path, reflectedPath(path)]) {
       const replay = replayRange(candidate, pct, scenario)
-      ratios.push(Math.min(0, ...replay.downsideRatios, ...replay.hodlRelativeRatios))
+      inventoryDrawdownRatios.push(Math.min(0, ...replay.downsideRatios))
+      ilRatios.push(Math.min(0, ...replay.hodlRelativeRatios))
     }
   }
-  return ratios
+  return { inventoryDrawdownRatios, ilRatios }
 }
 
 function rawAmount(human: number, decimals: number): bigint {
@@ -303,7 +373,7 @@ function userLiquidity(candidate: RecommendationCandidate, capitalUsd: number, r
   )
 }
 
-function cvar95(values: number[], capitalUsd: number): number {
+function worstFivePercentMean(values: number[], capitalUsd: number): number {
   if (!values.length) return 0
   const losses = values.map((value) => Math.min(0, value * capitalUsd)).sort((a, b) => a - b)
   const tail = losses.slice(0, Math.max(1, Math.ceil(losses.length * 0.05)))
@@ -320,7 +390,7 @@ function validRankPrior(prior: RecommendationCandidate['poolRank']): Recommendat
   const finitePrior = finite(prior.generatedAt) && finite(prior.coverage) && finite(prior.sigmaDaily)
     && finite(prior.sigmaAnnual) && finite(prior.feeApr7d) && finite(prior.volDayUsd)
     && (prior.emitApr === null || finite(prior.emitApr))
-  return finitePrior ? prior : null
+  return finitePrior && prior.coverage > 0 ? prior : null
 }
 
 /** Pool-average emission APR implied by the LIVE gauge state — the same
@@ -364,51 +434,105 @@ export function scoreCandidate(args: {
     && lookback.hourlyVolumeUsd * 24 > prior.volDayUsd * VOLUME_BASELINE_MULTIPLE
   const emitMismatch = mode === 'rewards' && prior !== null && emitAprMismatch(candidate, prior)
   const recentTicks = candidate.tickHistory.filter((row) => row.ts >= now - DAY)
+  const tickCoverage = historyCoverage(recentTicks, now - DAY, now, RECENT_TICK_BUCKET)
+  const marketCoverage = historyCoverage(candidate.marketHistory, now - 7 * DAY, now, MARKET_BUCKET)
+  const historicalActiveLiquidity = candidate.marketHistory
+    .filter((row) => row.ts >= now - DAY && row.ts <= now && row.activeLiquidity != null)
+    .map((row) => {
+      try { return BigInt(row.activeLiquidity!) } catch { return null }
+    })
+    .filter((value): value is bigint => value !== null && value > 0n)
+    .sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
+  const activeMiddle = Math.floor(historicalActiveLiquidity.length / 2)
+  const historicalActiveMedianRaw = historicalActiveLiquidity.length
+    ? historicalActiveLiquidity.length % 2
+      ? historicalActiveLiquidity[activeMiddle]
+      : (historicalActiveLiquidity[activeMiddle - 1] + historicalActiveLiquidity[activeMiddle]) / 2n
+    : null
+  const historicalActiveMedian = historicalActiveMedianRaw === null ? 0 : Number(historicalActiveMedianRaw)
+  const recentMarketRows = candidate.marketHistory.filter((row) => row.ts >= now - DAY && row.ts <= now)
+  const activeLiquidityCoverageRatio = recentMarketRows.length
+    ? historicalActiveLiquidity.length / recentMarketRows.length
+    : 0
+  const riskTicks = candidate.tickHistory.filter((row) => row.ts >= now - 7 * DAY)
+  const riskCoverage = historyCoverage(riskTicks, now - 7 * DAY, now, RISK_TICK_BUCKET)
   return RECOMMENDATION_BANDS.map((pct) => {
     const replay = replayRange(candidate, pct, recentTicks)
     const range = replay.range
     const liquidity = userLiquidity(candidate, capitalUsd, range)
-    const active = Number(BigInt(candidate.liquidity))
+    const spotActive = Number(BigInt(candidate.liquidity))
+    // A historical active-liquidity median prevents a momentary spot trough
+    // from inflating fee share. It is still not tick-liquidity distribution.
+    const active = historicalActiveMedian > 0 ? Math.max(spotActive, historicalActiveMedian) : spotActive
     const staked = Number(BigInt(candidate.stakedLiquidity))
     const yours = Number(liquidity)
     const executionDowntime = Math.min(0.5, replay.reopens * cost.cycleSeconds / DAY)
-    const inRangeRatio = Math.max(0, 1 - executionDowntime)
+    const uptimeRatio = Math.max(0, 1 - executionDowntime)
+    const feeExposureRatio = replay.observedTimeInRangeRatio * uptimeRatio
     const feeShare = active + yours > 0 ? yours / (active + yours) : 0
     const rewardShare = staked + yours > 0 ? yours / (staked + yours) : 0
     const keep = 1 - candidate.unstakedFeePpm / 1_000_000
-    const grossFeeUsd = mode === 'fees'
-      ? lookback.hourlyVolumeUsd * 24 * candidate.feePpm / 1_000_000 * keep * feeShare * inRangeRatio
-      : 0
+    const modeledVolumeInRangeUsd = lookback.hourlyVolumeUsd * 24 * feeExposureRatio
+    const modeledFeeUsd = modeledVolumeInRangeUsd * candidate.feePpm / 1_000_000 * keep * feeShare
+    const grossFeeUsd = mode === 'fees' ? modeledFeeUsd : 0
+    // Gauge emissions follow staked liquidity. An out-of-range position stops
+    // earning swap fees, but remains staked; only execution downtime applies.
     const rewardUsd = mode === 'rewards'
-      ? Number(BigInt(candidate.rewardRate)) / 1e18 * Math.min(DAY, candidate.periodFinish - now) * candidate.upUsd! * rewardShare * inRangeRatio
+      ? Number(BigInt(candidate.rewardRate)) / 1e18 * Math.min(DAY, candidate.periodFinish - now) * candidate.upUsd! * rewardShare * uptimeRatio
       : 0
-    const gasUsd = replay.reopens * cost.gasUsdPerCycle
-    const executionUsd = replay.reopens * capitalUsd * cost.executionBpsPerCycle / 10_000
-    const netUsd = grossFeeUsd + rewardUsd - gasUsd - executionUsd
-    const tail = cvar95(riskPathRatios(candidate, pct, candidate.tickHistory.filter((row) => row.ts >= now - 7 * DAY)), capitalUsd)
-    const riskAdjustedNetUsd = netUsd - riskWeight[risk] * Math.abs(tail)
-    const coverageRatio = tail < 0 ? netUsd / Math.abs(tail) : null
-    const tickConfidence = Math.min(1, replay.coverageHours / 24)
+    // One opening is always required before any replayed recenter. Charging
+    // only `reopens` made a quiet 24h path appear free to enter.
+    const projectedCycles = replay.reopens + 1
+    const gasUsd = projectedCycles * cost.gasUsdPerCycle
+    const executionUsd = projectedCycles * capitalUsd * cost.executionBpsPerCycle / 10_000
+    const entryCostUsd = cost.gasUsdPerCycle + capitalUsd * cost.executionBpsPerCycle / 10_000
+    const projectedIncomeUsd = grossFeeUsd + rewardUsd
+    const incomeRetentionUsd = projectedIncomeUsd > INCOME_RETENTION_THRESHOLD_USD
+      ? projectedIncomeUsd * INCOME_RETENTION_BPS / 10_000
+      : 0
+    // Rank coverage = fee income / expected LVR. Applying the same pool prior
+    // to the position's modeled fee share gives a range-specific expected LVR.
+    const expectedLvrUsd = prior ? modeledFeeUsd / prior.coverage : null
+    const netUsd = projectedIncomeUsd - incomeRetentionUsd - gasUsd - executionUsd - (expectedLvrUsd ?? 0)
+    const pathRisks = riskPathRatios(candidate, pct, riskTicks)
+    const historicalIlTailUsd = worstFivePercentMean(pathRisks.ilRatios, capitalUsd)
+    const inventoryDrawdownTailUsd = worstFivePercentMean(pathRisks.inventoryDrawdownRatios, capitalUsd)
+    const worstTailUsd = Math.min(historicalIlTailUsd, inventoryDrawdownTailUsd)
+    const riskAdjustedNetUsd = netUsd - riskWeight[risk] * Math.abs(worstTailUsd)
+    const coverageRatio = worstTailUsd < 0 ? netUsd / Math.abs(worstTailUsd) : null
+    const tickConfidence = tickCoverage.ratio
     const costConfidence = Math.min(1, cost.sampleCycles / 20)
     const marketConfidence = [candidate.vol1hUsd, candidate.vol6hUsd, candidate.vol24hUsd].filter(finite).length / 3
-    let confidenceScore = Math.max(0, Math.min(1, 0.45 * tickConfidence + 0.25 * lookback.confidence + 0.2 * costConfidence + 0.1 * marketConfidence))
+    const operationalConfidence = 0.45 * tickConfidence + 0.2 * lookback.confidence
+      + 0.2 * costConfidence + 0.15 * marketConfidence
+    // Current operating evidence and historical maturity are deliberately
+    // separate: a fresh day cannot masquerade as a validated 7-day strategy.
+    const historyMaturity = 0.45 + 0.35 * riskCoverage.ratio + 0.2 * marketCoverage.ratio
+    let confidenceScore = Math.max(0, Math.min(1, operationalConfidence * historyMaturity))
     // FR-REC-2: the day-level trend tempers the projection the same way the
     // rank's baseline tempers the hourly one. A fading/cliffing pool caps the
-    // displayed confidence — the trailing volume the projection is priced on
-    // is leaving. A verified rise that the walk-forward did NOT call a spike
-    // adds a small nudge; new_hot gets nothing (days too few to trust).
+    // displayed confidence. A rise can nudge confidence only after the local
+    // recommendation histories pass their opening gates.
     const trendClass = candidate.volumeTrend?.class ?? null
     const volumeFading = trendClass === 'fading' || trendClass === 'collapsing'
     const volumeRising = trendClass === 'rising' && lookback.reason !== 'short_spike'
+    const trendEvidenceReady = riskCoverage.ratio >= 0.7
+      && (riskCoverage.maxGapSeconds ?? Infinity) <= 6 * HOUR
+      && marketCoverage.ratio >= 0.5
+      && (marketCoverage.maxGapSeconds ?? Infinity) <= 12 * HOUR
     if (volumeFading) confidenceScore = Math.min(confidenceScore, 0.5)
-    else if (volumeRising) confidenceScore = Math.min(1, confidenceScore + 0.05)
+    else if (volumeRising && trendEvidenceReady) confidenceScore = Math.min(1, confidenceScore + 0.05)
     const rawCenter = tickToPrice(candidate.tick, candidate.decimals0, candidate.decimals1)
     const actualCenter = candidate.token0IsRisk ? rawCenter : 1 / rawCenter
     const warnings = [
-      ...(replay.coverageHours < 23 ? ['tick_history_incomplete'] : []),
+      ...(tickCoverage.ratio < 0.9 || (tickCoverage.maxGapSeconds ?? Infinity) > 30 * 60 ? ['tick_history_incomplete'] : []),
+      ...(riskCoverage.ratio < 0.8 || (riskCoverage.maxGapSeconds ?? Infinity) > 3 * HOUR ? ['risk_history_incomplete'] : []),
+      ...(marketCoverage.ratio < 0.8 ? ['market_history_incomplete'] : []),
+      'volume_distribution_unavailable',
+      'tick_liquidity_distribution_unavailable',
       ...(lookback.reason === 'short_spike' ? ['short_volume_spike'] : []),
       ...(lookback.reason === 'slowing' ? ['volume_slowing'] : []),
-      ...(cost.source === 'default' ? ['cost_default'] : []),
+      ...(cost.source === 'unavailable' ? ['cost_unavailable'] : []),
       ...(mode === 'rewards' ? ['reward_committed_until_period_finish'] : []),
       // The rank prior never silently disappears: below the floor on a
       // non-conservative profile it must stay visible as a warning, and a
@@ -420,10 +544,14 @@ export function scoreCandidate(args: {
     ]
     const gateReasons = [
       ...(replay.reopens > maxDailyReopens[risk] ? ['excessive_reopens' as const] : []),
-      ...(replay.coverageHours < 20 ? ['insufficient_tick_history' as const] : []),
+      ...(tickCoverage.ratio < 0.8 || (tickCoverage.maxGapSeconds ?? Infinity) > 30 * 60 ? ['insufficient_tick_history' as const] : []),
+      ...(riskCoverage.ratio < 0.7 || (riskCoverage.maxGapSeconds ?? Infinity) > 6 * HOUR ? ['insufficient_risk_history' as const] : []),
+      ...(marketCoverage.ratio < 0.5 || (marketCoverage.maxGapSeconds ?? Infinity) > 12 * HOUR ? ['insufficient_market_history' as const] : []),
       ...(riskAdjustedNetUsd <= 0 ? ['non_positive_risk_adjusted_net' as const] : []),
       ...(!candidate.hasStableQuote ? ['unanchored_quote_risk' as const] : []),
       ...(belowLvrFloor && risk === 'conservative' ? ['pool_below_lvr_floor' as const] : []),
+      ...(!prior ? ['lvr_unavailable' as const] : []),
+      ...(cost.source === 'unavailable' ? ['cost_unavailable' as const] : []),
     ]
     return {
       rank: 0,
@@ -447,11 +575,16 @@ export function scoreCandidate(args: {
         rewardUsd,
         gasUsd,
         executionUsd,
+        entryCostUsd,
+        incomeRetentionUsd,
+        expectedLvrUsd,
         netUsd,
         riskAdjustedNetUsd,
         reopens: replay.reopens,
-        inRangePct: inRangeRatio * 100,
-        cvar95Usd: tail,
+        feeExposurePct: feeExposureRatio * 100,
+        modeledVolumeInRangeUsd,
+        historicalIlTailUsd,
+        inventoryDrawdownTailUsd,
         coverageRatio,
       },
       confidence: { level: confidenceScore >= 0.75 ? 'high' : confidenceScore >= 0.5 ? 'medium' : 'low', score: confidenceScore },
@@ -462,7 +595,15 @@ export function scoreCandidate(args: {
         vol24hUsd: candidate.vol24hUsd,
         feePpm: candidate.feePpm,
         statsUpdatedAt: candidate.statsUpdatedAt,
-        tickCoverageHours: replay.coverageHours,
+        tickCoverageHours: tickCoverage.coveredSeconds / HOUR,
+        tickCoverage,
+        riskTickCoverage: riskCoverage,
+        marketCoverage,
+        activeLiquidityBasis: historicalActiveMedian > 0 ? 'historical_active_liquidity' : 'spot_active_liquidity',
+        historicalActiveLiquidity: historicalActiveMedianRaw?.toString() ?? null,
+        activeLiquidityCoverageRatio,
+        tickLiquidityDistribution: 'unavailable',
+        volumeDistribution: 'unavailable',
       },
       cost,
       gateReasons,

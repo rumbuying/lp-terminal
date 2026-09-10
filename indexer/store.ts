@@ -145,6 +145,20 @@ CREATE TABLE IF NOT EXISTS pool_tick_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_tick_samples_ts ON pool_tick_samples(ts);
 
+-- Once a pool enters the bounded recommendation universe, retain it for a
+-- fixed observation horizon even if its TVL/volume later falls. Without this
+-- cohort the history contains winners while failed pools disappear exactly
+-- when their failure becomes useful evidence.
+CREATE TABLE IF NOT EXISTS recommendation_cohort (
+  pool TEXT NOT NULL,
+  family TEXT NOT NULL CHECK(family IN ('address','v4')),
+  admitted_at INTEGER NOT NULL,
+  last_eligible_at INTEGER NOT NULL,
+  PRIMARY KEY(pool, family)
+);
+CREATE INDEX IF NOT EXISTS idx_recommendation_cohort_retention
+  ON recommendation_cohort(family,last_eligible_at DESC,pool);
+
 CREATE TABLE IF NOT EXISTS v4_recommendation_state (
   pool_id TEXT PRIMARY KEY,
   sqrt_price TEXT NOT NULL,
@@ -289,7 +303,8 @@ CREATE TABLE IF NOT EXISTS v4_market_stats (
   tvl_usd    REAL,     -- derived here from token quantities and this indexer's prices
   tvl_approx INTEGER NOT NULL DEFAULT 0,   -- a bound was applied; see state.tvlOf
   source     TEXT NOT NULL,
-  updated    INTEGER NOT NULL
+  updated    INTEGER NOT NULL,
+  stats_updated INTEGER                    -- external volume/liquidity observation only
 );
 CREATE INDEX IF NOT EXISTS idx_v4_market_vol ON v4_market_stats(vol24h_usd DESC, pool_id);
 -- Ranking reads the preferred figure, so the index has to be on the same
@@ -520,11 +535,13 @@ if (!v4MarketColumns.some((column) => column.name === 'tvl_usd')) {
     ALTER TABLE v4_market_stats ADD COLUMN tvl_approx INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS idx_v4_market_depth
       ON v4_market_stats(COALESCE(tvl_usd, liq_usd) DESC, pool_id);`);
+}
 for (const column of ['vol5m_usd', 'vol1h_usd', 'vol6h_usd']) {
   if (!v4MarketColumns.some((existing) => existing.name === column))
     db.exec(`ALTER TABLE v4_market_stats ADD COLUMN ${column} REAL`);
 }
-}
+if (!v4MarketColumns.some((column) => column.name === 'stats_updated'))
+  db.exec('ALTER TABLE v4_market_stats ADD COLUMN stats_updated INTEGER');
 
 const v4PoolColumns = db.prepare('PRAGMA table_info(v4_pools)').all() as {
   name: string;
@@ -2052,13 +2069,14 @@ export function upsertV4GraphStats(
 const upV4MarketStatsQ = db.prepare(`
   INSERT INTO v4_market_stats (
     pool_id, vol5m_usd, vol1h_usd, vol6h_usd, vol24h_usd,
-    txns24h, liq_usd, source, updated
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    txns24h, liq_usd, source, updated, stats_updated
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(pool_id) DO UPDATE SET
     vol5m_usd = excluded.vol5m_usd, vol1h_usd = excluded.vol1h_usd,
     vol6h_usd = excluded.vol6h_usd, vol24h_usd = excluded.vol24h_usd,
     txns24h = excluded.txns24h,
-    liq_usd = excluded.liq_usd, source = excluded.source, updated = excluded.updated`);
+    liq_usd = excluded.liq_usd, source = excluded.source, updated = excluded.updated,
+    stats_updated = excluded.stats_updated`);
 /** An aggregator's USD reading of one v4 pool, keyed by PoolId rather than address. */
 export const upsertV4MarketStats = (
   poolId: string,
@@ -2074,7 +2092,7 @@ export const upsertV4MarketStats = (
   const timestamp = now();
   upV4MarketStatsQ.run(
     id, normalized.m5, normalized.h1, normalized.h6, normalized.h24,
-    txns24h, liqUsd, source, timestamp,
+    txns24h, liqUsd, source, timestamp, timestamp,
   );
   const bucket = Math.floor(timestamp / 300) * 300;
   db.prepare(`INSERT INTO pool_market_snapshots(
@@ -2096,21 +2114,48 @@ export const upsertV4MarketStats = (
     );
 };
 
+const expirePoolStatsQ = db.prepare(`UPDATE pool_stats SET
+  vol5m_usd=NULL,vol1h_usd=NULL,vol6h_usd=NULL,vol24h_usd=NULL,
+  txns24h=NULL,liq_usd=NULL
+  WHERE updated<? AND (vol5m_usd IS NOT NULL OR vol1h_usd IS NOT NULL OR
+    vol6h_usd IS NOT NULL OR vol24h_usd IS NOT NULL OR txns24h IS NOT NULL OR liq_usd IS NOT NULL)`);
+const expireV4MarketStatsQ = db.prepare(`UPDATE v4_market_stats SET
+  vol5m_usd=NULL,vol1h_usd=NULL,vol6h_usd=NULL,vol24h_usd=NULL,
+  txns24h=NULL,liq_usd=NULL
+  WHERE (stats_updated IS NULL OR stats_updated<?) AND
+    (vol5m_usd IS NOT NULL OR vol1h_usd IS NOT NULL OR vol6h_usd IS NOT NULL OR
+     vol24h_usd IS NOT NULL OR txns24h IS NOT NULL OR liq_usd IS NOT NULL)`);
+
+/** Age external market observations out of every ranking field while retaining
+ * source and observation time so APIs can distinguish stale from unavailable. */
+export function expireMarketStats(timestamp = now()): { addressPools: number; v4Pools: number } {
+  const cutoff = timestamp - Math.floor(TUNE.marketStatsFreshMs / 1_000);
+  const addressPools = Number(expirePoolStatsQ.run(cutoff).changes);
+  const v4Pools = Number(expireV4MarketStatsQ.run(cutoff).changes);
+  return { addressPools, v4Pools };
+}
+
 export type V4RecommendationTarget = {
   pool_id: string;
   key_fee_ppm: number | null;
 };
 export const recommendationV4Targets = (limit: number): V4RecommendationTarget[] =>
-  db.prepare(`SELECT v.pool_id,v.key_fee_ppm FROM v4_pools v
+  retainedRecommendationTargets('v4', Math.max(1, Math.floor(limit)),
+    db.prepare(`SELECT v.pool_id AS pool,v.key_fee_ppm FROM v4_pools v
     JOIN v4_market_stats m ON m.pool_id=v.pool_id
-    WHERE COALESCE(m.tvl_usd,m.liq_usd,0)>=10000 AND COALESCE(m.vol24h_usd,0)>=10000
+    WHERE m.stats_updated>=? AND COALESCE(m.liq_usd,0)>=10000
+      AND COALESCE(m.vol24h_usd,0)>=10000
     ORDER BY (
       MIN(
         COALESCE(m.vol1h_usd,m.vol24h_usd/24.0),
         COALESCE(m.vol6h_usd/6.0,m.vol24h_usd/24.0),
         m.vol24h_usd/24.0
-      ) * COALESCE(v.key_fee_ppm,0) / MAX(COALESCE(m.tvl_usd,m.liq_usd),1)
-    ) DESC LIMIT ?`).all(Math.max(1, Math.floor(limit))) as V4RecommendationTarget[];
+      ) * COALESCE(v.key_fee_ppm,0) / MAX(m.liq_usd,1)
+    ) DESC LIMIT ?`).all(
+      now() - Math.floor(TUNE.marketStatsFreshMs / 1_000),
+      Math.max(1, Math.floor(limit)),
+    ) as { pool: string; key_fee_ppm: number | null }[],
+  ).map((row) => ({ pool_id: row.pool, key_fee_ppm: row.key_fee_ppm }));
 
 const upsertV4RecommendationStateQ = db.prepare(`
   INSERT INTO v4_recommendation_state(pool_id,sqrt_price,tick,liquidity,lp_fee,updated)
@@ -2150,7 +2195,9 @@ const v4TvlInputsQ = db.prepare(`
   SELECT s.pool_id, s.tvl0, s.tvl1,
          p.currency0, p.currency1,
          t0.price_usd AS p0_usd, t0.price_depth_usd AS p0_depth, t0.price_src AS p0_src,
-         t1.price_usd AS p1_usd, t1.price_depth_usd AS p1_depth, t1.price_src AS p1_src
+         t0.price_updated AS p0_updated,
+         t1.price_usd AS p1_usd, t1.price_depth_usd AS p1_depth, t1.price_src AS p1_src,
+         t1.price_updated AS p1_updated
   FROM v4_pool_stats s
   JOIN v4_pools p ON p.pool_id = s.pool_id
   LEFT JOIN tokens t0 ON t0.address = p.currency0
@@ -2165,9 +2212,11 @@ export type V4TvlInput = {
   p0_usd: number | null;
   p0_depth: number | null;
   p0_src: string | null;
+  p0_updated: number | null;
   p1_usd: number | null;
   p1_depth: number | null;
   p1_src: string | null;
+  p1_updated: number | null;
 };
 /** Every v4 pool whose token quantities are known, with both sides' prices. */
 export const v4TvlInputs = (): V4TvlInput[] => v4TvlInputsQ.all() as V4TvlInput[];
@@ -2235,8 +2284,8 @@ const priceQ = db.prepare(`
   INSERT INTO tokens (address, price_usd, price_depth_usd, price_src, price_updated) VALUES (?, ?, ?, ?, ?)
   ON CONFLICT(address) DO UPDATE SET price_usd = excluded.price_usd, price_depth_usd = excluded.price_depth_usd,
     price_src = excluded.price_src, price_updated = excluded.price_updated`);
-export const setTokenPrice = (addr: string, usd: number, depthUsd: number, src: string) =>
-  void priceQ.run(addr.toLowerCase(), usd, depthUsd, src, now());
+export const setTokenPrice = (addr: string, usd: number, depthUsd: number, src: string, observedAt = now()) =>
+  void priceQ.run(addr.toLowerCase(), usd, depthUsd, src, observedAt);
 
 // Drop every pool-derived price (reprice rebuilds them from the credible seeds
 // on the same pass) plus anything outside the plausibility band, whatever its
@@ -2417,21 +2466,77 @@ export const upsertStats = (
 /** Bounded high-value CL cohort sampled for strategy modelling. */
 export const recommendationAddressPoolAddrs = (limit: number): string[] => {
   const cap = Math.max(1, Math.floor(limit));
-  return (db.prepare(`SELECT p.address FROM pools p
+  const eligible = db.prepare(`SELECT p.address AS pool,NULL AS key_fee_ppm FROM pools p
       JOIN pool_state s ON s.address=p.address
       JOIN pool_stats st ON st.address=p.address
     WHERE p.proto IN ('up33cl','univ3','pancakev3')
       AND s.sqrt_price IS NOT NULL AND s.tick IS NOT NULL AND s.liquidity IS NOT NULL
-      AND COALESCE(s.tvl_usd,st.liq_usd,0)>=10000
+      AND st.updated>=?
+      AND COALESCE(st.liq_usd,0)>=10000
       AND COALESCE(st.vol24h_usd,0)>=10000
     ORDER BY (
       MIN(
         COALESCE(st.vol1h_usd,st.vol24h_usd/24.0),
         COALESCE(st.vol6h_usd/6.0,st.vol24h_usd/24.0),
         st.vol24h_usd/24.0
-      ) * p.fee_ppm / MAX(COALESCE(s.tvl_usd,st.liq_usd),1)
-    ) DESC LIMIT ?`).all(cap) as { address: string }[]).map((row) => row.address);
+      ) * p.fee_ppm / MAX(st.liq_usd,1)
+    ) DESC LIMIT ?`).all(
+      now() - Math.floor(TUNE.marketStatsFreshMs / 1_000), cap,
+    ) as { pool: string; key_fee_ppm: null }[];
+  return retainedRecommendationTargets('address', cap, eligible).map((row) => row.pool);
 };
+
+const RECOMMENDATION_COHORT_RETENTION_SECONDS = 30 * 86_400;
+const upsertRecommendationCohortQ = db.prepare(`INSERT INTO recommendation_cohort(
+    pool,family,admitted_at,last_eligible_at
+  ) VALUES(?,?,?,?) ON CONFLICT(pool,family) DO UPDATE SET
+    last_eligible_at=excluded.last_eligible_at`);
+
+/** Reserve one fifth of each bounded analytics sweep for pools which recently
+ * fell out of the live top set. Current entrants are all admitted before the
+ * split, so cohort membership is deterministic and failure paths keep being
+ * sampled for 30 days. */
+function retainedRecommendationTargets(
+  family: 'address' | 'v4',
+  cap: number,
+  eligible: { pool: string; key_fee_ppm: number | null }[],
+): { pool: string; key_fee_ppm: number | null }[] {
+  const timestamp = now();
+  tx(() => {
+    for (const row of eligible)
+      upsertRecommendationCohortQ.run(row.pool.toLowerCase(), family, timestamp, timestamp);
+  });
+  const retainedSlots = Math.max(1, Math.floor(cap / 5));
+  const liveSlots = Math.max(0, cap - retainedSlots);
+  const live = eligible.slice(0, liveSlots);
+  const used = new Set(live.map((row) => row.pool.toLowerCase()));
+  const eligibleIds = eligible.map((row) => row.pool.toLowerCase());
+  const excludeEligible = eligibleIds.length
+    ? `AND c.pool NOT IN (${eligibleIds.map(() => '?').join(',')})`
+    : '';
+  const retained = db.prepare(`SELECT c.pool,
+      ${family === 'v4' ? 'v.key_fee_ppm' : 'NULL'} AS key_fee_ppm
+    FROM recommendation_cohort c
+    ${family === 'v4' ? 'JOIN v4_pools v ON v.pool_id=c.pool' : 'JOIN pools p ON p.address=c.pool'}
+    WHERE c.family=? AND c.last_eligible_at>=? ${excludeEligible}
+    ORDER BY c.last_eligible_at DESC,c.pool LIMIT ?`).all(
+      family, timestamp - RECOMMENDATION_COHORT_RETENTION_SECONDS,
+      ...eligibleIds, retainedSlots,
+    ) as { pool: string; key_fee_ppm: number | null }[];
+  for (const row of retained) {
+    if (used.has(row.pool.toLowerCase())) continue;
+    live.push(row);
+    used.add(row.pool.toLowerCase());
+    if (live.length >= cap) break;
+  }
+  for (const row of eligible.slice(liveSlots)) {
+    if (live.length >= cap) break;
+    if (used.has(row.pool.toLowerCase())) continue;
+    live.push(row);
+    used.add(row.pool.toLowerCase());
+  }
+  return live;
+}
 
 export function captureAddressTickSamples(addresses: readonly string[], blockNumber: string, timestamp = now()): void {
   const bucket = Math.floor(timestamp / 60) * 60;
@@ -2443,6 +2548,8 @@ export function captureAddressTickSamples(addresses: readonly string[], blockNum
 export function pruneRecommendationHistory(timestamp = now()): void {
   db.prepare('DELETE FROM pool_tick_samples WHERE ts<?').run(timestamp - 30 * 86_400);
   db.prepare('DELETE FROM pool_market_snapshots WHERE ts<?').run(timestamp - 180 * 86_400);
+  db.prepare('DELETE FROM recommendation_cohort WHERE last_eligible_at<?')
+    .run(timestamp - RECOMMENDATION_COHORT_RETENTION_SECONDS);
 }
 
 /**
@@ -2653,15 +2760,16 @@ export const hydrationDemandCount = (): number => (hydrationDemandCountQ.get() a
 
 /** hot set: real TVL, or GT-visible activity, or freshly created */
 export const hotAddrs = (limit?: number): string[] => {
+  const statsCutoff = now() - Math.floor(TUNE.marketStatsFreshMs / 1_000);
   if (limit === undefined)
     return (
       db
         .prepare(
           `SELECT address FROM pool_state WHERE tvl_usd BETWEEN ? AND ?
-           UNION SELECT address FROM pool_stats WHERE vol24h_usd > 0
+           UNION SELECT address FROM pool_stats WHERE updated >= ? AND vol24h_usd > 0
            UNION SELECT address FROM pools WHERE added_ts > ?`,
         )
-        .all(TUNE.hotTvlUsd, TUNE.maxPoolTvlUsd, now() - 3_600) as {
+        .all(TUNE.hotTvlUsd, TUNE.maxPoolTvlUsd, statsCutoff, now() - 3_600) as {
         address: string;
       }[]
     ).map((r) => r.address);
@@ -2686,10 +2794,10 @@ export const hotAddrs = (limit?: number): string[] => {
   add(
     db
       .prepare(
-        `SELECT address FROM pool_stats WHERE vol24h_usd > 0
+        `SELECT address FROM pool_stats WHERE updated >= ? AND vol24h_usd > 0
          ORDER BY vol24h_usd DESC, address LIMIT ?`,
       )
-      .all(cap) as { address: string }[],
+      .all(statsCutoff, cap) as { address: string }[],
   );
   return [...out];
 };

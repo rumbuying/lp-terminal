@@ -38,6 +38,14 @@ import {
 import { getPoolRankApi, getPoolRankSnapshot, POOL_RANK_ENABLED, type PoolRankRow } from './poolRank';
 import { getPairVolumeApi } from './pairVolume';
 import { SerializedResponseCache, type SerializedResponse } from './responseCache';
+import { dataFreshness, type DataFreshness } from './freshness';
+
+const PRICE_SEED_TTL_SECONDS = Math.floor(TUNE.priceSeedFreshMs / 1_000);
+const MARKET_STATS_TTL_SECONDS = Math.floor(TUNE.marketStatsFreshMs / 1_000);
+const marketStatus = (updatedAt: unknown): DataFreshness =>
+  dataFreshness(typeof updatedAt === 'number' ? updatedAt : null, TUNE.marketStatsFreshMs);
+const currentMarketValue = <T>(value: T, updatedAt: unknown): T | null =>
+  marketStatus(updatedAt) === 'fresh' ? value : null;
 
 const JSONH = { 'content-type': 'application/json; charset=utf-8' };
 
@@ -491,7 +499,8 @@ export function canonicalPoolsRequest(
 // 120 of the 120 rows the POOLS tab fetches were fabricated.)
 const ORDER: Record<string, string> = {
   tvl: `ORDER BY (s.tvl_usd IS NULL OR s.tvl_usd >= ${TUNE.maxPoolTvlUsd}), s.tvl_usd DESC, p.address ASC`,
-  vol: 'ORDER BY (st.vol24h_usd IS NULL), st.vol24h_usd DESC, p.address ASC',
+  vol: `ORDER BY (st.vol24h_usd IS NULL OR st.updated < unixepoch() - ${MARKET_STATS_TTL_SECONDS}),
+    st.vol24h_usd DESC, p.address ASC`,
   created: 'ORDER BY (p.created_block IS NULL), p.created_block DESC, p.pair_index DESC, p.address ASC',
 };
 
@@ -700,6 +709,7 @@ function landingCandidates(params: Params, requestedLimit: number): LandingCandi
     add(
       `SELECT address FROM pool_stats INDEXED BY ${proto === null ? 'idx_stats_vol' : 'idx_stats_proto_vol'}
        WHERE ${protoFilter}vol24h_usd IS NOT NULL
+         AND updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
        ORDER BY vol24h_usd DESC LIMIT ?`,
       ...protoValue,
       perSource,
@@ -707,6 +717,7 @@ function landingCandidates(params: Params, requestedLimit: number): LandingCandi
     add(
       `SELECT address FROM pool_stats INDEXED BY ${proto === null ? 'idx_stats_liq' : 'idx_stats_proto_liq'}
        WHERE ${protoFilter}liq_usd IS NOT NULL
+         AND updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
        ORDER BY liq_usd DESC LIMIT ?`,
       ...protoValue,
       perSource,
@@ -750,7 +761,7 @@ const V23_FIELDS = `p.address, p.proto, p.token0, p.token1, p.fee_ppm, p.tick_sp
   s.sqrt_price, s.tick, s.liquidity, s.reserve0, s.reserve1, s.total_supply,
   s.tvl_usd, s.tvl_approx, s.updated AS state_updated,
   st.vol5m_usd, st.vol1h_usd, st.vol6h_usd, st.vol24h_usd,
-  st.txns24h, st.liq_usd, st.source AS stats_source`;
+  st.txns24h, st.liq_usd, st.source AS stats_source, st.updated AS stats_updated`;
 
 /** A match count, and whether it is the total or only a floor. */
 type MatchCount = { n: number; capped: boolean };
@@ -894,6 +905,7 @@ function getV23Pools(params: Params) {
       ? r.sqrt_price !== null && r.tick !== null && r.liquidity !== null
       : r.reserve0 !== null && r.reserve1 !== null && r.total_supply !== null;
     const stateUpdated = typeof r.state_updated === 'number' ? r.state_updated : null;
+    const statsStatus = marketStatus(r.stats_updated);
     const exactStateStale = exactPoolAddress === r.address && (stateUpdated === null || stateUpdated <= staleBefore);
     if (!stateReady || exactStateStale) needsHydration.add(r.address as string);
     return {
@@ -912,13 +924,16 @@ function getV23Pools(params: Params) {
       totalSupply: r.total_supply,
       tvlUsd: r.tvl_usd,
       tvlApprox: r.tvl_approx === 1,
-      vol5mUsd: r.vol5m_usd,
-      vol1hUsd: r.vol1h_usd,
-      vol6hUsd: r.vol6h_usd,
-      vol24hUsd: r.vol24h_usd,
-      txns24h: r.txns24h,
-      gtLiqUsd: r.liq_usd,
+      vol5mUsd: currentMarketValue(r.vol5m_usd, r.stats_updated),
+      vol1hUsd: currentMarketValue(r.vol1h_usd, r.stats_updated),
+      vol6hUsd: currentMarketValue(r.vol6h_usd, r.stats_updated),
+      vol24hUsd: currentMarketValue(r.vol24h_usd, r.stats_updated),
+      txns24h: currentMarketValue(r.txns24h, r.stats_updated),
+      gtLiqUsd: currentMarketValue(r.liq_usd, r.stats_updated),
       statsSource: r.stats_source,
+      statsUpdatedAt: typeof r.stats_updated === 'number' ? r.stats_updated : null,
+      statsStatus,
+      statsTtlSeconds: MARKET_STATS_TTL_SECONDS,
       stateUpdated,
       stateReady,
     };
@@ -930,7 +945,8 @@ function getV23Pools(params: Params) {
     const list = [...tokenAddrs];
     const trs = db
       .prepare(
-        `SELECT address, symbol, decimals, meta_ok, price_usd FROM tokens WHERE address IN (${list.map(() => '?').join(',')})`,
+        `SELECT address, symbol, decimals, meta_ok, price_usd, price_src, price_updated
+         FROM tokens WHERE address IN (${list.map(() => '?').join(',')})`,
       )
       .all(...list) as {
       address: string;
@@ -938,14 +954,22 @@ function getV23Pools(params: Params) {
       decimals: number;
       meta_ok: number;
       price_usd: number | null;
+      price_src: string | null;
+      price_updated: number | null;
     }[];
     for (const t of trs) {
+      const priceStatus = dataFreshness(t.price_updated, TUNE.priceSeedFreshMs);
       tokens[t.address] = {
         address: t.address,
         symbol: t.symbol,
         decimals: t.decimals,
         metaOk: t.meta_ok === 1,
-        priceUsd: t.price_usd,
+        priceUsd: priceStatus === 'fresh' ? t.price_usd : null,
+        lastPriceUsd: t.price_usd,
+        priceSource: t.price_src,
+        priceUpdatedAt: t.price_updated,
+        priceStatus,
+        priceTtlSeconds: PRICE_SEED_TTL_SECONDS,
       };
       if (t.meta_ok === 1) safeTokenMetadata.add(t.address);
     }
@@ -2222,6 +2246,7 @@ export function getV4Pools(params: Params) {
     m_tvl_usd: number | null;
     m_tvl_approx: number | null;
     m_source: string | null;
+    m_stats_updated: number | null;
   };
   // Market stats are joined on every path, cursor page and landing alike: they
   // are keyed by PoolId and have no featured generation, so unlike the Graph
@@ -2229,7 +2254,8 @@ export function getV4Pools(params: Params) {
   const fields = `p.pool_id, p.pool_manager, p.currency0, p.currency1,
     p.tick_spacing, p.hooks, p.created_block,
     m.vol24h_usd AS m_vol24h_usd, m.txns24h AS m_txns24h, m.liq_usd AS m_liq_usd,
-    m.tvl_usd AS m_tvl_usd, m.tvl_approx AS m_tvl_approx, m.source AS m_source`;
+    m.tvl_usd AS m_tvl_usd, m.tvl_approx AS m_tvl_approx, m.source AS m_source,
+    m.stats_updated AS m_stats_updated`;
   const marketJoin = 'LEFT JOIN v4_market_stats m ON m.pool_id = p.pool_id';
   let fetched: V4ApiRow[];
   if (cursorPage) {
@@ -2332,6 +2358,10 @@ export function getV4Pools(params: Params) {
         symbol: token.symbol,
         decimals: token.decimals,
         priceUsd: null,
+        priceSource: null,
+        priceUpdatedAt: null,
+        priceStatus: 'unavailable',
+        priceTtlSeconds: PRICE_SEED_TTL_SECONDS,
       };
   }
 
@@ -2363,12 +2393,17 @@ export function getV4Pools(params: Params) {
       createdBlock: row.created_block,
       // The ranked figure and the material it was derived from, together —
       // the browser recomputes from rawTvl/rawDays and can disagree out loud.
-      tvlUsd: row.m_tvl_usd ?? row.m_liq_usd,
-      tvlApprox: row.m_tvl_usd !== null ? row.m_tvl_approx === 1 : row.m_liq_usd !== null,
-      vol24hUsd: row.m_vol24h_usd,
-      txns24h: row.m_txns24h,
-      gtLiqUsd: row.m_liq_usd,
+      tvlUsd: row.m_tvl_usd ?? currentMarketValue(row.m_liq_usd, row.m_stats_updated),
+      tvlApprox: row.m_tvl_usd !== null
+        ? row.m_tvl_approx === 1
+        : currentMarketValue(row.m_liq_usd, row.m_stats_updated) !== null,
+      vol24hUsd: currentMarketValue(row.m_vol24h_usd, row.m_stats_updated),
+      txns24h: currentMarketValue(row.m_txns24h, row.m_stats_updated),
+      gtLiqUsd: currentMarketValue(row.m_liq_usd, row.m_stats_updated),
       statsSource: row.m_source,
+      statsUpdatedAt: row.m_stats_updated,
+      statsStatus: marketStatus(row.m_stats_updated),
+      statsTtlSeconds: MARKET_STATS_TTL_SECONDS,
       rawTvl0: row.tvl0,
       rawTvl1: row.tvl1,
       rawDays: days.get(row.pool_id) ?? [],
@@ -2439,7 +2474,9 @@ function groupMembersSql(origin: string): { sql: string; args: string[] } {
     args,
     sql: `
       SELECT p.token0 AS token, 'v23' AS family, p.address AS pool_key,
-             s.tvl_usd AS tvl_usd, st.vol24h_usd AS vol24h_usd,
+             s.tvl_usd AS tvl_usd,
+             CASE WHEN st.updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
+                  THEN st.vol24h_usd END AS vol24h_usd,
              p.fee_ppm AS fee_ppm, 1 AS fee_usable
         FROM (${origins.sql}) o
         JOIN pools p ON p.token0 = o.address${v23ProtocolFilter}
@@ -2447,14 +2484,21 @@ function groupMembersSql(origin: string): { sql: string; args: string[] } {
         LEFT JOIN pool_stats st ON st.address = p.address
       UNION ALL
       SELECT p.token1, 'v23', p.address,
-             s.tvl_usd, st.vol24h_usd, p.fee_ppm, 1
+             s.tvl_usd,
+             CASE WHEN st.updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
+                  THEN st.vol24h_usd END,
+             p.fee_ppm, 1
         FROM (${origins.sql}) o
         JOIN pools p ON p.token1 = o.address${v23ProtocolFilter}
         LEFT JOIN pool_state s ON s.address = p.address
         LEFT JOIN pool_stats st ON st.address = p.address
       UNION ALL
       SELECT v.currency0, 'univ4', v.pool_id,
-             COALESCE(m.tvl_usd, m.liq_usd), m.vol24h_usd, v.key_fee_ppm,
+             COALESCE(m.tvl_usd,CASE WHEN m.stats_updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
+                                    THEN m.liq_usd END),
+             CASE WHEN m.stats_updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
+                  THEN m.vol24h_usd END,
+             v.key_fee_ppm,
              CASE WHEN v.key_fee_ppm = ${DYNAMIC_FEE_FLAG} OR v.hooks <> '${HOOKLESS}'
                   THEN 0 ELSE 1 END
         FROM (${origins.sql}) o
@@ -2462,7 +2506,11 @@ function groupMembersSql(origin: string): { sql: string; args: string[] } {
         LEFT JOIN v4_market_stats m ON m.pool_id = v.pool_id
       UNION ALL
       SELECT v.currency1, 'univ4', v.pool_id,
-             COALESCE(m.tvl_usd, m.liq_usd), m.vol24h_usd, v.key_fee_ppm,
+             COALESCE(m.tvl_usd,CASE WHEN m.stats_updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
+                                    THEN m.liq_usd END),
+             CASE WHEN m.stats_updated >= unixepoch() - ${MARKET_STATS_TTL_SECONDS}
+                  THEN m.vol24h_usd END,
+             v.key_fee_ppm,
              CASE WHEN v.key_fee_ppm = ${DYNAMIC_FEE_FLAG} OR v.hooks <> '${HOOKLESS}'
                   THEN 0 ELSE 1 END
         FROM (${origins.sql}) o
@@ -2707,10 +2755,13 @@ function getPoolGroupsFor(request: GroupRequest) {
         totalSupply: r.total_supply,
         tvlUsd: r.tvl_usd,
         tvlApprox: r.tvl_approx === 1,
-        vol24hUsd: r.vol24h_usd,
-        txns24h: r.txns24h,
-        gtLiqUsd: r.liq_usd,
+        vol24hUsd: currentMarketValue(r.vol24h_usd, r.stats_updated),
+        txns24h: currentMarketValue(r.txns24h, r.stats_updated),
+        gtLiqUsd: currentMarketValue(r.liq_usd, r.stats_updated),
         statsSource: r.stats_source,
+        statsUpdatedAt: typeof r.stats_updated === 'number' ? r.stats_updated : null,
+        statsStatus: marketStatus(r.stats_updated),
+        statsTtlSeconds: MARKET_STATS_TTL_SECONDS,
         stateUpdated: typeof r.state_updated === 'number' ? r.state_updated : null,
         stateReady:
           r.proto === 'univ3' || r.proto === 'pancakev3'
@@ -2724,7 +2775,8 @@ function getPoolGroupsFor(request: GroupRequest) {
       .prepare(
         `SELECT p.pool_id, p.pool_manager, p.currency0, p.currency1, p.tick_spacing, p.hooks,
                 p.created_block, s.tvl0, s.tvl1,
-                m.vol24h_usd, m.txns24h, m.liq_usd, m.tvl_usd, m.tvl_approx, m.source
+                m.vol24h_usd, m.txns24h, m.liq_usd, m.tvl_usd, m.tvl_approx, m.source,
+                m.stats_updated
          FROM v4_pools p
          LEFT JOIN v4_pool_stats s ON s.pool_id = p.pool_id
          LEFT JOIN v4_market_stats m ON m.pool_id = p.pool_id
@@ -2743,12 +2795,17 @@ function getPoolGroupsFor(request: GroupRequest) {
         tickSpacing: r.tick_spacing,
         hooks: r.hooks,
         createdBlock: r.created_block,
-        tvlUsd: (r.tvl_usd as number | null) ?? (r.liq_usd as number | null),
-        tvlApprox: r.tvl_usd !== null ? r.tvl_approx === 1 : r.liq_usd !== null,
-        vol24hUsd: r.vol24h_usd,
-        txns24h: r.txns24h,
-        gtLiqUsd: r.liq_usd,
+        tvlUsd: (r.tvl_usd as number | null) ?? currentMarketValue(r.liq_usd, r.stats_updated),
+        tvlApprox: r.tvl_usd !== null
+          ? r.tvl_approx === 1
+          : currentMarketValue(r.liq_usd, r.stats_updated) !== null,
+        vol24hUsd: currentMarketValue(r.vol24h_usd, r.stats_updated),
+        txns24h: currentMarketValue(r.txns24h, r.stats_updated),
+        gtLiqUsd: currentMarketValue(r.liq_usd, r.stats_updated),
         statsSource: r.source,
+        statsUpdatedAt: typeof r.stats_updated === 'number' ? r.stats_updated : null,
+        statsStatus: marketStatus(r.stats_updated),
+        statsTtlSeconds: MARKET_STATS_TTL_SECONDS,
         rawTvl0: r.tvl0,
         rawTvl1: r.tvl1,
         rawDays: [],
@@ -2764,7 +2821,7 @@ function getPoolGroupsFor(request: GroupRequest) {
     // currency may never have appeared in an address-keyed pool.
     for (const row of db
       .prepare(
-        `SELECT address, symbol, decimals, meta_ok, price_usd FROM tokens
+        `SELECT address, symbol, decimals, meta_ok, price_usd, price_src, price_updated FROM tokens
           WHERE address IN (${placeholders})`,
       )
       .all(...list) as Array<{
@@ -2773,14 +2830,23 @@ function getPoolGroupsFor(request: GroupRequest) {
       decimals: number;
       meta_ok: number;
       price_usd: number | null;
-    }>)
+      price_src: string | null;
+      price_updated: number | null;
+    }>) {
+      const priceStatus = dataFreshness(row.price_updated, TUNE.priceSeedFreshMs);
       tokenMeta[row.address] = {
         address: row.address,
         symbol: row.symbol,
         decimals: row.decimals,
         metaOk: row.meta_ok === 1,
-        priceUsd: row.price_usd,
+        priceUsd: priceStatus === 'fresh' ? row.price_usd : null,
+        lastPriceUsd: row.price_usd,
+        priceSource: row.price_src,
+        priceUpdatedAt: row.price_updated,
+        priceStatus,
+        priceTtlSeconds: PRICE_SEED_TTL_SECONDS,
       };
+    }
     for (const row of db
       .prepare(
         `SELECT address, symbol, decimals FROM v4_tokens WHERE address IN (${placeholders})`,
@@ -2791,6 +2857,10 @@ function getPoolGroupsFor(request: GroupRequest) {
         symbol: row.symbol,
         decimals: row.decimals,
         priceUsd: null,
+        priceSource: null,
+        priceUpdatedAt: null,
+        priceStatus: 'unavailable',
+        priceTtlSeconds: PRICE_SEED_TTL_SECONDS,
       };
   }
 
@@ -2896,7 +2966,15 @@ export function getTokens(params: Params) {
   if (HEX40.test(q))
     return {
       tokens: db
-        .prepare('SELECT address, symbol, decimals, price_usd FROM tokens WHERE address = ?')
+        .prepare(`SELECT address, symbol, decimals, price_usd, price_src, price_updated,
+          CASE
+            WHEN price_updated IS NULL THEN 'unavailable'
+            WHEN price_updated > unixepoch() THEN 'unavailable'
+            WHEN price_updated >= unixepoch() - ${PRICE_SEED_TTL_SECONDS} THEN 'fresh'
+            ELSE 'stale'
+          END AS price_status,
+          ${PRICE_SEED_TTL_SECONDS} AS price_ttl_seconds
+          FROM tokens WHERE address = ?`)
         .all(q),
       truncated: false,
     };
@@ -2909,10 +2987,17 @@ export function getTokens(params: Params) {
   const tokens = db
     .prepare(
       `WITH matches AS (
-         SELECT address, symbol, decimals, price_usd ${matching}
+         SELECT address, symbol, decimals, price_usd, price_src, price_updated ${matching}
          LIMIT ${TOKEN_SEARCH_CANDIDATES + 1}
        )
-       SELECT m.address, m.symbol, m.decimals, m.price_usd,
+       SELECT m.address, m.symbol, m.decimals, m.price_usd, m.price_src, m.price_updated,
+              CASE
+                WHEN m.price_updated IS NULL THEN 'unavailable'
+                WHEN m.price_updated > unixepoch() THEN 'unavailable'
+                WHEN m.price_updated >= unixepoch() - ${PRICE_SEED_TTL_SECONDS} THEN 'fresh'
+                ELSE 'stale'
+              END AS price_status,
+              ${PRICE_SEED_TTL_SECONDS} AS price_ttl_seconds,
               (SELECT COUNT(*) FROM pools p WHERE p.token0 = m.address OR p.token1 = m.address) AS pools
        FROM matches m ORDER BY pools DESC LIMIT 20`,
     )
@@ -2950,16 +3035,20 @@ export function getPrices(params: Params) {
     : [];
   const byAddress = new Map(rows.map((row) => [row.address, row]));
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     chainId: CHAIN.id,
     ready: kvGet('ready') === '1',
     prices: Object.fromEntries(addresses.map((address) => {
       const row = byAddress.get(address);
+      const status = dataFreshness(row?.price_updated, TUNE.priceSeedFreshMs);
       return [address, {
-        priceUsd: row?.price_usd ?? null,
+        priceUsd: status === 'fresh' ? row?.price_usd ?? null : null,
+        lastPriceUsd: row?.price_usd ?? null,
         depthUsd: row?.price_depth_usd ?? 0,
         source: row?.price_src ?? null,
         updatedAt: row?.price_updated ?? null,
+        status,
+        ttlSeconds: PRICE_SEED_TTL_SECONDS,
       }];
     })),
   };
@@ -2983,6 +3072,12 @@ export function getHealth() {
   ).n;
   const stateFreshness = db.prepare('SELECT MIN(updated) AS oldest, MAX(updated) AS newest FROM pool_state').get();
   const statsFreshness = db.prepare('SELECT MAX(updated) AS newest FROM pool_stats').get();
+  const priceSourceObservedAt = (db.prepare(`SELECT MAX(price_updated) AS newest FROM tokens
+    WHERE price_src IS NOT NULL AND price_src<>'pool'`).get() as { newest: number | null }).newest;
+  const marketStatsObservedAt = (db.prepare(`SELECT MAX(observed_at) AS newest FROM (
+    SELECT updated AS observed_at FROM pool_stats
+    UNION ALL SELECT stats_updated FROM v4_market_stats WHERE stats_updated IS NOT NULL
+  )`).get() as { newest: number | null }).newest;
   return {
     schemaVersion: 1,
     chainId: CHAIN.id,
@@ -3006,6 +3101,19 @@ export function getHealth() {
     corruptTvlPools: corrupt,
     stateFreshness,
     statsFreshness,
+    dataFreshness: {
+      priceSeeds: {
+        status: dataFreshness(priceSourceObservedAt, TUNE.priceSeedFreshMs),
+        observedAt: priceSourceObservedAt,
+        ttlSeconds: PRICE_SEED_TTL_SECONDS,
+      },
+      marketStats: {
+        status: dataFreshness(marketStatsObservedAt, TUNE.marketStatsFreshMs),
+        observedAt: marketStatsObservedAt,
+        ttlSeconds: MARKET_STATS_TTL_SECONDS,
+      },
+      poolRank: getPoolRankApi().status,
+    },
     clHydration: {
       policy: kvGet('cl_hydration_policy') || null,
       strictReadyGate: false,
@@ -3069,6 +3177,8 @@ function rankPriorIndex(): { generatedAt: number; byAddress: Map<string, PoolRan
   if (!POOL_RANK_ENABLED) return null;
   const snapshot = getPoolRankSnapshot();
   if (!snapshot) return null;
+  if (snapshot.sourceStatus !== 'fresh') return null;
+  if (dataFreshness(snapshot.sourceAsOf, TUNE.poolRankGtCacheMaxAgeMs) !== 'fresh') return null;
   if (now() - snapshot.generatedAt > 2 * (TUNE.poolRankMs / 1000)) return null;
   const byAddress = new Map<string, PoolRankRow>();
   for (const row of snapshot.rows) byAddress.set(row.address.toLowerCase(), row);
@@ -3121,6 +3231,11 @@ const RECOMMENDATION_CANONICAL_KEY = '80|10000|10000';
 const RECOMMENDATION_HISTORY_TTL_MS = 60_000;
 const RECOMMENDATION_RESPONSE_TTL_MS = 60_000;
 const RECOMMENDATION_HISTORY_MEMO_CAP = 512;
+const RECOMMENDATION_STATE_TTL_SECONDS = 600;
+const RECOMMENDATION_SNAPSHOT_MAX_AGE_MS = Math.max(
+  2 * TUNE.recommendationCandidatesMs,
+  TUNE.marketStatsFreshMs,
+);
 
 type RecommendationHistoryRow = Record<string, unknown>;
 type RecommendationHistory = { marketHistory: RecommendationHistoryRow[]; tickHistory: RecommendationHistoryRow[]; at: number };
@@ -3130,15 +3245,22 @@ let recommendationSnapshot: { at: number; body: string } | null = null;
 let recommendationSnapshotRequestedAt: number | null = null;
 let recommendationSnapshotWorkerRunning = false;
 
-const recommendationMarketQ = db.prepare(`SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
-    AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,
-    AVG(vol24h_usd) AS vol24hUsd
-  FROM pool_market_snapshots WHERE pool=? AND ts>=?
-  GROUP BY CAST(ts/3600 AS INTEGER) ORDER BY ts`);
+const recommendationMarketQ = db.prepare(`WITH hourly AS (
+    SELECT CAST(ts/3600 AS INTEGER)*3600 AS ts,
+      AVG(vol1h_usd) AS vol1hUsd,AVG(vol6h_usd) AS vol6hUsd,
+      AVG(vol24h_usd) AS vol24hUsd,MAX(ts) AS sampleTs
+    FROM pool_market_snapshots WHERE pool=? AND ts>=?
+    GROUP BY CAST(ts/3600 AS INTEGER)
+  )
+  SELECT hourly.ts,hourly.vol1hUsd,hourly.vol6hUsd,hourly.vol24hUsd,
+    sample.liquidity AS activeLiquidity,sample.tick,sample.source
+  FROM hourly LEFT JOIN pool_market_snapshots sample
+    ON sample.pool=? AND sample.ts=hourly.sampleTs
+  ORDER BY hourly.ts`);
 const recommendationRecentTickQ = db.prepare(
-  'SELECT ts,tick FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts',
+  'SELECT ts,tick,block_number AS blockNumber FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts',
 );
-const recommendationHistoricTickQ = db.prepare(`SELECT sample.ts,sample.tick
+const recommendationHistoricTickQ = db.prepare(`SELECT sample.ts,sample.tick,sample.block_number AS blockNumber
   FROM pool_tick_samples sample JOIN (
     SELECT MAX(ts) AS ts FROM pool_tick_samples
     WHERE pool=? AND ts>=? AND ts<? GROUP BY CAST(ts/600 AS INTEGER)
@@ -3148,7 +3270,9 @@ const recommendationHistoricTickQ = db.prepare(`SELECT sample.ts,sample.tick
 function recommendationHistoryFor(identity: string, timestamp: number): RecommendationHistory {
   const memoed = recommendationHistoryMemo.get(identity);
   if (memoed && Date.now() - memoed.at < RECOMMENDATION_HISTORY_TTL_MS) return memoed;
-  const marketHistory = recommendationMarketQ.all(identity, timestamp - 30 * 86_400) as RecommendationHistoryRow[];
+  const marketHistory = recommendationMarketQ.all(
+    identity, timestamp - 30 * 86_400, identity,
+  ) as RecommendationHistoryRow[];
   const tickHistory = [
     ...recommendationHistoricTickQ.all(identity, timestamp - 7 * 86_400, timestamp - 30 * 3_600, identity),
     ...recommendationRecentTickQ.all(identity, timestamp - 30 * 3_600),
@@ -3215,6 +3339,8 @@ export function getRecommendationCandidatesCached(params: Params): string {
         : `first build running for ${Math.round((Date.now() - recommendationSnapshotRequestedAt) / 1000)}s`;
       throw new ApiCapacityError(`recommendation candidates snapshot is warming up (${age})`);
     }
+    if (Date.now() - recommendationSnapshot.at > RECOMMENDATION_SNAPSHOT_MAX_AGE_MS)
+      throw new ApiCapacityError('recommendation candidates snapshot is stale');
     return recommendationSnapshot.body;
   }
   const hit = recommendationResponseCache.get(key);
@@ -3240,15 +3366,24 @@ export function getRecommendationCandidates(params: Params) {
   const minTvl = Math.max(Number(params.get('min_tvl')) || 10_000, 0);
   const minVolume = Math.max(Number(params.get('min_volume')) || 10_000, 0);
   const timestamp = now();
+  const priceCutoff = timestamp - PRICE_SEED_TTL_SECONDS;
+  const statsCutoff = timestamp - MARKET_STATS_TTL_SECONDS;
+  const stateCutoff = timestamp - RECOMMENDATION_STATE_TTL_SECONDS;
   const addressSelect = `SELECT
       p.address AS identity,p.address AS pool,NULL AS pool_id,p.proto,
       p.token0,p.token1,p.fee_ppm,p.fee_ppm AS key_fee_ppm,
       p.unstaked_fee_ppm,p.tick_spacing,NULL AS hooks,
-      t0.symbol AS symbol0,t0.decimals AS decimals0,t0.price_usd AS token0_usd,
-      t1.symbol AS symbol1,t1.decimals AS decimals1,t1.price_usd AS token1_usd,
+      t0.symbol AS symbol0,t0.decimals AS decimals0,
+      CASE WHEN p.token0='${ADDR.STABLE.toLowerCase()}' THEN 1
+           WHEN t0.price_updated>=${priceCutoff} THEN t0.price_usd END AS token0_usd,
+      t0.price_updated AS token0_price_updated,
+      t1.symbol AS symbol1,t1.decimals AS decimals1,
+      CASE WHEN p.token1='${ADDR.STABLE.toLowerCase()}' THEN 1
+           WHEN t1.price_updated>=${priceCutoff} THEN t1.price_usd END AS token1_usd,
+      t1.price_updated AS token1_price_updated,
       s.sqrt_price,s.tick,s.liquidity,s.staked_liquidity,s.reward_rate,
       s.period_finish,s.gauge_alive,s.updated AS state_updated,
-      COALESCE(s.tvl_usd,st.liq_usd) AS tvl_usd,
+      st.liq_usd AS tvl_usd,
       st.vol1h_usd,st.vol6h_usd,st.vol24h_usd,st.updated AS stats_updated
     FROM pools p
     JOIN pool_state s ON s.address=p.address
@@ -3257,14 +3392,15 @@ export function getRecommendationCandidates(params: Params) {
     JOIN tokens t1 ON t1.address=p.token1
     WHERE p.proto IN ('up33cl','univ3','pancakev3')
       AND s.sqrt_price IS NOT NULL AND s.tick IS NOT NULL AND s.liquidity IS NOT NULL
-      AND COALESCE(s.tvl_usd,st.liq_usd,0)>=?
+      AND s.updated>=${stateCutoff} AND st.updated>=${statsCutoff}
+      AND COALESCE(st.liq_usd,0)>=?
       AND COALESCE(st.vol24h_usd,0)>=?`;
   const feeOrder = ` ORDER BY (
       MIN(
         COALESCE(st.vol1h_usd,st.vol24h_usd/24.0),
         COALESCE(st.vol6h_usd/6.0,st.vol24h_usd/24.0),
         st.vol24h_usd/24.0
-      ) * p.fee_ppm / MAX(COALESCE(s.tvl_usd,st.liq_usd),1)
+      ) * p.fee_ppm / MAX(st.liq_usd,1)
     ) DESC LIMIT ?`;
   const addressRows = db.prepare(addressSelect + feeOrder)
     .all(minTvl, minVolume, limit) as RecommendationRow[];
@@ -3279,13 +3415,23 @@ export function getRecommendationCandidates(params: Params) {
       v.currency0 AS token0,v.currency1 AS token1,r.lp_fee AS fee_ppm,
       v.key_fee_ppm,0 AS unstaked_fee_ppm,v.tick_spacing,v.hooks,
       t0.symbol AS symbol0,t0.decimals AS decimals0,
-      COALESCE(p0.price_usd,CASE WHEN v.currency0=? THEN pn.price_usd END) AS token0_usd,
+      COALESCE(
+        CASE WHEN v.currency0='${ADDR.STABLE.toLowerCase()}' THEN 1 END,
+        CASE WHEN p0.price_updated>=${priceCutoff} THEN p0.price_usd END,
+        CASE WHEN v.currency0=? AND pn.price_updated>=${priceCutoff} THEN pn.price_usd END
+      ) AS token0_usd,
+      COALESCE(p0.price_updated,CASE WHEN v.currency0=? THEN pn.price_updated END) AS token0_price_updated,
       t1.symbol AS symbol1,t1.decimals AS decimals1,
-      COALESCE(p1.price_usd,CASE WHEN v.currency1=? THEN pn.price_usd END) AS token1_usd,
+      COALESCE(
+        CASE WHEN v.currency1='${ADDR.STABLE.toLowerCase()}' THEN 1 END,
+        CASE WHEN p1.price_updated>=${priceCutoff} THEN p1.price_usd END,
+        CASE WHEN v.currency1=? AND pn.price_updated>=${priceCutoff} THEN pn.price_usd END
+      ) AS token1_usd,
+      COALESCE(p1.price_updated,CASE WHEN v.currency1=? THEN pn.price_updated END) AS token1_price_updated,
       r.sqrt_price,r.tick,r.liquidity,r.liquidity AS staked_liquidity,
       '0' AS reward_rate,0 AS period_finish,0 AS gauge_alive,r.updated AS state_updated,
-      COALESCE(m.tvl_usd,m.liq_usd) AS tvl_usd,
-      m.vol1h_usd,m.vol6h_usd,m.vol24h_usd,m.updated AS stats_updated
+      m.liq_usd AS tvl_usd,
+      m.vol1h_usd,m.vol6h_usd,m.vol24h_usd,m.stats_updated
     FROM v4_pools v
     JOIN v4_recommendation_state r ON r.pool_id=v.pool_id
     JOIN v4_market_stats m ON m.pool_id=v.pool_id
@@ -3294,15 +3440,18 @@ export function getRecommendationCandidates(params: Params) {
     LEFT JOIN tokens p0 ON p0.address=v.currency0
     LEFT JOIN tokens p1 ON p1.address=v.currency1
     LEFT JOIN tokens pn ON pn.address=?
-    WHERE COALESCE(m.tvl_usd,m.liq_usd,0)>=? AND COALESCE(m.vol24h_usd,0)>=?
+    WHERE r.updated>=${stateCutoff} AND m.stats_updated>=${statsCutoff}
+      AND COALESCE(m.liq_usd,0)>=? AND COALESCE(m.vol24h_usd,0)>=?
     ORDER BY (
       MIN(
         COALESCE(m.vol1h_usd,m.vol24h_usd/24.0),
         COALESCE(m.vol6h_usd/6.0,m.vol24h_usd/24.0),
         m.vol24h_usd/24.0
-      ) * r.lp_fee / MAX(COALESCE(m.tvl_usd,m.liq_usd),1)
+      ) * r.lp_fee / MAX(m.liq_usd,1)
     ) DESC LIMIT ?`)
     .all(
+      '0x0000000000000000000000000000000000000000',
+      '0x0000000000000000000000000000000000000000',
       '0x0000000000000000000000000000000000000000',
       '0x0000000000000000000000000000000000000000',
       ADDR.WNATIVE.toLowerCase(), minTvl, minVolume, limit,
@@ -3328,15 +3477,27 @@ export function getRecommendationCandidates(params: Params) {
   }
   const rows = [...merged.values()];
   const up = CHAIN.gov
-    ? db.prepare('SELECT price_usd FROM tokens WHERE address=?').get(CHAIN.gov.UP.toLowerCase()) as { price_usd: number | null } | undefined
+    ? db.prepare('SELECT price_usd,price_updated FROM tokens WHERE address=? AND price_updated>=?')
+      .get(CHAIN.gov.UP.toLowerCase(), priceCutoff) as { price_usd: number | null; price_updated: number } | undefined
     : undefined;
   const stable = ADDR.STABLE.toLowerCase();
   const wrapped = ADDR.WNATIVE.toLowerCase();
   const rankPriors = rankPriorIndex();
+  const sourceAsOf = rows.length
+    ? Math.min(...rows.flatMap((row) => [Number(row.stats_updated), Number(row.state_updated)]))
+    : null;
+  const status: DataFreshness = kvGet('ready') === '1'
+    ? dataFreshness(sourceAsOf, Math.min(TUNE.marketStatsFreshMs, RECOMMENDATION_STATE_TTL_SECONDS * 1_000), timestamp)
+    : 'unavailable';
   return {
     ready: kvGet('ready') === '1',
     chainId: CHAIN.id,
     asof: timestamp,
+    freshness: {
+      status,
+      observedAt: sourceAsOf,
+      ttlSeconds: Math.min(MARKET_STATS_TTL_SECONDS, RECOMMENDATION_STATE_TTL_SECONDS),
+    },
     candidates: rows.map((row) => {
       const identity = String(row.identity);
       const token0 = String(row.token0);
@@ -3355,6 +3516,14 @@ export function getRecommendationCandidates(params: Params) {
         decimals0: Number(row.decimals0), decimals1: Number(row.decimals1),
         token0Usd: row.token0_usd === null ? null : Number(row.token0_usd),
         token1Usd: row.token1_usd === null ? null : Number(row.token1_usd),
+        token0PriceUpdatedAt: row.token0_price_updated === null ? null : Number(row.token0_price_updated),
+        token1PriceUpdatedAt: row.token1_price_updated === null ? null : Number(row.token1_price_updated),
+        token0PriceStatus: token0 === stable
+          ? 'fresh'
+          : dataFreshness(Number(row.token0_price_updated), TUNE.priceSeedFreshMs, timestamp),
+        token1PriceStatus: token1 === stable
+          ? 'fresh'
+          : dataFreshness(Number(row.token1_price_updated), TUNE.priceSeedFreshMs, timestamp),
         token0IsRisk: token1 === stable ? true : token0 === stable ? false : token0 === wrapped ? false : true,
         hasStableQuote: token0 === stable || token1 === stable,
         feePpm: Number(row.fee_ppm),
@@ -3370,6 +3539,8 @@ export function getRecommendationCandidates(params: Params) {
         statsUpdatedAt: Number(row.stats_updated), stateUpdatedAt: Number(row.state_updated),
         gaugeAlive: Number(row.gauge_alive) === 1, rewardRate: String(row.reward_rate),
         periodFinish: Number(row.period_finish), upUsd: up?.price_usd ?? null,
+        upPriceUpdatedAt: up?.price_updated ?? null,
+        upPriceStatus: dataFreshness(up?.price_updated, TUNE.priceSeedFreshMs, timestamp),
         marketHistory: history.marketHistory,
         tickHistory: history.tickHistory,
         ...(rankPrior

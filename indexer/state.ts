@@ -38,6 +38,7 @@
 import { erc20Abi, formatUnits } from 'viem';
 import { clGaugeAbi, clPoolAbi, uniV2PairAbi, uniV3PoolAbi, voterAbi } from '../src/abi';
 import { ADDR, CHAIN, TUNE, log, now } from './config';
+import { freshEnough } from './freshness';
 import { mc, ok, type Call } from './rpc';
 import {
   clPoolRowsPage,
@@ -350,7 +351,7 @@ async function sweepRows(rows: PoolRow[], countReadableCl = false): Promise<numb
 }
 
 /** `hops` = distance from a credible seed: 0 = GT/anchor, 1..n = propagated */
-type PriceEntry = { usd: number; depth: number; src: string; hops: number };
+type PriceEntry = { usd: number; depth: number; src: string; hops: number; sourceUpdated: number };
 
 /** a price outside this band is a broken pool, not a market */
 export const plausibleUsd = (x: number | null | undefined): x is number =>
@@ -368,10 +369,11 @@ type StateRow = {
   tick: number | null;
 };
 
-type RawStateRow = StateRow & { dec0: number; dec1: number };
+type RawStateRow = StateRow & { dec0: number; dec1: number; state_updated: number };
 const rawStatePageQ = db.prepare(
   `SELECT p.address, p.proto, p.token0, p.token1,
           s.reserve0, s.reserve1, s.sqrt_price, s.liquidity, s.tick,
+          s.updated AS state_updated,
           COALESCE(t0.decimals, 18) AS dec0, COALESCE(t1.decimals, 18) AS dec1
    FROM pools p
    JOIN pool_state s ON s.address = p.address
@@ -493,19 +495,22 @@ CREATE TEMP TABLE IF NOT EXISTS reprice_states (
   token1 TEXT NOT NULL,
   balance0 REAL NOT NULL,
   balance1 REAL NOT NULL,
-  spot1_per_0 REAL
+  spot1_per_0 REAL,
+  state_updated INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TEMP TABLE IF NOT EXISTS reprice_prices (
   address TEXT PRIMARY KEY,
   usd REAL NOT NULL,
   depth REAL NOT NULL,
   src TEXT NOT NULL,
-  hops INTEGER NOT NULL
+  hops INTEGER NOT NULL,
+  source_updated INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TEMP TABLE IF NOT EXISTS reprice_quotes (
   token TEXT NOT NULL,
   usd REAL NOT NULL,
-  depth REAL NOT NULL
+  depth REAL NOT NULL,
+  source_updated INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS temp.idx_reprice_quotes_token_depth
   ON reprice_quotes(token, depth DESC, usd);
@@ -525,13 +530,15 @@ const clearRepriceStage = () =>
   `);
 
 const insertRepriceStateQ = db.prepare(
-  `INSERT INTO temp.reprice_states (address, token0, token1, balance0, balance1, spot1_per_0)
-   VALUES (?, ?, ?, ?, ?, ?)`,
+  `INSERT INTO temp.reprice_states (address, token0, token1, balance0, balance1, spot1_per_0, state_updated)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`,
 );
-const insertQuoteQ = db.prepare('INSERT INTO temp.reprice_quotes (token, usd, depth) VALUES (?, ?, ?)');
+const insertQuoteQ = db.prepare(
+  'INSERT INTO temp.reprice_quotes (token, usd, depth, source_updated) VALUES (?, ?, ?, ?)',
+);
 const insertRepricePriceQ = db.prepare(
-  `INSERT INTO temp.reprice_prices (address, usd, depth, src, hops)
-   VALUES (?, ?, ?, 'pool', ?)`,
+  `INSERT INTO temp.reprice_prices (address, usd, depth, src, hops, source_updated)
+   VALUES (?, ?, ?, 'pool', ?, ?)`,
 );
 const insertRepriceTvlQ = db.prepare('INSERT INTO temp.reprice_tvl (address, tvl_usd, tvl_approx) VALUES (?, ?, ?)');
 
@@ -542,20 +549,26 @@ type HopStateRow = {
   balance0: number;
   balance1: number;
   spot1_per_0: number | null;
+  state_updated: number;
   p0_usd: number | null;
   p0_depth: number | null;
   p0_src: string | null;
   p0_hops: number | null;
+  p0_updated: number | null;
   p1_usd: number | null;
   p1_depth: number | null;
   p1_src: string | null;
   p1_hops: number | null;
+  p1_updated: number | null;
 };
 
 const pricedStatePageQ = db.prepare(
   `SELECT s.address, s.token0, s.token1, s.balance0, s.balance1, s.spot1_per_0,
+          s.state_updated,
           p0.usd AS p0_usd, p0.depth AS p0_depth, p0.src AS p0_src, p0.hops AS p0_hops,
-          p1.usd AS p1_usd, p1.depth AS p1_depth, p1.src AS p1_src, p1.hops AS p1_hops
+          p0.source_updated AS p0_updated,
+          p1.usd AS p1_usd, p1.depth AS p1_depth, p1.src AS p1_src, p1.hops AS p1_hops,
+          p1.source_updated AS p1_updated
    FROM temp.reprice_states s
    LEFT JOIN temp.reprice_prices p0 ON p0.address = s.token0
    LEFT JOIN temp.reprice_prices p1 ON p1.address = s.token1
@@ -569,7 +582,7 @@ const quoteTokensPageQ = db.prepare(
    WHERE token > ? ORDER BY token LIMIT ?`,
 );
 const topQuotesQ = db.prepare(
-  `SELECT usd, depth FROM temp.reprice_quotes
+  `SELECT usd, depth, source_updated FROM temp.reprice_quotes
    WHERE token = ? ORDER BY depth DESC, usd LIMIT ?`,
 );
 
@@ -578,8 +591,11 @@ const stagedPrice = (
   depth: number | null,
   src: string | null,
   hops: number | null,
+  sourceUpdated: number | null,
 ): PriceEntry | undefined =>
-  plausibleUsd(usd) && depth !== null && hops !== null ? { usd, depth, src: src ?? '?', hops } : undefined;
+  plausibleUsd(usd) && depth !== null && hops !== null && sourceUpdated !== null
+    ? { usd, depth, src: src ?? '?', hops, sourceUpdated }
+    : undefined;
 
 /**
  * Full pricing pass: BFS USD prices out from the GT/anchor seeds, then
@@ -589,19 +605,22 @@ const stagedPrice = (
  */
 export function reprice(): { priced: number; tvlPools: number } {
   clearRepriceStage();
+  const timestamp = now();
+  const freshSeedCutoff = timestamp - Math.floor(TUNE.priceSeedFreshMs / 1_000);
 
   // Seeds are copied set-wise, so hundreds of thousands of unpriced metadata
   // rows never cross the SQLite/V8 boundary.
   db.prepare(
-    `INSERT INTO temp.reprice_prices (address, usd, depth, src, hops)
-     SELECT address, price_usd, price_depth_usd, price_src, 0 FROM tokens
+    `INSERT INTO temp.reprice_prices (address, usd, depth, src, hops, source_updated)
+     SELECT address, price_usd, price_depth_usd, price_src, 0, price_updated FROM tokens
      WHERE price_src IS NOT NULL AND price_src <> 'pool'
+       AND price_updated BETWEEN ? AND ?
        AND price_usd BETWEEN ? AND ?`,
-  ).run(TUNE.minTokenUsd, TUNE.maxTokenUsd);
+  ).run(freshSeedCutoff, timestamp, TUNE.minTokenUsd, TUNE.maxTokenUsd);
   db.prepare(
-    `INSERT OR IGNORE INTO temp.reprice_prices (address, usd, depth, src, hops)
-     VALUES (?, 1, 1, 'anchor', 0)`,
-  ).run(ADDR.STABLE.toLowerCase());
+    `INSERT OR REPLACE INTO temp.reprice_prices (address, usd, depth, src, hops, source_updated)
+     VALUES (?, 1, 1, 'anchor', 0, ?)`,
+  ).run(ADDR.STABLE.toLowerCase(), timestamp);
 
   // Decode BigInt balances and v3 spot exactly once, one state page at a time.
   let cursor = '';
@@ -612,7 +631,10 @@ export function reprice(): { priced: number; tvlPools: number } {
       for (const s of rows) {
         const b0 = Number(formatUnits(BigInt(s.reserve0), s.dec0));
         const b1 = Number(formatUnits(BigInt(s.reserve1), s.dec1));
-        insertRepriceStateQ.run(s.address, s.token0, s.token1, b0, b1, spotOf(s, b0, b1, s.dec0, s.dec1));
+        insertRepriceStateQ.run(
+          s.address, s.token0, s.token1, b0, b1,
+          spotOf(s, b0, b1, s.dec0, s.dec1), s.state_updated,
+        );
       }
     });
     cursor = rows[rows.length - 1].address;
@@ -634,12 +656,16 @@ export function reprice(): { priced: number; tvlPools: number } {
           if (s.p0_hops === hop - 1 && s.p1_usd === null && s.balance1 > 0) {
             const depth = s.p0_hops === 0 ? s.balance0 * s.p0_usd! : Math.min(s.balance0 * s.p0_usd!, s.p0_depth!);
             const usd = s.p0_usd! / p1per0;
-            if (depth >= TUNE.minDepthUsd && plausibleUsd(usd)) insertQuoteQ.run(s.token1, usd, depth);
+            const sourceUpdated = Math.min(s.state_updated, s.p0_updated!);
+            if (sourceUpdated >= freshSeedCutoff && depth >= TUNE.minDepthUsd && plausibleUsd(usd))
+              insertQuoteQ.run(s.token1, usd, depth, sourceUpdated);
           }
           if (s.p1_hops === hop - 1 && s.p0_usd === null && s.balance0 > 0) {
             const depth = s.p1_hops === 0 ? s.balance1 * s.p1_usd! : Math.min(s.balance1 * s.p1_usd!, s.p1_depth!);
             const usd = s.p1_usd! * p1per0;
-            if (depth >= TUNE.minDepthUsd && plausibleUsd(usd)) insertQuoteQ.run(s.token0, usd, depth);
+            const sourceUpdated = Math.min(s.state_updated, s.p1_updated!);
+            if (sourceUpdated >= freshSeedCutoff && depth >= TUNE.minDepthUsd && plausibleUsd(usd))
+              insertQuoteQ.run(s.token0, usd, depth, sourceUpdated);
           }
         }
       });
@@ -660,12 +686,14 @@ export function reprice(): { priced: number; tvlPools: number } {
           const qs = topQuotesQ.all(token, MAX_QUOTES) as {
             usd: number;
             depth: number;
+            source_updated: number;
           }[];
           insertRepricePriceQ.run(
             token,
             weightedMedian(qs),
             qs.reduce((max, q) => Math.max(max, q.depth), 0),
             hop,
+            Math.min(...qs.map((q) => q.source_updated)),
           );
         }
       });
@@ -682,8 +710,8 @@ export function reprice(): { priced: number; tvlPools: number } {
     if (!rows.length) break;
     tx(() => {
       for (const s of rows) {
-        const p0 = stagedPrice(s.p0_usd, s.p0_depth, s.p0_src, s.p0_hops);
-        const p1 = stagedPrice(s.p1_usd, s.p1_depth, s.p1_src, s.p1_hops);
+        const p0 = stagedPrice(s.p0_usd, s.p0_depth, s.p0_src, s.p0_hops, s.p0_updated);
+        const p1 = stagedPrice(s.p1_usd, s.p1_depth, s.p1_src, s.p1_hops, s.p1_updated);
         const u0 = p0 ? s.balance0 * p0.usd : null;
         const u1 = p1 ? s.balance1 * p1.usd : null;
         const { tvl, approx } = tvlOf(u0, credible(p0), u1, credible(p1), capOf(p0), capOf(p1));
@@ -700,13 +728,13 @@ export function reprice(): { priced: number; tvlPools: number } {
     clearDerivedPrices();
     db.prepare(
       `INSERT INTO tokens (address, price_usd, price_depth_usd, price_src, price_updated)
-       SELECT address, usd, depth, src, ? FROM temp.reprice_prices WHERE src = 'pool'
+       SELECT address, usd, depth, src, source_updated FROM temp.reprice_prices WHERE src = 'pool'
        ON CONFLICT(address) DO UPDATE SET
          price_usd = excluded.price_usd,
          price_depth_usd = excluded.price_depth_usd,
          price_src = excluded.price_src,
          price_updated = excluded.price_updated`,
-    ).run(now());
+    ).run();
     db.exec(
       `UPDATE pool_state AS current SET
          tvl_usd = staged.tvl_usd,
@@ -737,20 +765,34 @@ type StoredTvlRow = {
   p0_usd: number | null;
   p0_depth: number | null;
   p0_src: string | null;
+  p0_updated: number | null;
   p1_usd: number | null;
   p1_depth: number | null;
   p1_src: string | null;
+  p1_updated: number | null;
 };
 const storedTvlRowQ = db.prepare(
   `SELECT p.address, p.token0, p.token1, s.reserve0, s.reserve1,
           COALESCE(t0.decimals, 18) AS dec0, COALESCE(t1.decimals, 18) AS dec1,
           t0.price_usd AS p0_usd, t0.price_depth_usd AS p0_depth, t0.price_src AS p0_src,
-          t1.price_usd AS p1_usd, t1.price_depth_usd AS p1_depth, t1.price_src AS p1_src
+          t0.price_updated AS p0_updated,
+          t1.price_usd AS p1_usd, t1.price_depth_usd AS p1_depth, t1.price_src AS p1_src,
+          t1.price_updated AS p1_updated
    FROM pools p JOIN pool_state s ON s.address = p.address
    LEFT JOIN tokens t0 ON t0.address = p.token0
    LEFT JOIN tokens t1 ON t1.address = p.token1
    WHERE p.address = ?`,
 );
+
+const storedFreshPrice = (
+  usd: number | null,
+  depth: number | null,
+  src: string | null,
+  sourceUpdated: number | null,
+): PriceEntry | undefined =>
+  freshEnough(sourceUpdated, TUNE.priceSeedFreshMs)
+    ? stagedPrice(usd, depth, src, src === 'pool' ? 1 : 0, sourceUpdated)
+    : undefined;
 
 /** Cheap TVL refresh for an explicit subset using already-stored prices. */
 export function computeTvlFor(addrs: string[]): void {
@@ -759,8 +801,8 @@ export function computeTvlFor(addrs: string[]): void {
     for (const a of addrs) {
       const s = storedTvlRowQ.get(a.toLowerCase()) as StoredTvlRow | undefined;
       if (!s) continue;
-      const p0 = stagedPrice(s.p0_usd, s.p0_depth, s.p0_src, s.p0_src === 'pool' ? 1 : 0);
-      const p1 = stagedPrice(s.p1_usd, s.p1_depth, s.p1_src, s.p1_src === 'pool' ? 1 : 0);
+      const p0 = storedFreshPrice(s.p0_usd, s.p0_depth, s.p0_src, s.p0_updated);
+      const p1 = storedFreshPrice(s.p1_usd, s.p1_depth, s.p1_src, s.p1_updated);
       const u0 = p0 ? Number(formatUnits(BigInt(s.reserve0), s.dec0)) * p0.usd : null;
       const u1 = p1 ? Number(formatUnits(BigInt(s.reserve1), s.dec1)) * p1.usd : null;
       const { tvl, approx } = tvlOf(u0, credible(p0), u1, credible(p1), capOf(p0), capOf(p1));
@@ -789,8 +831,8 @@ export function computeV4Tvl(): number {
   let priced = 0;
   tx(() => {
     for (const row of rows) {
-      const p0 = stagedPrice(row.p0_usd, row.p0_depth, row.p0_src, row.p0_src === 'pool' ? 1 : 0);
-      const p1 = stagedPrice(row.p1_usd, row.p1_depth, row.p1_src, row.p1_src === 'pool' ? 1 : 0);
+      const p0 = storedFreshPrice(row.p0_usd, row.p0_depth, row.p0_src, row.p0_updated);
+      const p1 = storedFreshPrice(row.p1_usd, row.p1_depth, row.p1_src, row.p1_updated);
       const u0 = p0 && row.tvl0 !== null ? row.tvl0 * p0.usd : null;
       const u1 = p1 && row.tvl1 !== null ? row.tvl1 * p1.usd : null;
       const { tvl, approx } = tvlOf(u0, credible(p0), u1, credible(p1), capOf(p0), capOf(p1));

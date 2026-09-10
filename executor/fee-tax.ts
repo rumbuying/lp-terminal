@@ -3,9 +3,11 @@ import { ADDR } from '../src/config/addresses'
 import { EXECUTOR } from './config'
 import type { KyberRouteSummary } from './kyber'
 import type { SwapIntent } from './rebalance'
+import { INCOME_RETENTION_BPS } from '../shared/strategy/income-retention'
 
 export const FEE_TAX_THRESHOLD_USDG = 1_000_000n
-export const FEE_TAX_BPS = 1_000n
+/** Backward-compatible name for durable contexts created before the UI rename. */
+export const FEE_TAX_BPS = BigInt(INCOME_RETENTION_BPS)
 /** Bump when the deterministic income-tax funding policy changes. */
 export const FEE_TAX_SELECTION_VERSION = 2
 
@@ -34,7 +36,9 @@ const WRAPPED_NATIVE = EXECUTOR.network.wrappedNative
 /**
  * Tax actual strategy income: net LP fees plus the final quote token received
  * from settling a claimed UP reward through WETH. Income worth exactly 1 USDG is not taxed; once the
- * combined executable value is greater than 1 USDG, 10% is withheld. The
+ * combined executable value is greater than 1 USDG, 10% is retained in the
+ * owner's execution wallet and excluded from the next LP deployment. It is
+ * not transferred to a platform treasury. The
  * largest income leg funds the tax so dust legs cannot create extra swaps.
  */
 export async function planFeeTax(args: {

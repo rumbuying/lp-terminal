@@ -9,6 +9,7 @@ import { receiptLiquidityFlows, receiptTokenDelta } from './receipts'
 import { quoteTurnover } from './risk'
 
 export type OriginalMintCostBasis = {
+  basisVersion: 2
   kind: 'original_mint'
   tokenId: string
   txHash: string
@@ -19,7 +20,8 @@ export type OriginalMintCostBasis = {
   amount0: string
   amount1: string
   valueQuoteRaw: string
-  openingGasQuoteRaw: string
+  /** Exact receipt cost in native wei; conversion is a separate pinned mark. */
+  openingGasWeiRaw: string
 }
 
 const isV4 = (config: StrategyConfig): boolean => config.protocol === 'univ4'
@@ -121,6 +123,7 @@ export async function reconstructOriginalMintCostBasis(
     + quoteTurnover(flows.minted1, snapshot.token1 as Address, config, snapshot, state[0])
   const openingGas = receipt.gasUsed * receipt.effectiveGasPrice
   return {
+    basisVersion: 2,
     kind: 'original_mint',
     tokenId: tokenId.toString(),
     txHash,
@@ -131,6 +134,6 @@ export async function reconstructOriginalMintCostBasis(
     amount0: flows.minted0.toString(),
     amount1: flows.minted1.toString(),
     valueQuoteRaw: value.toString(),
-    openingGasQuoteRaw: openingGas.toString(),
+    openingGasWeiRaw: openingGas.toString(),
   }
 }

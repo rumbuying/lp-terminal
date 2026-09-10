@@ -3,10 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { CHAIN_ID } from '../src/config/addresses'
 
 const dir = mkdtempSync(join(tmpdir(), 'lp-recovery-retry-'))
 process.env.LP_EXECUTOR_DATA_DIR = dir
-process.env.LP_EXECUTOR_CHAIN_ID = '56'
+process.env.LP_EXECUTOR_CHAIN_ID = String(CHAIN_ID)
 
 type RetryState = { attempts: number; errorStreak: number; failStreak: number; lastError: string | null }
 type RetryStep = { state: RetryState; quarantined: boolean; delaySeconds: number }

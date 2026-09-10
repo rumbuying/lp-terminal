@@ -66,7 +66,11 @@ export type EmergingRow = Pick<PoolRankRow, 'venue' | 'pool' | 'address' | 'feeB
 export type PoolRankApi = {
   enabled: boolean
   ready: boolean
+  status: 'fresh' | 'stale' | 'unavailable'
   generatedAt: number | null
+  sourceAsOf: number | null
+  sourceAgeSeconds: number | null
+  sourceTtlSeconds: number
   ageSeconds: number | null
   nextRefreshSeconds: number | null
   rows: PoolRankRow[]

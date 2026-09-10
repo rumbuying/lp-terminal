@@ -10,6 +10,9 @@ export type TokenPriceMark = {
   depthUsd: number
   source: string | null
   updatedAt: number | null
+  status: 'fresh' | 'stale' | 'unavailable'
+  ttlSeconds: number
+  lastPriceUsd?: number | null
 }
 
 export type { TokenUsdMap } from '../lib/apr'
@@ -59,7 +62,7 @@ export function useTokenPrices(addresses: Address[]) {
 export function tokenUsdMapOf(marks: Record<string, TokenPriceMark> | undefined): TokenUsdMap {
   const prices: TokenUsdMap = {}
   for (const [address, mark] of Object.entries(marks ?? {})) {
-    if (mark.priceUsd !== null && Number.isFinite(mark.priceUsd) && mark.priceUsd > 0)
+    if (mark.status === 'fresh' && mark.priceUsd !== null && Number.isFinite(mark.priceUsd) && mark.priceUsd > 0)
       prices[address.toLowerCase()] = mark.priceUsd
   }
   return prices

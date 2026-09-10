@@ -5,15 +5,24 @@ export type LookbackWindow = 'h1' | 'h6' | 'h24' | 'd3' | 'd7'
 export type RecommendationGateReason =
   | 'excessive_reopens'
   | 'insufficient_tick_history'
+  | 'insufficient_risk_history'
+  | 'insufficient_market_history'
   | 'non_positive_risk_adjusted_net'
   | 'unanchored_quote_risk'
   | 'pool_below_lvr_floor'
+  | 'lvr_unavailable'
+  | 'cost_unavailable'
 
 export type RecommendationMarketSnapshot = {
   ts: number
   vol1hUsd: number | null
   vol6hUsd: number | null
   vol24hUsd: number | null
+  /** Point-in-time active liquidity at the sampled tick. This is not a
+   * distribution of initialized liquidity across ticks. */
+  activeLiquidity?: string | null
+  tick?: number | null
+  source?: string | null
 }
 
 /** The pool's day-level volume-trend class from the rank snapshot (PRD FR-REC-1). */
@@ -23,7 +32,17 @@ export type CandidateVolumeTrend = {
   slope7dPct: number | null
 }
 
-export type RecommendationTickSample = { ts: number; tick: number }
+export type RecommendationTickSample = { ts: number; tick: number; blockNumber?: string }
+
+export type RecommendationHistoryCoverage = {
+  windowSeconds: number
+  coveredSeconds: number
+  ratio: number
+  sampleCount: number
+  firstAt: number | null
+  lastAt: number | null
+  maxGapSeconds: number | null
+}
 
 export type RecommendationCandidate = {
   pool: string
@@ -38,6 +57,10 @@ export type RecommendationCandidate = {
   decimals1: number
   token0Usd: number | null
   token1Usd: number | null
+  token0PriceUpdatedAt?: number | null
+  token1PriceUpdatedAt?: number | null
+  token0PriceStatus?: 'fresh' | 'stale' | 'unavailable'
+  token1PriceStatus?: 'fresh' | 'stale' | 'unavailable'
   /** true when token0 is the volatile/risk asset and token1 is the quote asset */
   token0IsRisk: boolean
   /** true when one side is the USDG anchor, allowing portfolio risk in USD terms */
@@ -59,6 +82,8 @@ export type RecommendationCandidate = {
   rewardRate: string
   periodFinish: number
   upUsd: number | null
+  upPriceUpdatedAt?: number | null
+  upPriceStatus?: 'fresh' | 'stale' | 'unavailable'
   marketHistory: RecommendationMarketSnapshot[]
   tickHistory: RecommendationTickSample[]
   /** present only while the indexer's rank snapshot is fresh */
@@ -76,7 +101,7 @@ export type RecommendationCostProfile = {
   executionBpsPerCycle: number
   cycleSeconds: number
   sampleCycles: number
-  source: 'pool' | 'protocol' | 'default'
+  source: 'pool' | 'protocol' | 'unavailable'
 }
 
 /**
@@ -113,11 +138,22 @@ export type RecommendationProjection = {
   rewardUsd: number
   gasUsd: number
   executionUsd: number
+  entryCostUsd: number
+  incomeRetentionUsd: number
+  expectedLvrUsd: number | null
   netUsd: number
   riskAdjustedNetUsd: number
   reopens: number
-  inRangePct: number
-  cvar95Usd: number
+  /** Share of the observed path for which this band could earn fees, after
+   * subtracting measured recenter downtime. It is not in-band swap volume. */
+  feeExposurePct: number
+  /** Rolling pool volume multiplied by feeExposurePct. This remains a proxy
+   * until swap-level volume-at-tick history is available. */
+  modeledVolumeInRangeUsd: number
+  /** Tail mean of LP-vs-HODL outcomes across historical and reflected paths. */
+  historicalIlTailUsd: number
+  /** Tail mean of LP position value vs its value at each replay start. */
+  inventoryDrawdownTailUsd: number
   coverageRatio: number | null
 }
 
@@ -148,6 +184,14 @@ export type RecommendationItem = {
     feePpm: number
     statsUpdatedAt: number
     tickCoverageHours: number
+    tickCoverage: RecommendationHistoryCoverage
+    riskTickCoverage: RecommendationHistoryCoverage
+    marketCoverage: RecommendationHistoryCoverage
+    activeLiquidityBasis: 'historical_active_liquidity' | 'spot_active_liquidity'
+    historicalActiveLiquidity: string | null
+    activeLiquidityCoverageRatio: number
+    tickLiquidityDistribution: 'unavailable'
+    volumeDistribution: 'unavailable'
   }
   cost: RecommendationCostProfile
   /** Hard opening gates. Non-empty items remain visible as observations only. */
@@ -160,9 +204,14 @@ export type RecommendationItem = {
 }
 
 export type RecommendationResponse = {
-  modelVersion: 'lp-rec-v3'
+  modelVersion: 'lp-rec-v5'
   generatedAt: number
   marketAsOf: number
+  marketFreshness: {
+    status: 'fresh' | 'stale' | 'unavailable'
+    observedAt: number | null
+    ttlSeconds: number
+  }
   capitalUsd: number
   mode: RecommendationMode
   risk: RecommendationRisk

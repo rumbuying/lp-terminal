@@ -427,7 +427,7 @@ export function startApi() {
         if (!row) return json(res, 404, { error: 'strategy not found' })
         if (!row.config.enabled || row.config.execution.mode !== 'executor_auto') return json(res, 400, { error: 'strategy is not enabled for executor automation' })
         if (!['monitoring', 'dry_run_ready', 'awaiting_manual'].includes(row.state)) return json(res, 409, { error: 'strategy is not ready to execute' })
-        const preflight = await preflightStrategy(row.config)
+        const preflight = await preflightStrategy(row.config, { manualExecution: true })
         const plan = preflight.plan
         if (!createPlannedJob(plan)) return json(res, 409, { error: 'strategy already has an open job' })
         setStrategyState(id, 'planned')

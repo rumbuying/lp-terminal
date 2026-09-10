@@ -3,10 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { CHAIN_ID } from '../src/config/addresses'
 
 const dir = mkdtempSync(join(tmpdir(), 'lp-public-status-'))
 process.env.LP_EXECUTOR_DATA_DIR = dir
-process.env.LP_EXECUTOR_CHAIN_ID = '56'
+process.env.LP_EXECUTOR_CHAIN_ID = String(CHAIN_ID)
 
 test('public status returns only running strategies owned by the requested address and redacts executor config', async () => {
   const [{ originalStrategyDraft }, { upsertStrategy }, { publicStrategyStatus }, { UNI }] = await Promise.all([

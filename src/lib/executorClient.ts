@@ -72,8 +72,13 @@ export type ExecutorPerformanceCycle = {
   grossFeesQuoteRaw: string
   protocolFeesQuoteRaw: string
   incomeTaxQuoteRaw: string
+  incomeRetentionQuoteRaw: string
   netFeesQuoteRaw: string
+  capitalQuoteRaw: string
   gasCostQuoteRaw: string
+  gasValuationComplete: boolean
+  gasCostUsdgRaw: string
+  gasStableValuationComplete: boolean
   executionCostQuoteRaw: string
   maxExecutionImpactBps: number | null
   riskDirection: 'up' | 'down' | null
@@ -105,9 +110,14 @@ export type ExecutorPerformance = {
     grossFeesQuoteRaw: string
     protocolFeesQuoteRaw: string
     incomeTaxQuoteRaw: string
+    incomeRetentionQuoteRaw: string
+    incomeRetentionBps: number
+    incomeRetentionCustody: 'owner_wallet'
+    platformRevenueQuoteRaw: string
     netFeesQuoteRaw: string
     gasCostQuoteRaw: string
     openingGasCostQuoteRaw: string
+    gasValuationComplete: boolean
     executionCostQuoteRaw: string
     marketAndLpQuoteRaw: string | null
     currentValueQuoteRaw: string | null
@@ -127,7 +137,7 @@ export type ExecutorPerformance = {
     pnlUsdgPct: number | null
   }
   baseline?: {
-    kind: 'strategy_start' | 'original_mint' | 'first_automated_exit'
+    kind: 'strategy_start' | 'original_mint'
     at: number
     tokenId: string | null
     priceSource: 'strategy_start_snapshot' | 'mint_block' | 'pre_decrease_snapshot' | 'trigger_snapshot'

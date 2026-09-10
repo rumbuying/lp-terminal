@@ -8,7 +8,7 @@ const performance: ExecutorPerformance = {
   quote: { address: '0xabc', symbol: 'WETH', decimals: 2 },
   baseline: { kind: 'strategy_start', at: 50, tokenId: '1', priceSource: 'strategy_start_snapshot', blockNumber: '1', tick: 0 },
   summary: {
-    reopens: 0, grossFeesQuoteRaw: '0', protocolFeesQuoteRaw: '0', incomeTaxQuoteRaw: '0', netFeesQuoteRaw: '0', gasCostQuoteRaw: '0', openingGasCostQuoteRaw: '0', executionCostQuoteRaw: '0', marketAndLpQuoteRaw: '0', currentValueQuoteRaw: '0', profitReserveQuoteRaw: '0', withdrawnProfitQuoteRaw: '0', withdrawnProfitUsdgRaw: '0', currentUncollectedFeesQuoteRaw: '0', currentUnclaimedRewardsQuoteRaw: '0', currentUnclaimedTotalQuoteRaw: '0', baselineValueQuoteRaw: '0', pnlQuoteRaw: '350', pnlPct: 0, currentValueUsdgRaw: '0', baselineValueUsdgRaw: '0', gasCostUsdgRaw: '0', pnlUsdgRaw: '4250000', pnlUsdgPct: 0,
+    reopens: 0, grossFeesQuoteRaw: '0', protocolFeesQuoteRaw: '0', incomeTaxQuoteRaw: '0', incomeRetentionQuoteRaw: '0', incomeRetentionBps: 1000, incomeRetentionCustody: 'owner_wallet', platformRevenueQuoteRaw: '0', netFeesQuoteRaw: '0', gasCostQuoteRaw: '0', openingGasCostQuoteRaw: '0', gasValuationComplete: true, executionCostQuoteRaw: '0', marketAndLpQuoteRaw: '0', currentValueQuoteRaw: '0', profitReserveQuoteRaw: '0', withdrawnProfitQuoteRaw: '0', withdrawnProfitUsdgRaw: '0', currentUncollectedFeesQuoteRaw: '0', currentUnclaimedRewardsQuoteRaw: '0', currentUnclaimedTotalQuoteRaw: '0', baselineValueQuoteRaw: '0', pnlQuoteRaw: '350', pnlPct: 0, currentValueUsdgRaw: '0', baselineValueUsdgRaw: '0', gasCostUsdgRaw: '0', pnlUsdgRaw: '4250000', pnlUsdgPct: 0,
   },
 }
 const row = (overrides: Partial<ExecutorPnlCurvePoint>): ExecutorPnlCurvePoint => ({

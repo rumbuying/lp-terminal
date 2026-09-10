@@ -1,4 +1,5 @@
 import type { Address } from 'viem'
+import { INCOME_RETENTION_BPS, INCOME_RETENTION_CUSTODY } from './income-retention'
 import { STRATEGY_ERROR, StrategyError } from './errors'
 import type { LedgerEntry } from './types'
 
@@ -80,7 +81,7 @@ export function distributionAdjustedPnl(args: {
   return args.currentValue + args.withdrawnValue - args.baselineValue - args.gasCost
 }
 
-/** Record USDG retained directly from collected income as an explicit tax fact. */
+/** Record income retained in the owner's wallet as an explicit custody fact. */
 export function incomeTaxRetentionEntry(args: {
   id: string
   strategyId: string
@@ -92,7 +93,7 @@ export function incomeTaxRetentionEntry(args: {
   txHash?: string
   blockNumber?: string
 }): LedgerEntry | undefined {
-  if (args.amount < 0n) throw new StrategyError(STRATEGY_ERROR.CONFIG, 'income tax must be unsigned')
+  if (args.amount < 0n) throw new StrategyError(STRATEGY_ERROR.CONFIG, 'income retention must be unsigned')
   if (args.amount === 0n) return undefined
   return {
     id: args.id,
@@ -105,7 +106,13 @@ export function incomeTaxRetentionEntry(args: {
     kind: 'income_tax',
     token: args.token,
     amount: args.amount.toString(),
-    meta: { purpose: 'fee_tax', source: 'direct_retention' },
+    meta: {
+      purpose: 'fee_tax',
+      source: 'direct_retention',
+      rateBps: INCOME_RETENTION_BPS,
+      custody: INCOME_RETENTION_CUSTODY,
+      platformRevenue: false,
+    },
   }
 }
 

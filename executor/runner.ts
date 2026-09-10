@@ -1,6 +1,7 @@
 import { keccak256, parseUnits, toHex, zeroAddress, type Address, type TransactionReceipt } from 'viem'
 import { clPmAbi } from '../src/abi'
 import { makeFeeCollectionPlan, makeRebalancePlan } from '../shared/strategy/planner'
+import { assertEntryTrigger } from '../shared/strategy/entry-trigger'
 import { attributeCollect, incomeTaxRetentionEntry } from '../shared/strategy/accounting'
 import type { LedgerEntry, StrategyConfig, StrategyPositionSnapshot } from '../shared/strategy/types'
 import { readCollectableFees, readPoolState, readStrategySnapshot, readTokenBalances, publicClient } from './chain'
@@ -25,6 +26,8 @@ import {
   walletAllocationTokens,
   walletHasUnfinishedMutation,
   executorPaused,
+  recordPriceSample,
+  sampledAverageTick,
 } from './store'
 import { unlockPrivateKey } from './vault'
 import { sendTracked } from './signer'
@@ -44,6 +47,8 @@ import { ensureRestaked, ensureUnstakedAndRewardConverted } from './staking'
 import { clearStrategyRetry, deferStrategyRetry, strategyRetryReady } from './retry-state'
 import { strategyCapitalHarvest } from './capital-policy'
 import { v4PositionManagerAbi } from '../src/lib/uniV4'
+import { prepareFinalSwap } from './final-swap'
+import { gasLedgerEntries } from './gas-accounting'
 
 const low = (value: string) => value.toLowerCase()
 const SETTLEMENT = EXECUTOR.network.settlementToken
@@ -68,21 +73,6 @@ export async function runOnce() {
   await Promise.allSettled(running)
 }
 
-function gasEntries(config: StrategyConfig, jobId: string, receipts: TransactionReceipt[]): LedgerEntry[] {
-  const ts = Math.floor(Date.now() / 1000)
-  return receipts.map((receipt, index) => ({
-    id: `${receipt.transactionHash}-gas-${index}`,
-    strategyId: config.id,
-    jobId,
-    ts,
-    blockNumber: receipt.blockNumber.toString(),
-    txHash: receipt.transactionHash,
-    kind: 'gas',
-    amount: (receipt.gasUsed * receipt.effectiveGasPrice).toString(),
-    meta: { unit: 'wei' },
-  }))
-}
-
 async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
   let stepIndex = 0
   const receipts: TransactionReceipt[] = []
@@ -93,6 +83,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
     const maxQueueAge = Math.max(300, job.plan.safeguards.maxPlanAgeSeconds * 2)
     if (job.plan.createdAt < queueCheckAt - maxQueueAge) throw new Error('E_PLAN_QUEUE_STALE')
     const snapshot = await readStrategySnapshot(job.config)
+    checkEntryTrigger(job, snapshot)
     const fresh = job.plan.action === 'collect_fees'
       ? makeFeeCollectionPlan({ config: job.config, snapshot })
       : makeRebalancePlan({ config: job.config, snapshot, triggerSide: job.plan.triggerSide, rangeScale: job.plan.rangeScale ?? 1 })
@@ -210,6 +201,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
     let rewardQuotedQuote = 0n
     const walletCustodyConfig: StrategyConfig = job.config.staking?.enabled ? { ...job.config, staking: { enabled: false } } : job.config
     if (job.config.staking?.enabled) {
+      checkEntryTrigger(job, await readStrategySnapshot(job.config))
       // The helper tracks the exact unstake/approval/swap substep itself. If it
       // throws, attribute the outer failure to the final reward-conversion gate
       // without overwriting a confirmed withdrawal step.
@@ -226,6 +218,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
 
     stepIndex = 1
     const beforeDecrease = await readStrategySnapshot(walletCustodyConfig)
+    if (!job.config.staking?.enabled) checkEntryTrigger(job, beforeDecrease)
     if (beforeDecrease.liquidity !== snapshot.liquidity || low(beforeDecrease.owner) !== low(job.config.owner)) throw new Error('E_POSITION_CHANGED')
     // Persist the valuation point immediately before the first state-changing
     // transaction. Performance accounting must never substitute a later
@@ -281,8 +274,15 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
           principal0: delta0 - (BigInt(beforeDecrease.tokensOwed0) < delta0 ? BigInt(beforeDecrease.tokensOwed0) : delta0),
           principal1: delta1 - (BigInt(beforeDecrease.tokensOwed1) < delta1 ? BigInt(beforeDecrease.tokensOwed1) : delta1),
         }
-      : receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId))
+      : {
+          ...receiptLiquidityFlows(collectReceipt, job.config.positionManager, BigInt(snapshot.tokenId)),
+          // In split mode Collect contains no DecreaseLiquidity event. The
+          // exit receipt proves principal in both split and bundled modes.
+          principal0: v3DecreaseFlows!.principal0,
+          principal1: v3DecreaseFlows!.principal1,
+        }
     if (delta0 !== collectFlows.collected0 || delta1 !== collectFlows.collected1) throw new Error('E_UNSUPPORTED_TOKEN')
+    if (collectFlows.collected0 < collectFlows.principal0 || collectFlows.collected1 < collectFlows.principal1) throw new Error('E_RECEIPT_FACT')
     const funds = {
       principal0: collectFlows.principal0,
       principal1: collectFlows.principal1,
@@ -449,8 +449,9 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       approvalTx += approvalReceipts.length
 
       stepIndex = 5
-      const quote = approvalQuote
-      const gated = await gatedKyberTx({ routeSummary: quote.routeSummary, tokenIn: routeIn, tokenOut: routeOut, sender: job.config.owner, recipient: job.config.owner, amountIn: intent.amountIn, slippageBps: job.config.safeguards.maxSlippageBps, nativeIn })
+      const { quote, tx: gated } = await prepareFinalSwap({ config: job.config, snapshot,
+        tokenIn: routeIn, tokenOut: routeOut, amountIn: intent.amountIn,
+        slippageBps: job.config.safeguards.maxSlippageBps, approvedTarget: approvalGate.approvalTarget, fallback })
       if (gated.approvalTarget.toLowerCase() !== approvalGate.approvalTarget.toLowerCase()) throw new Error('E_SWAP_SPENDER_CHANGED')
       const txIndex = swapTx++
       const executableIntent = { ...intent, quotedOut: BigInt(quote.routeSummary.amountOut), routeSummary: quote.routeSummary }
@@ -670,7 +671,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
     ledger.push(
       { id: `${job.id}-mint-0`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, kind: 'mint_principal', token: snapshot.token0, amount: mintFlows.minted0.toString(), txHash: mintReceipt.transactionHash },
       { id: `${job.id}-mint-1`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, kind: 'mint_principal', token: snapshot.token1, amount: mintFlows.minted1.toString(), txHash: mintReceipt.transactionHash },
-      ...gasEntries(job.config, job.id, receipts),
+      ...gasLedgerEntries(job.config, job.id, receipts),
     )
     commitRebalance({
       jobId: job.id,
@@ -704,6 +705,8 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       || code === 'E_PLAN_QUEUE_STALE'
       || code === 'E_KYBER_QUOTE'
       || code === 'E_SWAP_IMPACT'
+      || code === 'E_TRIGGER_CHANGED'
+      || code === 'E_TRIGGER_UNAVAILABLE'
       || /RPC Request failed|HTTP request failed|fetch failed|network|socket|timeout|timed out|rate limit|\b429\b|\b502\b|\b503\b|\b504\b/i.test(code)
     )
     if (noConfirmedMutation && (allAttemptsDefinitelyReverted || retryableBeforeMutation)) {
@@ -718,4 +721,12 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       audit('runner', 'job_recovery', 'job', job.id, { code, stepIndex, delayMs })
     }
   }
+}
+
+function checkEntryTrigger(job: ReturnType<typeof runnableJobs>[number], snapshot: StrategyPositionSnapshot) {
+  const now = Math.floor(Date.now() / 1000)
+  const window = Math.max(60, job.config.trigger.confirmationSeconds, job.config.trigger.pollSeconds * 3)
+  if (job.config.trigger.source === 'sampled_twap') recordPriceSample(job.config.id, now, snapshot.tick, snapshot.blockNumber)
+  assertEntryTrigger({ config: job.config, plan: job.plan, snapshot, now,
+    average: job.config.trigger.source === 'sampled_twap' ? sampledAverageTick(job.config.id, now - window) : undefined })
 }

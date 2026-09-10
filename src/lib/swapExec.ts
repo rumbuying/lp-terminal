@@ -233,7 +233,8 @@ export async function executeSolverSwap(args: SolverSwapIntent): Promise<Confirm
       feeBps: args.feeBps,
     })
   let quote = await fresh()
-  if (quote.amountOutNet < args.minimumAmountOut) throw new SlippageError(t('swap.errQuoteMoved'))
+  if (quote.amountOutNet < args.minimumAmountOut || quote.minAmountOutNet < args.minimumAmountOut)
+    throw new SlippageError(t('swap.errQuoteMoved'))
 
   if (quote.allowanceTarget !== null) {
     const allowance = await ensureAllowance(
@@ -248,7 +249,8 @@ export async function executeSolverSwap(args: SolverSwapIntent): Promise<Confirm
       requireSender(args.sender)
       const approvedSpender = quote.allowanceTarget
       quote = await fresh()
-      if (quote.amountOutNet < args.minimumAmountOut) throw new SlippageError(t('swap.errQuoteMoved'))
+      if (quote.amountOutNet < args.minimumAmountOut || quote.minAmountOutNet < args.minimumAmountOut)
+        throw new SlippageError(t('swap.errQuoteMoved'))
       if (quote.allowanceTarget === null || getAddress(quote.allowanceTarget) !== getAddress(approvedSpender)) {
         throw new Error('solver allowance target changed after approval')
       }
@@ -257,6 +259,8 @@ export async function executeSolverSwap(args: SolverSwapIntent): Promise<Confirm
 
   const tx = quote.tx
   if (!tx) throw new Error('solver quote carried no transaction')
+  if (!quote.settler) throw new Error('solver quote carried no Settler identity')
+  const settler = quote.settler
   if (tx.requiredFrom && getAddress(tx.requiredFrom) !== getAddress(args.sender)) {
     throw new Error('solver transaction is bound to a different submitting account')
   }
@@ -264,7 +268,7 @@ export async function executeSolverSwap(args: SolverSwapIntent): Promise<Confirm
   const receipt = await step(
     args.label,
     async () => {
-      const gas = await preflightSolverTransaction(client, args.sender, tx)
+      const gas = await preflightSolverTransaction(client, args.sender, tx, settler)
       return sendTransaction(wagmiConfig, {
         account: args.sender,
         to: tx.to,
