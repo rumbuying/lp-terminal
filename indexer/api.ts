@@ -3227,7 +3227,6 @@ export function rankSeedIdentities(): string[] {
 
 const RECOMMENDATION_SNAPSHOT_WORKER_KIND = 'lp-terminal-recommendation-snapshot';
 const RECOMMENDATION_CANONICAL_PARAMS = new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' });
-const RECOMMENDATION_CANONICAL_KEY = '80|10000|10000';
 const RECOMMENDATION_HISTORY_TTL_MS = 60_000;
 const RECOMMENDATION_RESPONSE_TTL_MS = 60_000;
 const RECOMMENDATION_HISTORY_MEMO_CAP = 512;
@@ -3310,6 +3309,9 @@ export function refreshRecommendationSnapshotInBackground(): Promise<void> {
       recommendationSnapshotWorkerRunning = false;
       if (message.ok) {
         recommendationSnapshot = { at: Date.now(), body: message.body };
+        // Every limited response is derived from this canonical body. Do not
+        // let a variant from the previous generation survive a fresh publish.
+        recommendationResponseCache.clear();
         log(`[recommendation-snapshot] built in ${((Date.now() - startedMs) / 1000).toFixed(1)}s (${Math.round(message.body.length / 1024)}KB)`);
         resolve();
       } else reject(new Error(message.error));
@@ -3323,31 +3325,37 @@ export function refreshRecommendationSnapshotInBackground(): Promise<void> {
   });
 }
 
-/** Route entry: the canonical executor parameters are served from the
- * worker-built snapshot — NO compute on the request path, ever. Before the
- * first build lands the route fails fast with 503: a fallback compute here is
- * exactly the event-loop freeze this whole section exists to prevent (an
- * executor poll arrives seconds after a restart, blocks the loop for the
- * compute's full duration, and every other endpoint starves behind it). The
- * executor already treats a non-ok response as a transient warming error. */
+/** Route entry: every supported request is served from the worker-built
+ * snapshot — NO database compute on the request path, ever. Callers may ask
+ * for a smaller limit, including the historical no-query default of 50; that
+ * response is a cheap slice of the canonical top 80. Thresholds below or
+ * different from the canonical cohort cannot be reconstructed from that
+ * bounded snapshot, so reject them quickly instead of freezing every API
+ * endpoint with an inline full-catalog scan. */
 export function getRecommendationCandidatesCached(params: Params): string {
-  const key = `${params.get('limit') ?? ''}|${params.get('min_tvl') ?? ''}|${params.get('min_volume') ?? ''}`;
-  if (key === RECOMMENDATION_CANONICAL_KEY) {
-    if (!recommendationSnapshot) {
-      const age = recommendationSnapshotRequestedAt === null
-        ? 'first build queued'
-        : `first build running for ${Math.round((Date.now() - recommendationSnapshotRequestedAt) / 1000)}s`;
-      throw new ApiCapacityError(`recommendation candidates snapshot is warming up (${age})`);
-    }
-    if (Date.now() - recommendationSnapshot.at > RECOMMENDATION_SNAPSHOT_MAX_AGE_MS)
-      throw new ApiCapacityError('recommendation candidates snapshot is stale');
-    return recommendationSnapshot.body;
+  const rawLimit = params.get('limit');
+  const limit = Math.min(Math.max(Number(rawLimit) || 50, 1), 80);
+  const minTvl = Math.max(Number(params.get('min_tvl')) || 10_000, 0);
+  const minVolume = Math.max(Number(params.get('min_volume')) || 10_000, 0);
+  if (minTvl !== 10_000 || minVolume !== 10_000)
+    throw new ApiInputError('recommendation candidates only supports min_tvl=10000 and min_volume=10000');
+
+  if (!recommendationSnapshot) {
+    const age = recommendationSnapshotRequestedAt === null
+      ? 'first build queued'
+      : `first build running for ${Math.round((Date.now() - recommendationSnapshotRequestedAt) / 1000)}s`;
+    throw new ApiCapacityError(`recommendation candidates snapshot is warming up (${age})`);
   }
+  if (Date.now() - recommendationSnapshot.at > RECOMMENDATION_SNAPSHOT_MAX_AGE_MS)
+    throw new ApiCapacityError('recommendation candidates snapshot is stale');
+  if (limit === 80) return recommendationSnapshot.body;
+
+  const key = `${limit}|10000|10000`;
   const hit = recommendationResponseCache.get(key);
   if (hit && Date.now() - hit.at < RECOMMENDATION_RESPONSE_TTL_MS) return hit.body;
-  // Non-canonical combinations are internal-only and rare; a bounded 60s
-  // response cache keeps even those from recomputing per request.
-  const body = JSON.stringify(getRecommendationCandidates(params));
+  const canonical = JSON.parse(recommendationSnapshot.body) as Record<string, unknown> & { candidates?: unknown[] };
+  if (!Array.isArray(canonical.candidates)) throw new Error('recommendation snapshot has no candidates array');
+  const body = JSON.stringify({ ...canonical, candidates: canonical.candidates.slice(0, limit) });
   recommendationResponseCache.set(key, { at: Date.now(), body });
   if (recommendationResponseCache.size > 16) recommendationResponseCache.clear();
   return body;

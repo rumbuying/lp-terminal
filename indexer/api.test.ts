@@ -444,7 +444,7 @@ test('rankSeedIdentities caps at the coverage top, best first, and closes when s
   assert.deepEqual(api.rankSeedIdentities(), []);
 });
 
-test('candidate history and responses are cached; a clear restores freshness', () => {
+test('candidate history is memoized; a clear restores freshness', () => {
   api.clearRecommendationCaches();
   const pool = address(0xd021);
   store.insertPool({
@@ -462,15 +462,13 @@ test('candidate history and responses are cached; a clear restores freshness', (
     store.captureAddressTickSamples([pool], '123');
 
     const params = new URLSearchParams({ limit: '10' });
-    const first = api.getRecommendationCandidatesCached(params);
-    const second = api.getRecommendationCandidatesCached(params);
-    assert.equal(second, first, 'within the TTL the response cache serves the same body');
+    api.getRecommendationCandidates(params);
 
     // a new sample lands mid-TTL in a later bucket: the memo intentionally holds
     const futureTs = Math.floor(Date.now() / 1_000) + 120;
     store.upsertState(pool, { sqrtPrice: (1n << 96n) * 4n, tick: 13_863, liquidity: 1_000_000n, reserve0: 1_000n, reserve1: 1_000n });
     store.captureAddressTickSamples([pool], '456', futureTs);
-    const held = JSON.parse(api.getRecommendationCandidatesCached(params))
+    const held = api.getRecommendationCandidates(params)
       .candidates.find((row: { pool: string }) => row.pool === pool);
     assert.ok(held);
     assert.equal(held.tickHistory.at(-1)?.tick, 0, 'memoized history does not tear mid-TTL');
@@ -480,7 +478,7 @@ test('candidate history and responses are cached; a clear restores freshness', (
     assert.equal(held.marketHistory.at(-1)?.source, 'test');
 
     api.clearRecommendationCaches();
-    const fresh = JSON.parse(api.getRecommendationCandidatesCached(params))
+    const fresh = api.getRecommendationCandidates(params)
       .candidates.find((row: { pool: string }) => row.pool === pool);
     assert.ok(fresh);
     assert.equal(fresh.tickHistory.at(-1)?.tick, 13_863, 'a clear drops the memo so the new sample shows');
@@ -521,14 +519,28 @@ test('the canonical snapshot builds in a worker thread and serves the route inst
       new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' }),
     ), canonical);
 
-    // with the snapshot cleared, the canonical route fails fast instead of
-    // computing inline — an inline compute on the shared event loop is the
-    // freeze this architecture exists to prevent
+    const limited = api.getRecommendationCandidatesCached(new URLSearchParams({ limit: '1' }));
+    assert.equal(JSON.parse(limited).candidates.length, 1,
+      'a smaller limit slices the worker snapshot instead of computing inline');
+    assert.equal(api.getRecommendationCandidatesCached(new URLSearchParams({ limit: '1' })), limited,
+      'limited variants are cached as ready-made strings');
+    assert.throws(
+      () => api.getRecommendationCandidatesCached(new URLSearchParams({ min_tvl: '5000' })),
+      /only supports min_tvl=10000/,
+      'a broader cohort cannot fall back to a main-thread catalog scan',
+    );
+
+    // With the snapshot cleared, canonical and limited requests both fail
+    // fast instead of computing inline on the shared event loop.
     api.clearRecommendationCaches();
     assert.throws(
       () => api.getRecommendationCandidatesCached(
         new URLSearchParams({ limit: '80', min_tvl: '10000', min_volume: '10000' }),
       ),
+      /warming/,
+    );
+    assert.throws(
+      () => api.getRecommendationCandidatesCached(new URLSearchParams({ limit: '1' })),
       /warming/,
     );
   } finally {
