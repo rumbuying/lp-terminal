@@ -13,9 +13,48 @@ import { PairAttributionPanel, TrendBadge, VolumeSparkline } from './PairAttribu
 const pct = (x: number, digits = 0) => `${(x * 100).toFixed(digits)}%`
 const venueLabel = (venue: PoolRankRow['venue']): string => (venue === 'up33-cl' ? 'UP33 CL' : 'Uni v3')
 
-type SortKey = 'coverage' | 'trend' | 'feeApr' | 'tvl'
+type SortKey = 'coverage' | 'trend' | 'feeApr' | 'tvl' | 'volDay' | 'sigma' | 'emitApr' | 'fee'
 
-const SORT_KEYS: readonly SortKey[] = ['coverage', 'trend', 'feeApr', 'tvl']
+/** ascending comparators; the header toggle applies the direction */
+const COMPARATORS: Record<SortKey, (a: PoolRankRow, b: PoolRankRow) => number> = {
+  coverage: (a, b) => a.coverage - b.coverage,
+  trend: (a, b) =>
+    trendSortWeight[a.trend.class] - trendSortWeight[b.trend.class]
+    || (a.trend.vsBaseline ?? 0) - (b.trend.vsBaseline ?? 0)
+    || a.coverage - b.coverage,
+  feeApr: (a, b) => a.netFeeApr - b.netFeeApr,
+  tvl: (a, b) => a.tvlUsd - b.tvlUsd,
+  volDay: (a, b) => a.volDayUsd - b.volDayUsd,
+  sigma: (a, b) => a.sigmaDaily - b.sigmaDaily,
+  emitApr: (a, b) => (a.emitApr ?? -1) - (b.emitApr ?? -1),
+  fee: (a, b) => a.feeBps - b.feeBps,
+}
+
+const TREND_FILTERS: readonly TrendClass[] = ['rising', 'new_hot', 'stable', 'fading', 'collapsing']
+
+/** sortable header cell: click cycles desc → asc; the active column shows its direction */
+function SortTh(props: {
+  k: SortKey
+  label: string
+  tip?: string
+  className?: string
+  sort: { key: SortKey; dir: 'desc' | 'asc' }
+  onSort: (k: SortKey) => void
+}) {
+  const active = props.sort.key === props.k
+  return (
+    <th
+      className={props.className}
+      title={props.tip}
+      aria-sort={active ? (props.sort.dir === 'desc' ? 'descending' : 'ascending') : undefined}
+    >
+      <button className={`pr-sort ${active ? 'on' : ''}`} onClick={() => props.onSort(props.k)}>
+        {props.label}
+        {active ? <span aria-hidden="true">{props.sort.dir === 'desc' ? ' ▼' : ' ▲'}</span> : null}
+      </button>
+    </th>
+  )
+}
 
 /** venue · tick spacing · fee — the identity line under the symbols on phones,
  * inline after them on wider screens. */
@@ -111,31 +150,20 @@ export function PoolRankTab(props: { onOpenPool: () => void; onOpenRecommendatio
   const hasRec = (recByPool?.size ?? 0) > 0
   const generated = data?.generatedAt ? new Date(data.generatedAt * 1000) : null
   const hasEmissions = data?.rows.some((r) => r.emitApr !== null) ?? false
-  const [sortKey, setSortKey] = useState<SortKey>('coverage')
-  const [risingOnly, setRisingOnly] = useState(false)
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'desc' | 'asc' }>({ key: 'coverage', dir: 'desc' })
+  const [trendFilter, setTrendFilter] = useState<TrendClass[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
+
+  const toggleSort = (key: SortKey) =>
+    setSort((s) => (s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }))
 
   const rows = useMemo(() => {
     let list = [...(data?.rows ?? [])]
-    if (risingOnly) list = list.filter((r) => r.trend.class === 'rising' || r.trend.class === 'new_hot')
-    switch (sortKey) {
-      case 'trend':
-        list.sort((a, b) =>
-          trendSortWeight[b.trend.class as TrendClass] - trendSortWeight[a.trend.class as TrendClass]
-          || (b.trend.vsBaseline ?? 0) - (a.trend.vsBaseline ?? 0)
-          || b.coverage - a.coverage)
-        break
-      case 'feeApr':
-        list.sort((a, b) => b.netFeeApr - a.netFeeApr)
-        break
-      case 'tvl':
-        list.sort((a, b) => b.tvlUsd - a.tvlUsd)
-        break
-      default:
-        list.sort((a, b) => b.coverage - a.coverage)
-    }
+    if (trendFilter.length) list = list.filter((r) => trendFilter.includes(r.trend.class))
+    const cmp = COMPARATORS[sort.key]
+    list.sort((a, b) => (sort.dir === 'desc' ? cmp(b, a) : cmp(a, b)))
     return list
-  }, [data, sortKey, risingOnly])
+  }, [data, sort, trendFilter])
 
   const colSpan = 8 + (hasEmissions ? 1 : 0) + (hasRec ? 1 : 0)
   const openInPools = (address: string) => {
@@ -167,23 +195,19 @@ export function PoolRankTab(props: { onOpenPool: () => void; onOpenRecommendatio
           <MigrationBanner events={data.migrationEvents} onTrack={(identity) => setExpanded(identity)} />
 
           <div className="pr-toolbar">
-            <span className="dim mono-sm">{t('poolRank.sortLabel')}</span>
-            {SORT_KEYS.map((key) => (
+            <span className="dim mono-sm">{t('poolRank.trendFilter')}</span>
+            {TREND_FILTERS.map((klass) => (
               <button
-                key={key}
-                className={`pr-chip ${sortKey === key ? 'on' : ''}`}
-                onClick={() => setSortKey(key)}
+                key={klass}
+                className={`pr-chip ${trendFilter.includes(klass) ? 'on' : ''}`}
+                onClick={() => setTrendFilter((f) => (f.includes(klass) ? f.filter((x) => x !== klass) : [...f, klass]))}
               >
-                {t(`poolRank.sort.${key}`)}
+                {t(`poolRank.trendClass.${klass}`)}
               </button>
             ))}
-            <button
-              className={`pr-chip ${risingOnly ? 'on' : ''}`}
-              onClick={() => setRisingOnly((v) => !v)}
-              title={t('poolRank.risingOnlyTip')}
-            >
-              {t('poolRank.risingOnly')}
-            </button>
+            {trendFilter.length > 0 && (
+              <button className="pr-chip" onClick={() => setTrendFilter([])}>{t('poolRank.trendFilterAll')}</button>
+            )}
           </div>
 
           <div className="tbl-wrap">
@@ -192,16 +216,16 @@ export function PoolRankTab(props: { onOpenPool: () => void; onOpenRecommendatio
                 <tr>
                   <th className="hide-m">#</th>
                   <th>{t('poolRank.pair')}</th>
-                  <th className="num hide-m">{t('poolRank.fee')}</th>
-                  <th className="num">{t('poolRank.tvl')}</th>
-                  <th className="num hide-m">{t('poolRank.volDay')}</th>
-                  <th className="num" title={t('poolRank.feeAprTip')}>{t('poolRank.feeApr')}</th>
-                  <th className="num hide-m" title={t('poolRank.sigmaTip')}>{t('poolRank.sigma')}</th>
-                  <th className="num" title={t('poolRank.coverageTip')}>{t('poolRank.coverage')}</th>
+                  <SortTh k="fee" label={t('poolRank.fee')} className="num hide-m" sort={sort} onSort={toggleSort} />
+                  <SortTh k="tvl" label={t('poolRank.tvl')} className="num" sort={sort} onSort={toggleSort} />
+                  <SortTh k="volDay" label={t('poolRank.volDay')} className="num hide-m" sort={sort} onSort={toggleSort} />
+                  <SortTh k="feeApr" label={t('poolRank.feeApr')} tip={t('poolRank.feeAprTip')} className="num" sort={sort} onSort={toggleSort} />
+                  <SortTh k="sigma" label={t('poolRank.sigma')} tip={t('poolRank.sigmaTip')} className="num hide-m" sort={sort} onSort={toggleSort} />
+                  <SortTh k="coverage" label={t('poolRank.coverage')} tip={t('poolRank.coverageTip')} className="num" sort={sort} onSort={toggleSort} />
                   {hasEmissions && (
-                    <th className="num hide-t" title={t('poolRank.emitAprTip')}>{t('poolRank.emitApr')}</th>
+                    <SortTh k="emitApr" label={t('poolRank.emitApr')} tip={t('poolRank.emitAprTip')} className="num hide-t" sort={sort} onSort={toggleSort} />
                   )}
-                  <th title={t('poolRank.trendTip')}>{t('poolRank.trend')}</th>
+                  <SortTh k="trend" label={t('poolRank.trend')} tip={t('poolRank.trendTip')} sort={sort} onSort={toggleSort} />
                   {hasRec && <th className="hide-m" title={t('poolRank.recColTip')}>{t('poolRank.recCol')}</th>}
                   <th aria-label={t('poolRank.panel.pool')} />
                 </tr>

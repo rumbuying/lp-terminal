@@ -3247,6 +3247,20 @@ th.sortable.on { color: var(--acc); }
 }
 .pr-chip:hover { border-color: var(--acc-dim); color: var(--fg); }
 .pr-chip.on { color: var(--acc); border-color: var(--acc-dim); }
+.pr-sort {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  white-space: nowrap;
+}
+.pr-sort:hover { color: var(--fg); }
+.pr-sort.on { color: var(--acc); }
 .pr-banner {
   border: 1px solid var(--amber);
   border-radius: var(--r-md);
