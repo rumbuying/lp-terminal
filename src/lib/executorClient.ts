@@ -189,17 +189,41 @@ export const executorAdminTokenStorageKey = (chainKey = CHAIN.key) =>
 export const executorWalletSessionStorageKey = (address: string, chainKey = CHAIN.key) =>
   `lp-terminal:executor:${chainKey}:wallet-session:v2:${address.toLowerCase()}`
 
+/**
+ * The executor answers from a single-threaded process that also runs the
+ * monitor, rebalancer and valuation passes. A saturated or wedged executor
+ * must surface as an error the UI can retry from instead of holding the
+ * strategy page on its loading placeholder forever, so every request carries
+ * a deadline. nginx caps proxied reads at 30s, so a shorter client deadline
+ * would only pre-empt a response the gateway is about to deliver anyway.
+ */
+const EXECUTOR_REQUEST_TIMEOUT_MS = 30_000
+
 async function request<T>(path: string, token?: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   if (token) headers.set('authorization', `Bearer ${token}`)
   if (init.body) headers.set('content-type', 'application/json')
-  const response = await fetch(endpoint(path), { ...init, headers, cache: 'no-store' })
-  const body = await response.json().catch(() => ({})) as Record<string, unknown>
-  const servedChainId = Number(response.headers.get('x-lp-chain-id'))
-  if (servedChainId !== CHAIN.id)
-    throw new Error(`strategy executor chain mismatch: expected ${CHAIN.id}, received ${Number.isFinite(servedChainId) ? servedChainId : 'unknown'}`)
-  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `executor request failed (${response.status})`)
-  return body as T
+  const controller = new AbortController()
+  const deadline = setTimeout(() => controller.abort(), EXECUTOR_REQUEST_TIMEOUT_MS)
+  try {
+    const response = await fetch(endpoint(path), {
+      ...init,
+      headers,
+      cache: 'no-store',
+      signal: init.signal ?? controller.signal,
+    })
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>
+    const servedChainId = Number(response.headers.get('x-lp-chain-id'))
+    if (servedChainId !== CHAIN.id)
+      throw new Error(`strategy executor chain mismatch: expected ${CHAIN.id}, received ${Number.isFinite(servedChainId) ? servedChainId : 'unknown'}`)
+    if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `executor request failed (${response.status})`)
+    return body as T
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('executor request timed out')
+    throw error
+  } finally {
+    clearTimeout(deadline)
+  }
 }
 
 export type ExecutorWalletChallenge = { id: string; address: `0x${string}`; message: string; expiresAt: number }
@@ -219,9 +243,21 @@ export const executorHistory = (token: string) => request<{ strategies: Executor
 export const executorPnlCalendar = (token: string, from?: number, to?: number) => request<{ timezone: 'Asia/Shanghai'; rows: ExecutorCalendarRow[] }>(
   `/v1/pnl-calendar${from === undefined ? '' : `?from=${from}&to=${to ?? from}`}`, token,
 )
-export const executorPnlCurve = (token: string, from?: number, to?: number) => request<{ intervalSeconds: 300; points: ExecutorPnlCurvePoint[] }>(
-  `/v1/pnl-curve${from === undefined ? '' : `?from=${from}&to=${to ?? Math.floor(Date.now() / 1000)}`}`, token,
-)
+export const executorPnlCurve = (token: string, from?: number, to?: number, bucketSeconds?: number) => {
+  const params = new URLSearchParams()
+  if (from !== undefined) {
+    params.set('from', String(from))
+    params.set('to', String(to ?? Math.floor(Date.now() / 1000)))
+  }
+  // A 30-day curve at the executor's 5-minute sample rate is thousands of
+  // points per strategy — multiple megabytes over a slow link for a chart a
+  // few hundred pixels wide. Ask for hourly buckets on the long window.
+  if (bucketSeconds !== undefined) params.set('bucket', String(bucketSeconds))
+  const query = params.toString()
+  return request<{ intervalSeconds: number; points: ExecutorPnlCurvePoint[] }>(
+    `/v1/pnl-curve${query ? `?${query}` : ''}`, token,
+  )
+}
 export const executorRecovery = (token: string) => request<{ jobs: RecoveryJob[] }>('/v1/recovery', token)
 export const executorRecommendations = (token: string, args: { capitalUsd: number; mode: RecommendationMode; risk: RecommendationRisk; limit?: number }) => {
   const params = new URLSearchParams({

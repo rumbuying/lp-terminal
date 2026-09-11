@@ -14,6 +14,7 @@ import { startSimpleStrategy } from './simple'
 import { archivedAccountingPerformance, cachedStrategyPerformance, observeStrategyBaseline } from './performance'
 import { rpcMetrics } from './rpc-metrics'
 import { calendarRows, captureDailyPerformance, pnlCurveRows } from './calendar'
+import { PNL_SNAPSHOT_INTERVAL_SECONDS } from './pnlBuckets'
 import { issueWalletChallenge, verifyWalletChallenge, walletSession, WalletAuthError } from './wallet-auth'
 import { recommendations } from './recommendation'
 import type { RecommendationMode, RecommendationRisk } from '../shared/recommendation/types'
@@ -341,7 +342,11 @@ export function startApi() {
         const from = url.searchParams.get('from'), to = url.searchParams.get('to')
         const fromDay = from && /^\d+$/.test(from) ? Number(from) : undefined
         const toDay = to && /^\d+$/.test(to) ? Number(to) : undefined
-        await captureDailyPerformance()
+        // Refresh today's point in the background: the executor already
+        // captures on its own 5-minute timer and at startup, so a read must
+        // serve the latest snapshot instead of blocking on a cold valuation
+        // pass over every strategy.
+        void captureDailyPerformance()
         const ownedStrategyIds = new Set([
           ...listStrategies().filter((row) => ownedBy(auth, row.config.owner)).map((row) => row.config.id),
           ...listArchivedStrategies().filter((row) => ownedBy(auth, row.config.owner)).map((row) => row.config.id),
@@ -356,12 +361,19 @@ export function startApi() {
         const toTs = to && /^\d+$/.test(to) ? Number(to) : now
         if (!Number.isSafeInteger(fromTs) || !Number.isSafeInteger(toTs) || fromTs > toTs || toTs - fromTs > 31 * 24 * 60 * 60)
           return json(res, 400, { error: 'P/L curve range must be at most 31 days' })
-        await captureDailyPerformance()
+        const bucketRaw = url.searchParams.get('bucket')
+        const bucketSeconds = bucketRaw && /^\d+$/.test(bucketRaw) ? Number(bucketRaw) : undefined
+        if (bucketSeconds !== undefined && (bucketSeconds < PNL_SNAPSHOT_INTERVAL_SECONDS || bucketSeconds > 31 * 24 * 60 * 60))
+          return json(res, 400, { error: `P/L curve bucket must be between ${PNL_SNAPSHOT_INTERVAL_SECONDS} and ${31 * 24 * 60 * 60} seconds` })
+        void captureDailyPerformance()
         const ownedStrategyIds = new Set([
           ...listStrategies().filter((row) => ownedBy(auth, row.config.owner)).map((row) => row.config.id),
           ...listArchivedStrategies().filter((row) => ownedBy(auth, row.config.owner)).map((row) => row.config.id),
         ])
-        json(res, 200, { intervalSeconds: 300, points: pnlCurveRows(fromTs, toTs).filter((point) => ownedStrategyIds.has(point.strategyId)) })
+        json(res, 200, {
+          intervalSeconds: bucketSeconds ?? PNL_SNAPSHOT_INTERVAL_SECONDS,
+          points: pnlCurveRows(fromTs, toTs, bucketSeconds).filter((point) => ownedStrategyIds.has(point.strategyId)),
+        })
         return
       }
       if (req.method === 'GET' && url.pathname === '/v1/recovery') {

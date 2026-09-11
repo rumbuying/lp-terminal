@@ -112,6 +112,12 @@ try {
   const curveBody = await curve.json() as any
   assert.equal(curveBody.intervalSeconds, 300)
   assert.equal(curveBody.points.some((point: any) => point.strategyId === config.id && point.bucketAt % 300 === 0), true)
+  const coarseCurve = await fetch(`${base}/v1/pnl-curve?from=${snapshotAt - 300}&to=${snapshotAt + 300}&bucket=3600`, { headers: auth })
+  assert.equal(coarseCurve.status, 200)
+  const coarseCurveBody = await coarseCurve.json() as any
+  assert.equal(coarseCurveBody.intervalSeconds, 3600)
+  assert.equal(coarseCurveBody.points.some((point: any) => point.strategyId === config.id && point.bucketAt % 3600 === 0), true)
+  assert.equal((await fetch(`${base}/v1/pnl-curve?from=${snapshotAt - 300}&to=${snapshotAt + 300}&bucket=60`, { headers: auth })).status, 400)
   assert.equal((await fetch(`${base}/v1/pnl-curve?from=1&to=${32 * 24 * 60 * 60}`, { headers: auth })).status, 400)
   const invalidProfitTarget = await fetch(`${base}/v1/strategies/${encodeURIComponent(config.id)}/withdraw-profit`, {
     method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ target: 'USDT' }),

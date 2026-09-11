@@ -1,6 +1,7 @@
 import type { StrategyConfig } from '../shared/strategy/types'
 import { rawDelta, shanghaiDate, shanghaiDay } from '../shared/strategy/calendar'
 import { cachedStrategyPerformance } from './performance'
+import { PNL_SNAPSHOT_INTERVAL_SECONDS, bucketPnlCurveRows } from './pnlBuckets'
 import { listStrategies, recordStrategyDailyPoint, recordStrategyPnlSnapshot, strategyDailySnapshots, strategyPnlSnapshots } from './store'
 
 type CalendarPerformance = Awaited<ReturnType<typeof cachedStrategyPerformance>>
@@ -29,8 +30,8 @@ export function recordPerformanceDay(performance: CalendarPerformance) {
   return true
 }
 
-export function pnlCurveRows(from: number, to: number) {
-  return strategyPnlSnapshots(from, to).map((row) => ({
+export function pnlCurveRows(from: number, to: number, bucketSeconds = PNL_SNAPSHOT_INTERVAL_SECONDS) {
+  const rows = strategyPnlSnapshots(from, to).map((row) => ({
     strategyId: String(row.strategy_id),
     bucketAt: Number(row.bucket_at),
     observedAt: Number(row.observed_at),
@@ -38,6 +39,7 @@ export function pnlCurveRows(from: number, to: number) {
     pnlRaw: text(row.pnl_raw),
     pnlUsdgRaw: text(row.pnl_usdg_raw),
   }))
+  return bucketPnlCurveRows(rows, bucketSeconds)
 }
 
 export async function captureDailyPerformance() {

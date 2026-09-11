@@ -61,6 +61,9 @@ import { fmtNum, fmtAmount } from '../../lib/format'
 
 const ACTIVE_EXECUTOR_STATES = new Set(['planned', 'executing', 'monitoring', 'guard_wait', 'recovery', 'recovery_quarantined', 'paused_guard', 'awaiting_manual'])
 const PNL_CURVE_WINDOW_SECONDS = 30 * 24 * 60 * 60
+/** Hourly samples: the 30-day card sparkline is a few hundred pixels wide, so
+ *  the executor's 5-minute cadence would ship megabytes of invisible detail. */
+const PNL_CURVE_BUCKET_SECONDS = 60 * 60
 
 /** Quick-flow safeguard fields, in display order. `minNetAprPct` stays out: the
  *  monitor never computes a net APR, so exposing it would be a dead control. */
@@ -171,7 +174,7 @@ export function StrategyTab() {
   const quotePriceResult = (address: string) => performanceQuotePrices.data?.[address.toLowerCase()]
   const loadPnlCurveRows = async (token: string, from?: number) => {
     const now = Math.floor(Date.now() / 1000)
-    return { now, data: await executorPnlCurve(token, from ?? now - PNL_CURVE_WINDOW_SECONDS, now) }
+    return { now, data: await executorPnlCurve(token, from ?? now - PNL_CURVE_WINDOW_SECONDS, now, PNL_CURVE_BUCKET_SECONDS) }
   }
   const loadTodayRows = (token: string) => {
     const today = shanghaiDay(Math.floor(Date.now() / 1000))
@@ -213,15 +216,16 @@ export function StrategyTab() {
   const connectedRecoveryJobs = user ? recoveryJobs.filter((job) => executorStrategyList.some(
     (strategy) => strategy.config.id === job.strategyId && strategy.config.owner.toLowerCase() === user.toLowerCase(),
   )) : []
-  const refreshExecutor = async (token = accessToken) => {
-    const [walletData, strategyData, recoveryData, performanceData, curveData, calendarData] = await Promise.all([
-      executorWallets(token),
-      executorStrategies(token),
-      executorRecovery(token),
-      executorPerformance(token),
-      loadPnlCurveRows(token),
-      loadTodayRows(token),
-    ])
+  /**
+   * Light snapshot: accounts, strategy list and recovery jobs. This is what
+   * makes the page usable (running state, cards, executor badge), and it is
+   * answered from SQLite without touching the chain.
+   */
+  const applyExecutorLight = (
+    walletData: Awaited<ReturnType<typeof executorWallets>>,
+    strategyData: Awaited<ReturnType<typeof executorStrategies>>,
+    recoveryData: Awaited<ReturnType<typeof executorRecovery>>,
+  ) => {
     setExecutorWalletList(walletData.wallets)
     setExecutorStrategyList(strategyData.strategies)
     setItems(syncStrategyArchiveState(
@@ -229,11 +233,42 @@ export function StrategyTab() {
       strategyData.archivedStrategyIds ?? [],
     ))
     setRecoveryJobs(recoveryData.jobs)
+    setSelectedWalletId((current) => current || walletData.wallets[0]?.id || '')
+  }
+  const refreshExecutorLight = async (token = accessToken) => {
+    const [walletData, strategyData, recoveryData] = await Promise.all([
+      executorWallets(token),
+      executorStrategies(token),
+      executorRecovery(token),
+    ])
+    applyExecutorLight(walletData, strategyData, recoveryData)
+  }
+  /**
+   * Heavy valuation snapshot: per-strategy performance plus the 30-day curve
+   * and today's calendar rows. These run real RPC reads and a cold cache can
+   * take a long time, so they never gate the page's loaded state.
+   */
+  const applyExecutorValuation = (
+    performanceData: Awaited<ReturnType<typeof executorPerformance>>,
+    curveData: Awaited<ReturnType<typeof loadPnlCurveRows>>,
+    calendarData: Awaited<ReturnType<typeof loadTodayRows>>,
+  ) => {
     setExecutorPerformanceList(performanceData.strategies)
     setExecutorCalendarRows(calendarData.rows)
     setPnlCurveRows(curveData.data.points)
     pnlCurveSyncedAt.current = curveData.now
-    setSelectedWalletId((current) => current || walletData.wallets[0]?.id || '')
+  }
+  const refreshExecutorValuation = async (token = accessToken) => {
+    const [performanceData, curveData, calendarData] = await Promise.all([
+      executorPerformance(token),
+      loadPnlCurveRows(token),
+      loadTodayRows(token),
+    ])
+    applyExecutorValuation(performanceData, curveData, calendarData)
+  }
+  /** Both halves, awaited — used after a mutation that changes positions. */
+  const refreshExecutor = async (token = accessToken) => {
+    await Promise.all([refreshExecutorLight(token), refreshExecutorValuation(token)])
   }
   const connectExecutor = async (token = accessToken, role: 'wallet' | 'admin' = 'admin') => {
     const normalizedToken = token.trim()
@@ -243,13 +278,20 @@ export function StrategyTab() {
       const health = await executorHealth()
       if (!health.ok || !(health.signerReady ?? health.vaultReady) || !health.apiAuthReady) throw new Error('executor is not ready')
       setExecutorPaused(health.paused)
-      await refreshExecutor(normalizedToken)
+      // Only the light snapshot decides whether the page is "connected". The
+      // valuation pass can take seconds (cold chain reads, or a slow link on
+      // a multi-megabyte curve), and holding the overview on its loading
+      // placeholder for all of it is what made the strategy page look stuck.
+      await refreshExecutorLight(normalizedToken)
       if (role === 'admin') setAdminToken(normalizedToken)
       if (role === 'admin' && normalizedToken) {
         try { window.localStorage.setItem(executorAdminTokenStorageKey(), normalizedToken) } catch { /* storage can be unavailable */ }
       }
       setAuthRole(role)
       setExecutorOnline(true)
+      // Fill in live P/L as soon as the executor answers; the periodic
+      // refresh below will retry if this attempt fails.
+      void refreshExecutorValuation(normalizedToken).catch(() => undefined)
     } catch (error) {
       setExecutorOnline(false)
       setAuthRole('none')
