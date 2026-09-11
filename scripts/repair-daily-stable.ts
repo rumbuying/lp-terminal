@@ -128,6 +128,13 @@ let nextIndex = 0
 let resolved = 0
 let written = 0
 const failures: { strategyId: string; day: number; endpoint: string; error: string }[] = []
+const repairs: Array<{
+  row: Endpoint
+  pnlUsdg: bigint
+  assetsUsdg: bigint
+  source: 'accounting_identity' | 'historical_time_block_close'
+  blockNumber?: bigint
+} | undefined> = new Array(endpoints.length)
 const worker = async () => {
   while (true) {
     const index = nextIndex++
@@ -155,8 +162,28 @@ const worker = async () => {
       }
       if (pnlUsdg === undefined)
         pnlUsdg = assetsUsdg + accounting.withdrawnUsdg - accounting.baselineUsdg - accounting.gasUsdg
+      repairs[index] = { row, pnlUsdg, assetsUsdg, source, blockNumber }
       resolved++
-      if (apply && repairStrategyDailyStableEndpoint({
+    } catch (error) {
+      failures.push({
+        strategyId: row.strategyId,
+        day: row.day,
+        endpoint: row.endpoint,
+        error: error instanceof Error ? error.message.slice(0, 180) : 'unknown error',
+      })
+    }
+  }
+}
+
+await Promise.all([worker(), worker()])
+// Applying is deliberately two-phase: one unresolved historical mark prevents
+// every write, so an RPC failure can never leave a partially repaired history.
+if (apply && failures.length === 0) {
+  for (const repair of repairs) {
+    if (!repair) throw new Error('daily stable repair preflight result is missing')
+    const { row, pnlUsdg, assetsUsdg, source, blockNumber } = repair
+    try {
+      if (repairStrategyDailyStableEndpoint({
         strategyId: row.strategyId,
         day: row.day,
         endpoint: row.endpoint,
@@ -175,11 +202,10 @@ const worker = async () => {
         endpoint: row.endpoint,
         error: error instanceof Error ? error.message.slice(0, 180) : 'unknown error',
       })
+      break
     }
   }
 }
-
-await Promise.all([worker(), worker()])
 if (apply) audit('accounting', 'daily_stable_snapshots_repaired', 'chain', String(EXECUTOR.chainId), {
   candidates: endpoints.length,
   resolved,
