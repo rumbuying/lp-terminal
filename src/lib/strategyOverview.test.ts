@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { dailyCycleTotals, quoteDailyReturnPct, stableDailyReturnPct } from './strategyOverview'
+import { dailyCycleTotals, quoteDailyReturnPct, stableDailyReturnPct, valuationAvailability } from './strategyOverview'
 import { shanghaiDay } from '../../shared/strategy/calendar'
 
 test('quote daily return aggregates same-quote rows: Σ pnl / Σ opening', () => {
@@ -67,4 +67,12 @@ test('daily cycle totals roll over at Shanghai midnight and skip unfinished cycl
     { completedAt: Date.parse('2026-08-27T03:00:00Z') / 1000, grossFeesQuoteRaw: '300', incomeTaxQuoteRaw: '30' },
     { completedAt: null, grossFeesQuoteRaw: '900', incomeTaxQuoteRaw: '90' },
   ], shanghaiDay, day), { grossFeesRaw: '500', incomeTaxRaw: '50' })
+})
+
+test('loaded null valuations are unavailable rather than indefinitely pending', () => {
+  assert.deepEqual(valuationAvailability([
+    { performanceLoaded: true, pnlRaw: '42' },
+    { performanceLoaded: false, pnlRaw: null },
+    { performanceLoaded: true, pnlRaw: null },
+  ]), { known: 1, pending: 1, unavailable: 1 })
 })

@@ -55,7 +55,7 @@ import { StrategyPnlCurve } from '../strategy/StrategyPnlCurve'
 import { StrategyGuardPanel, guardBlockingText } from '../strategy/StrategyGuardPanel'
 import { PnlUnitToggle } from '../PnlUnitToggle'
 import { mergePnlCurveSnapshots } from '../../lib/pnlCurve'
-import { dailyCycleTotals, quoteDailyReturnPct, stableDailyReturnPct } from '../../lib/strategyOverview'
+import { dailyCycleTotals, quoteDailyReturnPct, stableDailyReturnPct, valuationAvailability } from '../../lib/strategyOverview'
 import { shanghaiDay } from '../../../shared/strategy/calendar'
 import { fmtNum, fmtAmount } from '../../lib/format'
 
@@ -823,6 +823,19 @@ export function StrategyTab() {
       : { raw: summary.pnlQuoteRaw, text: quoteAmount(summary.pnlQuoteRaw, performance, true), pct: summary.pnlPct }
   }
 
+  const performancePnlDetail = (performance: ExecutorPerformance) => {
+    const metric = performancePnl(performance)
+    const alternate = pnlUnit === 'stable'
+      ? quoteAmount(performance.summary?.pnlQuoteRaw ?? null, performance, true)
+      : usdgAmount(performance.summary?.pnlUsdgRaw ?? null, true)
+    const status = metric.raw === null
+      ? t('strategy.perfValuationUnavailable')
+      : metric.pct === null
+        ? t('strategy.perfCalculating')
+        : `${metric.pct >= 0 ? '+' : ''}${metric.pct.toFixed(2)}%`
+    return `${alternate} · ${status}`
+  }
+
   const runningStrategies = executorStrategyList
     .filter((remote) => !!user && remote.config.owner.toLowerCase() === user.toLowerCase() && ACTIVE_EXECUTOR_STATES.has(remote.state) && !remote.config.execution.dryRun)
     .map((remote) => ({
@@ -836,6 +849,10 @@ export function StrategyTab() {
     .map(({ performance }) => performance?.summary ? stableValue(performance.summary.currentValueQuoteRaw, performance) : null)
     .filter((value): value is number => value != null)
   const dashboardPnlKnown = dashboardPnlRows.filter((row) => row.metric.raw != null)
+  const dashboardPnlAvailability = valuationAvailability(runningStrategies.map(({ performance }) => ({
+    performanceLoaded: performance !== undefined,
+    pnlRaw: performance?.summary && performance.quote ? performancePnl(performance).raw : null,
+  })))
   const dashboardPnl = pnlUnit === 'stable'
     ? (dashboardPnlKnown.length ? dashboardPnlKnown.reduce((sum, row) => sum + Number(formatUnits(BigInt(row.metric.raw!), 6)), 0) : null)
     : null
@@ -1072,7 +1089,7 @@ export function StrategyTab() {
                       {performance?.summary ? pnlMetric.text : '—'}
                     </strong>
                     <small>{performance?.summary
-                      ? `${pnlUnit === 'stable' ? quoteAmount(performance.summary.pnlQuoteRaw, performance, true) : usdgAmount(performance.summary.pnlUsdgRaw, true)} · ${pnlMetric.pct == null ? t('strategy.perfCalculating') : `${pnlMetric.pct >= 0 ? '+' : ''}${pnlMetric.pct.toFixed(2)}%`}`
+                      ? performancePnlDetail(performance)
                       : t('strategy.perfUnavailable')}</small>
                   </div>
                   {performance?.summary && performance.quote ? <StrategyPnlCurve
@@ -1096,7 +1113,8 @@ export function StrategyTab() {
         )}
         <div className="strategy-overview-foot mono-sm">
           <span>{t('strategy.overviewRefresh')}</span>
-          {dashboardPnlKnown.length < runningStrategies.length && runningStrategies.length > 0 ? <span className="amber">{t('strategy.overviewPartial', { n: runningStrategies.length - dashboardPnlKnown.length })}</span> : null}
+          {dashboardPnlAvailability.pending > 0 ? <span className="amber">{t('strategy.overviewPartial', { n: dashboardPnlAvailability.pending })}</span> : null}
+          {dashboardPnlAvailability.unavailable > 0 ? <span className="amber">{t('strategy.overviewUnavailable', { n: dashboardPnlAvailability.unavailable })}</span> : null}
           {dashboardTodayKnown.length < runningStrategies.length && runningStrategies.length > 0 ? <span className="amber">{t('strategy.overviewDailyPartial', { n: runningStrategies.length - dashboardTodayKnown.length })}</span> : null}
         </div>
       </section>
@@ -1314,7 +1332,7 @@ export function StrategyTab() {
                     <strong className={cardPnl.raw == null ? 'dim' : BigInt(cardPnl.raw) >= 0n ? 'green' : 'red'}>
                       {cardPnl.text}
                     </strong>
-                    <small>{pnlUnit === 'stable' ? quoteAmount(performance.summary.pnlQuoteRaw, performance, true) : usdgAmount(performance.summary.pnlUsdgRaw, true)} · {cardPnl.pct == null ? t('strategy.perfCalculating') : `${cardPnl.pct >= 0 ? '+' : ''}${cardPnl.pct.toFixed(2)}%`}</small>
+                    <small>{performancePnlDetail(performance)}</small>
                   </div>
                   <div className="performance-metric">
                     <span>{t('strategy.perfAssets')}</span>

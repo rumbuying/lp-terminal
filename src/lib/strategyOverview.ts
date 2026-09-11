@@ -16,6 +16,24 @@ export type DailyCycleInput = {
   incomeTaxQuoteRaw: string
 }
 
+export type ValuationAvailabilityRow = {
+  performanceLoaded: boolean
+  pnlRaw: string | null
+}
+
+/** Loaded-but-null is an unavailable valuation, not work still in flight. */
+export function valuationAvailability(rows: ValuationAvailabilityRow[]) {
+  let known = 0
+  let pending = 0
+  let unavailable = 0
+  for (const row of rows) {
+    if (!row.performanceLoaded) pending++
+    else if (row.pnlRaw === null) unavailable++
+    else known++
+  }
+  return { known, pending, unavailable }
+}
+
 export function dailyCycleTotals(cycles: DailyCycleInput[], dayOf: (timestamp: number) => number, day: number) {
   let grossFees = 0n
   let incomeTax = 0n

@@ -64,6 +64,22 @@ async function historicalWethSqrtPrice(blockNumber: bigint): Promise<bigint> {
   const existing = historicalSqrtCache.get(key)
   if (existing) return existing
   const pending = (async () => {
+    // Prefer the immutable end-of-block state when the configured provider
+    // serves archive calls. Besides being exact for the requested block, this
+    // avoids repeatedly downloading overlapping log windows during a bounded
+    // historical accounting backfill.
+    try {
+      const slot0 = await publicClient.readContract({
+        address: await anchorPool(),
+        abi: uniV3PoolAbi,
+        functionName: 'slot0',
+        blockNumber,
+      })
+      return slot0[0]
+    } catch {
+      // Historical eth_call is unavailable on some production RPCs. Fall back
+      // to the latest Swap at or before the requested block below.
+    }
     // Historical eth_call is unavailable on some production RPCs, while old
     // logs remain queryable. The latest Swap at or before the baseline is the
     // exact slot0 price that remained active at that block.

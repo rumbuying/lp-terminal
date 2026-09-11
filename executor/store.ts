@@ -757,8 +757,8 @@ export type GasValuationMark = {
   settlementToken: string
   settlementValueRaw?: string
   valuationVersion: 1
-  quoteSource?: 'exact_native' | 'confirmation_quote'
-  settlementSource?: 'exact_native' | 'confirmation_quote'
+  quoteSource?: 'exact_native' | 'confirmation_quote' | 'historical_block_close'
+  settlementSource?: 'exact_native' | 'confirmation_quote' | 'historical_block_close'
   error?: string
 }
 
@@ -822,6 +822,98 @@ export function gasValuation(txHash: string): GasValuationMark | undefined {
     quoteSource: row.quote_source ?? undefined,
     settlementSource: row.settlement_source ?? undefined,
     error: row.error ?? undefined,
+  }
+}
+
+export type LegacyGasValuationBackfill = {
+  ledgerId: string
+  strategyId: string
+  jobId: string
+  txHash: string
+  blockNumber: string
+  observedAt: number
+  gasWei: string
+  quoteToken: string
+  quoteValueRaw: string
+  settlementToken: string
+  settlementValueRaw: string
+}
+
+/**
+ * Attach a proven historical block-close mark to one legacy gas row.
+ * Immutable receipt facts must match the ledger before anything is written;
+ * a versioned row is never overwritten, so interrupted runs are resumable.
+ */
+export function backfillLegacyGasValuation(mark: LegacyGasValuationBackfill): boolean {
+  if (!/^\d+$/.test(mark.blockNumber) || !/^\d+$/.test(mark.gasWei)
+    || !/^\d+$/.test(mark.quoteValueRaw) || !/^\d+$/.test(mark.settlementValueRaw))
+    throw new Error('legacy gas valuation contains a non-integer amount')
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const row = db.prepare(`SELECT strategy_id,job_id,ts,block_number,tx_hash,kind,amount,quote_value,meta_json
+      FROM ledger_entries WHERE id=?`).get(mark.ledgerId) as {
+        strategy_id: string; job_id: string | null; ts: number; block_number: string | null
+        tx_hash: string | null; kind: string; amount: string | null; quote_value: string | null; meta_json: string
+      } | undefined
+    if (!row || row.kind !== 'gas'
+      || row.strategy_id !== mark.strategyId || row.job_id !== mark.jobId
+      || row.ts !== mark.observedAt || row.block_number !== mark.blockNumber
+      || row.tx_hash?.toLowerCase() !== mark.txHash.toLowerCase() || row.amount !== mark.gasWei)
+      throw new Error('legacy gas ledger facts changed before backfill')
+
+    const meta = JSON.parse(row.meta_json) as Record<string, unknown>
+    if (meta.gasValuationVersion === 1) {
+      if (row.quote_value !== mark.quoteValueRaw
+        || meta.observedAt !== mark.observedAt
+        || typeof meta.quoteToken !== 'string' || meta.quoteToken.toLowerCase() !== mark.quoteToken.toLowerCase()
+        || meta.quoteSource !== 'exact_native'
+        || typeof meta.settlementToken !== 'string' || meta.settlementToken.toLowerCase() !== mark.settlementToken.toLowerCase()
+        || meta.settlementValueRaw !== mark.settlementValueRaw
+        || meta.settlementSource !== 'historical_block_close')
+        throw new Error('versioned gas ledger conflicts with historical mark')
+      db.exec('ROLLBACK')
+      return false
+    }
+    if (row.quote_value !== null && row.quote_value !== mark.quoteValueRaw)
+      throw new Error('legacy gas quote value conflicts with historical mark')
+
+    const existing = gasValuation(mark.txHash)
+    if (existing && (existing.strategyId !== mark.strategyId || existing.jobId !== mark.jobId
+      || existing.blockNumber !== mark.blockNumber || existing.observedAt !== mark.observedAt
+      || existing.gasWei !== mark.gasWei || existing.quoteToken.toLowerCase() !== mark.quoteToken.toLowerCase()
+      || existing.quoteValueRaw !== mark.quoteValueRaw
+      || existing.settlementToken.toLowerCase() !== mark.settlementToken.toLowerCase()
+      || existing.settlementValueRaw !== mark.settlementValueRaw))
+      throw new Error('existing gas valuation conflicts with historical mark')
+
+    const nextMeta = JSON.stringify({
+      ...meta,
+      gasValuationVersion: 1,
+      observedAt: mark.observedAt,
+      quoteToken: mark.quoteToken,
+      quoteSource: 'exact_native',
+      settlementToken: mark.settlementToken,
+      settlementValueRaw: mark.settlementValueRaw,
+      settlementSource: 'historical_block_close',
+    })
+    const updated = db.prepare(`UPDATE ledger_entries SET quote_value=?,meta_json=?
+      WHERE id=? AND meta_json=?`).run(mark.quoteValueRaw, nextMeta, mark.ledgerId, row.meta_json)
+    if (Number(updated.changes) !== 1) throw new Error('legacy gas ledger changed during backfill')
+
+    if (!existing) db.prepare(`INSERT INTO gas_valuations(
+      tx_hash,strategy_id,job_id,block_number,observed_at,gas_wei,quote_token,quote_value_raw,
+      settlement_token,settlement_value_raw,valuation_version,quote_source,settlement_source,error
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+      mark.txHash, mark.strategyId, mark.jobId, mark.blockNumber, mark.observedAt, mark.gasWei,
+      mark.quoteToken, mark.quoteValueRaw, mark.settlementToken, mark.settlementValueRaw,
+      1, 'exact_native', 'historical_block_close',
+    )
+    db.exec('COMMIT')
+    return true
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
   }
 }
 export function setJobContext(jobId: string, key: string, value: unknown) {
