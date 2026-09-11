@@ -3231,6 +3231,9 @@ const RECOMMENDATION_HISTORY_TTL_MS = 60_000;
 const RECOMMENDATION_RESPONSE_TTL_MS = 60_000;
 const RECOMMENDATION_HISTORY_MEMO_CAP = 512;
 const RECOMMENDATION_STATE_TTL_SECONDS = 600;
+const RECOMMENDATION_RECENT_TICK_SECONDS = 24 * 3_600;
+const RECOMMENDATION_RECENT_TICK_BUCKET_SECONDS = 5 * 60;
+const RECOMMENDATION_RISK_TICK_BUCKET_SECONDS = 30 * 60;
 const RECOMMENDATION_SNAPSHOT_MAX_AGE_MS = Math.max(
   2 * TUNE.recommendationCandidatesMs,
   TUNE.marketStatsFreshMs,
@@ -3256,26 +3259,43 @@ const recommendationMarketQ = db.prepare(`WITH hourly AS (
   FROM hourly LEFT JOIN pool_market_snapshots sample
     ON sample.pool=? AND sample.ts=hourly.sampleTs
   ORDER BY hourly.ts`);
-const recommendationRecentTickQ = db.prepare(
-  'SELECT ts,tick,block_number AS blockNumber FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts',
-);
-const recommendationHistoricTickQ = db.prepare(`SELECT sample.ts,sample.tick,sample.block_number AS blockNumber
-  FROM pool_tick_samples sample JOIN (
-    SELECT MAX(ts) AS ts FROM pool_tick_samples
-    WHERE pool=? AND ts>=? AND ts<? GROUP BY CAST(ts/600 AS INTEGER)
-  ) bucket ON bucket.ts=sample.ts
-  WHERE sample.pool=? ORDER BY sample.ts`);
+const RECOMMENDATION_TICK_SQL =
+  'SELECT ts,tick,block_number AS blockNumber FROM pool_tick_samples WHERE pool=? AND ts>=? ORDER BY ts';
+
+/** Keep the newest observation in each model-resolution bucket. Querying one
+ * pool's indexed seven-day range once is linear; the former SQL self-join
+ * repeatedly scanned that pool for every bucket and took minutes on long-lived
+ * candidates. Five-minute recent evidence and 30-minute risk evidence exactly
+ * match the finest resolutions consumed by the recommendation model. */
+export function downsampleRecommendationTicks(
+  rows: RecommendationHistoryRow[],
+  timestamp: number,
+): RecommendationHistoryRow[] {
+  const recentAt = timestamp - RECOMMENDATION_RECENT_TICK_SECONDS;
+  const latest = new Map<string, RecommendationHistoryRow>();
+  for (const row of rows) {
+    const ts = Number(row.ts);
+    if (!Number.isFinite(ts)) continue;
+    const bucketSeconds = ts >= recentAt
+      ? RECOMMENDATION_RECENT_TICK_BUCKET_SECONDS
+      : RECOMMENDATION_RISK_TICK_BUCKET_SECONDS;
+    latest.set(`${bucketSeconds}:${Math.floor(ts / bucketSeconds)}`, row);
+  }
+  return [...latest.values()].sort((a, b) => Number(a.ts) - Number(b.ts));
+}
 
 function recommendationHistoryFor(identity: string, timestamp: number): RecommendationHistory {
   const memoed = recommendationHistoryMemo.get(identity);
   if (memoed && Date.now() - memoed.at < RECOMMENDATION_HISTORY_TTL_MS) return memoed;
   const marketHistory = recommendationMarketQ.all(
-    identity, timestamp - 30 * 86_400, identity,
+    identity, timestamp - 7 * 86_400, identity,
   ) as RecommendationHistoryRow[];
-  const tickHistory = [
-    ...recommendationHistoricTickQ.all(identity, timestamp - 7 * 86_400, timestamp - 30 * 3_600, identity),
-    ...recommendationRecentTickQ.all(identity, timestamp - 30 * 3_600),
-  ] as RecommendationHistoryRow[];
+  const tickHistory = downsampleRecommendationTicks(
+    // A fresh statement prevents node:sqlite from retaining large prior `.all`
+    // results while this worker advances through the bounded candidate set.
+    db.prepare(RECOMMENDATION_TICK_SQL).all(identity, timestamp - 7 * 86_400) as RecommendationHistoryRow[],
+    timestamp,
+  );
   const entry: RecommendationHistory = { marketHistory, tickHistory, at: Date.now() };
   if (recommendationHistoryMemo.size >= RECOMMENDATION_HISTORY_MEMO_CAP) {
     const nowMs = Date.now();

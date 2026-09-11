@@ -489,6 +489,21 @@ test('candidate history is memoized; a clear restores freshness', () => {
   }
 });
 
+test('recommendation ticks keep the newest sample at model resolution', () => {
+  const timestamp = 2_000_000;
+  const old = timestamp - 2 * 86_400;
+  const recent = timestamp - 3_600;
+  const rows = api.downsampleRecommendationTicks([
+    { ts: old, tick: 1, blockNumber: '1' },
+    { ts: old + 60, tick: 2, blockNumber: '2' },
+    { ts: old + 1_800, tick: 3, blockNumber: '3' },
+    { ts: recent, tick: 4, blockNumber: '4' },
+    { ts: recent + 60, tick: 5, blockNumber: '5' },
+    { ts: recent + 300, tick: 6, blockNumber: '6' },
+  ], timestamp);
+  assert.deepEqual(rows.map((row) => row.tick), [2, 3, 5, 6]);
+});
+
 test('the canonical snapshot builds in a worker thread and serves the route instantly', async () => {
   api.clearRecommendationCaches();
   const pool = address(0xd031);
