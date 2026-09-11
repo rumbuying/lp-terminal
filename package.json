@@ -25,6 +25,7 @@
     "smoke:executor-integration": "tsx scripts/executor-integration-smoke.ts",
     "preflight:real": "tsx scripts/executor-real-preflight.ts",
     "backfill:gas-valuations": "tsx scripts/backfill-gas-valuations.ts",
+    "repair:daily-stable": "tsx scripts/repair-daily-stable.ts",
     "release": "bash deploy/release.sh",
     "release:web": "bash deploy/release.sh --web",
     "release:indexer": "bash deploy/release.sh --indexer",

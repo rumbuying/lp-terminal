@@ -3,7 +3,7 @@ import test from 'node:test'
 import { zeroAddress } from 'viem'
 import { ADDR, NATIVE } from '../src/config/addresses'
 import { Q96 } from '../src/lib/clmath'
-import { usdgValueWethAtSqrt, valuationCurrency, wethValueUsdgAtSqrt } from './stable-valuation'
+import { lastBlockAtOrBefore, usdgValueWethAtSqrt, valuationCurrency, wethValueUsdgAtSqrt } from './stable-valuation'
 
 test('stable valuation follows the anchor price instead of WETH quantity alone', () => {
   const openingWeth = 50n
@@ -31,4 +31,12 @@ test('USDG distributions convert back to WETH at the same anchor spot', () => {
 test('v4 native quote amounts use the wrapped-native valuation market', () => {
   assert.equal(valuationCurrency(zeroAddress), ADDR.WNATIVE)
   assert.equal(valuationCurrency(NATIVE), ADDR.WNATIVE)
+})
+
+test('historical timestamp lookup chooses the last block that is not later', async () => {
+  const timestamp = (block: bigint) => Promise.resolve(block * 10n)
+  assert.equal(await lastBlockAtOrBefore(10n, 25, timestamp), 2n)
+  assert.equal(await lastBlockAtOrBefore(10n, 30, timestamp), 3n)
+  assert.equal(await lastBlockAtOrBefore(10n, 999, timestamp), 10n)
+  await assert.rejects(lastBlockAtOrBefore(10n, 0, (block) => Promise.resolve(1n + block * 10n)), /predates/)
 })

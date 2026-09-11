@@ -464,6 +464,73 @@ export function recordStrategyDailyPoint(point: StrategyDailyPoint) {
   )
 }
 
+export type DailyStableEndpointRepair = {
+  strategyId: string
+  day: number
+  endpoint: 'opening' | 'closing'
+  observedAt: number
+  pnlRaw: string
+  assetsRaw: string
+  pnlUsdgRaw?: string
+  assetsUsdgRaw?: string
+  source: 'accounting_identity' | 'historical_time_block_close'
+  blockNumber?: string
+}
+
+/** Fill only missing stable fields after proving the endpoint's original quote facts. */
+export function repairStrategyDailyStableEndpoint(mark: DailyStableEndpointRepair): boolean {
+  if (mark.pnlUsdgRaw === undefined && mark.assetsUsdgRaw === undefined) throw new Error('daily stable repair has no values')
+  if ((mark.pnlUsdgRaw !== undefined && !/^-?\d+$/.test(mark.pnlUsdgRaw))
+    || (mark.assetsUsdgRaw !== undefined && !/^\d+$/.test(mark.assetsUsdgRaw)))
+    throw new Error('daily stable repair contains an invalid amount')
+  const prefix = mark.endpoint === 'opening' ? 'opening' : 'closing'
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const row = db.prepare(`SELECT ${prefix}_pnl_raw AS pnl_raw,${prefix}_assets_raw AS assets_raw,
+      ${prefix}_pnl_usdg_raw AS pnl_usdg_raw,${prefix}_assets_usdg_raw AS assets_usdg_raw,
+      ${mark.endpoint === 'opening' ? 'first_observed_at' : 'last_observed_at'} AS observed_at
+      FROM strategy_daily_snapshots WHERE strategy_id=? AND shanghai_day=?`).get(mark.strategyId, mark.day) as {
+        pnl_raw: string | null; assets_raw: string | null; pnl_usdg_raw: string | null; assets_usdg_raw: string | null; observed_at: number
+      } | undefined
+    if (!row || row.observed_at !== mark.observedAt || row.pnl_raw !== mark.pnlRaw || row.assets_raw !== mark.assetsRaw)
+      throw new Error('daily snapshot facts changed before stable repair')
+    if (row.pnl_usdg_raw !== null && mark.pnlUsdgRaw !== undefined && row.pnl_usdg_raw !== mark.pnlUsdgRaw)
+      throw new Error('daily P/L stable value conflicts with repair')
+    if (row.assets_usdg_raw !== null && mark.assetsUsdgRaw !== undefined && row.assets_usdg_raw !== mark.assetsUsdgRaw)
+      throw new Error('daily asset stable value conflicts with repair')
+    if ((row.pnl_usdg_raw !== null || mark.pnlUsdgRaw === undefined)
+      && (row.assets_usdg_raw !== null || mark.assetsUsdgRaw === undefined)) {
+      db.exec('ROLLBACK')
+      return false
+    }
+
+    const updated = db.prepare(`UPDATE strategy_daily_snapshots SET
+      ${prefix}_pnl_usdg_raw=COALESCE(${prefix}_pnl_usdg_raw,?),
+      ${prefix}_assets_usdg_raw=COALESCE(${prefix}_assets_usdg_raw,?)
+      WHERE strategy_id=? AND shanghai_day=?
+        AND ${mark.endpoint === 'opening' ? 'first_observed_at' : 'last_observed_at'}=?
+        AND ${prefix}_pnl_raw=? AND ${prefix}_assets_raw=?`).run(
+      mark.pnlUsdgRaw ?? null, mark.assetsUsdgRaw ?? null,
+      mark.strategyId, mark.day, mark.observedAt, mark.pnlRaw, mark.assetsRaw,
+    )
+    if (Number(updated.changes) !== 1) throw new Error('daily snapshot changed during stable repair')
+    audit('accounting', 'daily_stable_endpoint_repaired', 'strategy', mark.strategyId, {
+      day: mark.day,
+      endpoint: mark.endpoint,
+      observedAt: mark.observedAt,
+      blockNumber: mark.blockNumber ?? null,
+      pnlUsdgRaw: mark.pnlUsdgRaw ?? null,
+      assetsUsdgRaw: mark.assetsUsdgRaw ?? null,
+      source: mark.source,
+    })
+    db.exec('COMMIT')
+    return true
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
 const PNL_SNAPSHOT_SECONDS = 5 * 60
 const PNL_SNAPSHOT_RETENTION_SECONDS = 90 * 24 * 60 * 60
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { dailyCycleTotals, quoteDailyReturnPct, stableDailyReturnPct, valuationAvailability } from './strategyOverview'
+import { dailyCycleTotals, quoteDailyReturnPct, selectedDailyPnlRaw, stableDailyReturnPct, valuationAvailability } from './strategyOverview'
 import { shanghaiDay } from '../../shared/strategy/calendar'
 
 test('quote daily return aggregates same-quote rows: Σ pnl / Σ opening', () => {
@@ -27,6 +27,10 @@ test('quote daily return refuses mixed quotes and incomplete snapshots', () => {
   ]), null)
   assert.equal(quoteDailyReturnPct([
     { pnlRaw: null, openingAssetsRaw: '10000', quoteAddress: '0xA' },
+  ]), null)
+  assert.equal(quoteDailyReturnPct([
+    { pnlRaw: '100', openingAssetsRaw: '10000', quoteAddress: '0xA' },
+    { pnlRaw: '100', openingAssetsRaw: null, quoteAddress: '0xA' },
   ]), null)
   assert.equal(quoteDailyReturnPct([]), null)
   // non-positive opening assets cannot be a denominator
@@ -56,6 +60,10 @@ test('stable daily return refuses a current-price substitute for a missing openi
   assert.equal(stableDailyReturnPct([
     { pnlUsdgRaw: null, openingAssetsUsdgRaw: '2000000000' },
   ]), null)
+  assert.equal(stableDailyReturnPct([
+    { pnlUsdgRaw: '1000000', openingAssetsUsdgRaw: '2000000000' },
+    { pnlUsdgRaw: '1000000', openingAssetsUsdgRaw: null },
+  ]), null)
   assert.equal(stableDailyReturnPct([]), null)
 })
 
@@ -75,4 +83,10 @@ test('loaded null valuations are unavailable rather than indefinitely pending', 
     { performanceLoaded: false, pnlRaw: null },
     { performanceLoaded: true, pnlRaw: null },
   ]), { known: 1, pending: 1, unavailable: 1 })
+})
+
+test('daily P/L availability follows the selected currency independently', () => {
+  const row = { pnlRaw: '42', pnlUsdgRaw: null }
+  assert.equal(selectedDailyPnlRaw(row, 'quote'), '42')
+  assert.equal(selectedDailyPnlRaw(row, 'stable'), null)
 })

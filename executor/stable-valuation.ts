@@ -19,6 +19,7 @@ const swapEvent = parseAbiItem(
 )
 
 const historicalSqrtCache = new Map<string, Promise<bigint>>()
+const historicalBlockCache = new Map<number, Promise<bigint>>()
 let anchorPoolPromise: Promise<Address> | undefined
 
 function anchorPool(): Promise<Address> {
@@ -126,4 +127,40 @@ export async function historicalQuoteValueInUsdg(
   if (low(token) === low(SETTLEMENT)) return amountQuoteRaw
   if (EXECUTOR.chainId !== 4663 || low(token) !== low(WRAPPED_NATIVE)) throw new Error('historical stable mark unsupported for quote token')
   return wethValueUsdgAtSqrt(amountQuoteRaw, await historicalWethSqrtPrice(blockNumber))
+}
+
+export async function lastBlockAtOrBefore(
+  highestBlock: bigint,
+  timestamp: number,
+  blockTimestamp: (blockNumber: bigint) => Promise<bigint>,
+): Promise<bigint> {
+  if (!Number.isInteger(timestamp) || timestamp < 0) throw new Error('historical timestamp must be a non-negative integer')
+  let lower = 0n
+  let upper = highestBlock
+  const target = BigInt(timestamp)
+  if (await blockTimestamp(0n) > target) throw new Error('historical timestamp predates the chain')
+  while (lower < upper) {
+    const middle = (lower + upper + 1n) / 2n
+    if (await blockTimestamp(middle) <= target) lower = middle
+    else upper = middle - 1n
+  }
+  return lower
+}
+
+/** Resolve the chain block whose close is nearest to, but not after, a snapshot timestamp. */
+export function historicalBlockAtOrBefore(timestamp: number): Promise<bigint> {
+  const existing = historicalBlockCache.get(timestamp)
+  if (existing) return existing
+  const pending = publicClient.getBlockNumber()
+    .then((highest) => lastBlockAtOrBefore(
+      highest,
+      timestamp,
+      async (blockNumber) => (await publicClient.getBlock({ blockNumber })).timestamp,
+    ))
+    .catch((error) => {
+      historicalBlockCache.delete(timestamp)
+      throw error
+    })
+  historicalBlockCache.set(timestamp, pending)
+  return pending
 }

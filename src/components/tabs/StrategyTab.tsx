@@ -55,7 +55,7 @@ import { StrategyPnlCurve } from '../strategy/StrategyPnlCurve'
 import { StrategyGuardPanel, guardBlockingText } from '../strategy/StrategyGuardPanel'
 import { PnlUnitToggle } from '../PnlUnitToggle'
 import { mergePnlCurveSnapshots } from '../../lib/pnlCurve'
-import { dailyCycleTotals, quoteDailyReturnPct, stableDailyReturnPct, valuationAvailability } from '../../lib/strategyOverview'
+import { dailyCycleTotals, quoteDailyReturnPct, selectedDailyPnlRaw, stableDailyReturnPct, valuationAvailability } from '../../lib/strategyOverview'
 import { shanghaiDay } from '../../../shared/strategy/calendar'
 import { fmtNum, fmtAmount } from '../../lib/format'
 
@@ -872,12 +872,14 @@ export function StrategyTab() {
     ? [[remote.config.id, performance] as const]
     : []))
   const dashboardTodayRows = executorCalendarRows.filter((row) => runningStrategyIds.has(row.strategyId))
-  const dashboardTodayKnown = dashboardTodayRows.filter((row) => row.pnlRaw !== null && row.pnlUsdgRaw !== null)
-  const dashboardTodayStableRaw = dashboardTodayKnown.length
+  const dashboardTodayKnown = dashboardTodayRows.filter((row) => selectedDailyPnlRaw(row, pnlUnit) !== null)
+  const dashboardTodayStableRaw = pnlUnit === 'stable' && dashboardTodayKnown.length
     ? dashboardTodayKnown.reduce((sum, row) => sum + BigInt(row.pnlUsdgRaw!), 0n).toString()
     : null
-  const dashboardTodayQuoteAddresses = new Set(dashboardTodayKnown.map((row) => row.quote.address.toLowerCase()))
-  const dashboardTodayQuoteRaw = dashboardTodayKnown.length && dashboardTodayQuoteAddresses.size === 1
+  const dashboardTodayQuoteAddresses = new Set(pnlUnit === 'quote'
+    ? dashboardTodayKnown.map((row) => row.quote.address.toLowerCase())
+    : [])
+  const dashboardTodayQuoteRaw = pnlUnit === 'quote' && dashboardTodayKnown.length && dashboardTodayQuoteAddresses.size === 1
     ? dashboardTodayKnown.reduce((sum, row) => sum + BigInt(row.pnlRaw!), 0n).toString()
     : null
   const dashboardTodayQuotePerformance = dashboardTodayKnown.length ? performanceByStrategy.get(dashboardTodayKnown[0].strategyId) : undefined

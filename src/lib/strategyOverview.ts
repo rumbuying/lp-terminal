@@ -21,6 +21,13 @@ export type ValuationAvailabilityRow = {
   pnlRaw: string | null
 }
 
+export type DailyPnlRow = { pnlRaw: string | null; pnlUsdgRaw: string | null }
+
+/** One unavailable currency must not hide a valid P/L in the selected unit. */
+export function selectedDailyPnlRaw(row: DailyPnlRow, unit: 'stable' | 'quote'): string | null {
+  return unit === 'stable' ? row.pnlUsdgRaw : row.pnlRaw
+}
+
 /** Loaded-but-null is an unavailable valuation, not work still in flight. */
 export function valuationAvailability(rows: ValuationAvailabilityRow[]) {
   let known = 0
@@ -54,14 +61,13 @@ export function dailyCycleTotals(cycles: DailyCycleInput[], dayOf: (timestamp: n
  * "当日盈亏" total next to it.
  */
 export function quoteDailyReturnPct(rows: DailyQuoteReturnRow[]): number | null {
-  const contributing = rows.filter((row) => row.pnlRaw !== null && row.openingAssetsRaw !== null)
-  if (contributing.length === 0) return null
-  if (new Set(contributing.map((row) => row.quoteAddress.toLowerCase())).size !== 1) return null
+  if (rows.length === 0 || rows.some((row) => row.pnlRaw === null || row.openingAssetsRaw === null)) return null
+  if (new Set(rows.map((row) => row.quoteAddress.toLowerCase())).size !== 1) return null
   let pnl = 0n
   let opening = 0n
-  for (const row of contributing) {
+  for (const row of rows) {
     const openingRaw = BigInt(row.openingAssetsRaw!)
-    if (openingRaw <= 0n) continue
+    if (openingRaw <= 0n) return null
     pnl += BigInt(row.pnlRaw!)
     opening += openingRaw
   }
@@ -73,23 +79,19 @@ export function quoteDailyReturnPct(rows: DailyQuoteReturnRow[]): number | null 
  * Daily portfolio return in USDG: Σ day USDG P/L / Σ opening USDG assets.
  * Both terms are settlement-denominated, so the result shares the sign of the
  * USDG "当日盈亏" total — a positive USDG P/L can never show a negative rate.
- * Rows without an occurrence-time USDG P/L and day-open asset mark are skipped.
+ * Incomplete rows make the portfolio rate unavailable rather than silently
+ * changing the strategy set used by the adjacent portfolio P/L.
  * A current token price must never rewrite a historical daily denominator.
  */
 export function stableDailyReturnPct(rows: DailyStableReturnRow[]): number | null {
+  if (rows.length === 0 || rows.some((row) => row.pnlUsdgRaw === null || row.openingAssetsUsdgRaw === null)) return null
   let pnlUsdg = 0n
-  let openingUsdg = 0
+  let openingUsdg = 0n
   for (const row of rows) {
-    if (row.pnlUsdgRaw === null) continue
-    let opening: number | null = null
-    if (row.openingAssetsUsdgRaw !== null) {
-      const raw = Number(row.openingAssetsUsdgRaw)
-      if (Number.isFinite(raw) && raw > 0) opening = raw / 1e6
-    }
-    if (opening === null) continue
-    pnlUsdg += BigInt(row.pnlUsdgRaw)
+    const opening = BigInt(row.openingAssetsUsdgRaw!)
+    if (opening <= 0n) return null
+    pnlUsdg += BigInt(row.pnlUsdgRaw!)
     openingUsdg += opening
   }
-  if (openingUsdg <= 0) return null
-  return (Number(pnlUsdg) / 1e6 / openingUsdg) * 100
+  return Number((pnlUsdg * 1_000_000n) / openingUsdg) / 10_000
 }
