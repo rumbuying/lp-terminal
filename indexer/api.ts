@@ -3234,6 +3234,16 @@ const RECOMMENDATION_STATE_TTL_SECONDS = 600;
 const RECOMMENDATION_RECENT_TICK_SECONDS = 24 * 3_600;
 const RECOMMENDATION_RECENT_TICK_BUCKET_SECONDS = 5 * 60;
 const RECOMMENDATION_RISK_TICK_BUCKET_SECONDS = 30 * 60;
+const RECOMMENDATION_SOURCE_TTL_SECONDS = Math.min(MARKET_STATS_TTL_SECONDS, RECOMMENDATION_STATE_TTL_SECONDS);
+// A candidate near the TTL boundary can expire while its serialized snapshot
+// is waiting for the next worker. Keep two refresh intervals in reserve so one
+// failed build still cannot publish a payload that is immediately unusable.
+const RECOMMENDATION_SOURCE_HEADROOM_SECONDS = Math.min(
+  RECOMMENDATION_SOURCE_TTL_SECONDS - 1,
+  Math.ceil(2 * TUNE.recommendationCandidatesMs / 1_000),
+);
+const RECOMMENDATION_SOURCE_MAX_AGE_SECONDS =
+  RECOMMENDATION_SOURCE_TTL_SECONDS - RECOMMENDATION_SOURCE_HEADROOM_SECONDS;
 const RECOMMENDATION_SNAPSHOT_MAX_AGE_MS = Math.max(
   2 * TUNE.recommendationCandidatesMs,
   TUNE.marketStatsFreshMs,
@@ -3395,11 +3405,11 @@ export function getRecommendationCandidates(params: Params) {
   const minVolume = Math.max(Number(params.get('min_volume')) || 10_000, 0);
   const timestamp = now();
   const priceCutoff = timestamp - PRICE_SEED_TTL_SECONDS;
-  // Recommendation freshness is stricter than the general pool page. Never
-  // admit a 10–15 minute stats row and then mark the whole candidate payload
-  // stale under the 10-minute recommendation contract below.
-  const statsCutoff = timestamp - Math.min(MARKET_STATS_TTL_SECONDS, RECOMMENDATION_STATE_TTL_SECONDS);
-  const stateCutoff = timestamp - RECOMMENDATION_STATE_TTL_SECONDS;
+  // Recommendation freshness is stricter than the general pool page, and a
+  // ready-made payload must remain valid until the next worker publication.
+  const sourceCutoff = timestamp - RECOMMENDATION_SOURCE_MAX_AGE_SECONDS;
+  const statsCutoff = sourceCutoff;
+  const stateCutoff = sourceCutoff;
   const addressSelect = `SELECT
       p.address AS identity,p.address AS pool,NULL AS pool_id,p.proto,
       p.token0,p.token1,p.fee_ppm,p.fee_ppm AS key_fee_ppm,
@@ -3518,7 +3528,7 @@ export function getRecommendationCandidates(params: Params) {
     ? Math.min(...rows.flatMap((row) => [Number(row.stats_updated), Number(row.state_updated)]))
     : null;
   const status: DataFreshness = kvGet('ready') === '1'
-    ? dataFreshness(sourceAsOf, Math.min(TUNE.marketStatsFreshMs, RECOMMENDATION_STATE_TTL_SECONDS * 1_000), timestamp)
+    ? dataFreshness(sourceAsOf, RECOMMENDATION_SOURCE_TTL_SECONDS * 1_000, timestamp)
     : 'unavailable';
   return {
     ready: kvGet('ready') === '1',
@@ -3527,7 +3537,7 @@ export function getRecommendationCandidates(params: Params) {
     freshness: {
       status,
       observedAt: sourceAsOf,
-      ttlSeconds: Math.min(MARKET_STATS_TTL_SECONDS, RECOMMENDATION_STATE_TTL_SECONDS),
+      ttlSeconds: RECOMMENDATION_SOURCE_TTL_SECONDS,
     },
     candidates: rows.map((row) => {
       const identity = String(row.identity);

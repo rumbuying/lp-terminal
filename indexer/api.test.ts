@@ -286,7 +286,7 @@ test('recommendation candidates expose fresh v3 state without changing the publi
     );
     store.upsertStats(pool, { m5: 100, h1: 1_000, h6: 6_000, h24: 24_000 }, 10, 100_000, 'test');
 
-    const recommendationStale = Math.floor(Date.now() / 1_000) - 700;
+    const recommendationStale = Math.floor(Date.now() / 1_000) - 400;
     store.db.prepare('UPDATE pool_stats SET updated=? WHERE address=?').run(recommendationStale, pool);
     assert.equal(
       api.getRecommendationCandidates(new URLSearchParams({ limit: '10' }))
