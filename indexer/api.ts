@@ -3395,7 +3395,10 @@ export function getRecommendationCandidates(params: Params) {
   const minVolume = Math.max(Number(params.get('min_volume')) || 10_000, 0);
   const timestamp = now();
   const priceCutoff = timestamp - PRICE_SEED_TTL_SECONDS;
-  const statsCutoff = timestamp - MARKET_STATS_TTL_SECONDS;
+  // Recommendation freshness is stricter than the general pool page. Never
+  // admit a 10–15 minute stats row and then mark the whole candidate payload
+  // stale under the 10-minute recommendation contract below.
+  const statsCutoff = timestamp - Math.min(MARKET_STATS_TTL_SECONDS, RECOMMENDATION_STATE_TTL_SECONDS);
   const stateCutoff = timestamp - RECOMMENDATION_STATE_TTL_SECONDS;
   const addressSelect = `SELECT
       p.address AS identity,p.address AS pool,NULL AS pool_id,p.proto,
