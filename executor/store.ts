@@ -1620,13 +1620,20 @@ export function scheduleRecoveryRetry(jobId: string, code: string, quarantineEli
   return { attempts: next.attempts, streak: next.streak, failStreak: next.failStreak, delayMs: next.delaySeconds * 1_000, quarantined: next.quarantined, escalating: deferQuarantine }
 }
 
-/** Allow one operator-requested attempt without discarding any chain facts. */
+/**
+ * Allow one operator-requested attempt without discarding any chain facts.
+ * The retry counters reset with the quarantine: an operator resume is an
+ * explicit decision to re-arm automation, and stale strikes would otherwise
+ * re-quarantine the job on its first post-resume failure — even a transient
+ * one, because `failStreak >= 3` quarantines regardless of error class. Chain
+ * facts (steps, transactions, job context) are never touched.
+ */
 export function reactivateRecoveryJob(jobId: string) {
   const row = db.prepare(`SELECT strategy_id FROM jobs WHERE id=? AND state='recovery'`).get(jobId) as { strategy_id: string } | undefined
   if (!row) throw new Error('E_RECOVERY_JOB')
   db.exec('BEGIN IMMEDIATE')
   try {
-    db.prepare(`UPDATE jobs SET recovery_next_at=NULL,recovery_quarantined_at=NULL WHERE id=?`).run(jobId)
+    db.prepare(`UPDATE jobs SET recovery_attempts=0,recovery_error_streak=0,recovery_fail_streak=0,recovery_last_error=NULL,recovery_next_at=NULL,recovery_quarantined_at=NULL WHERE id=?`).run(jobId)
     db.prepare(`UPDATE strategies SET state='recovery',updated_at=? WHERE id=?`).run(ts(), row.strategy_id)
     db.exec('COMMIT')
   } catch (error) {

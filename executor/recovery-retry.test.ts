@@ -184,4 +184,44 @@ test('scheduleRecoveryRetry defers quarantine while the reverted swap can still 
   assert.equal(plain.quarantined, false, 'first execution-grade failure still schedules a retry')
 })
 
+test('an operator resume clears stale strikes so one failure cannot re-quarantine', async () => {
+  // The live CASHCAT job reached failStreak 3 before quarantine; resuming it
+  // must re-arm the ladder instead of re-quarantining on the first post-resume
+  // failure (failStreak >= 3 quarantines regardless of the failing code).
+  const [{ upsertStrategy }, { originalStrategyDraft }, { UNI }] = await Promise.all([
+    import('./store'), import('../shared/strategy/schema'), import('../src/config/addresses'),
+  ])
+  const { db, reactivateRecoveryJob, scheduleRecoveryRetry } = await import('./store')
+  const owner = '0x0000000000000000000000000000000000000066' as const
+  const base = originalStrategyDraft({
+    owner, protocol: 'univ3', pool: '0x0000000000000000000000000000000000000077', positionManager: UNI.V3_NPM,
+    riskToken: '0x0000000000000000000000000000000000000088', quoteToken: '0x0000000000000000000000000000000000000099', activeTokenId: '8',
+  })
+  const strategyId = 'resume-swap-strategy'
+  upsertStrategy({ ...base, id: strategyId, name: 'Resume swap strategy', enabled: true })
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(`INSERT INTO jobs (id,strategy_id,plan_json,state,created_at,updated_at,recovery_attempts,recovery_error_streak,recovery_fail_streak,recovery_last_error,recovery_next_at,recovery_quarantined_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('resume-job', strategyId, '{}', 'recovery', now, now, 3, 1, 3, 'E_SWAP_IMPACT', now + 20, now)
+  db.prepare(`UPDATE strategies SET state='recovery_quarantined',updated_at=? WHERE id=?`).run(now, strategyId)
+
+  reactivateRecoveryJob('resume-job')
+  const row = db.prepare('SELECT recovery_attempts,recovery_error_streak,recovery_fail_streak,recovery_last_error,recovery_next_at,recovery_quarantined_at FROM jobs WHERE id=?').get('resume-job') as Record<string, unknown>
+  assert.equal(row.recovery_attempts, 0)
+  assert.equal(row.recovery_error_streak, 0)
+  assert.equal(row.recovery_fail_streak, 0)
+  assert.equal(row.recovery_last_error, null)
+  assert.equal(row.recovery_next_at, null)
+  assert.equal(row.recovery_quarantined_at, null)
+  const strategyState = (db.prepare('SELECT state FROM strategies WHERE id=?').get(strategyId) as { state: string }).state
+  assert.equal(strategyState, 'recovery')
+
+  // A fresh execution-grade failure starts a new deferred ladder, not a quarantine…
+  const retry = scheduleRecoveryRetry('resume-job', 'E_TX_REVERTED', true)
+  assert.equal(retry.quarantined, false)
+  // …and a transient market-guard trip never quarantines regardless of history.
+  const transient = scheduleRecoveryRetry('resume-job', 'E_SWAP_IMPACT', false)
+  assert.equal(transient.quarantined, false)
+})
+
 test.after(() => rmSync(dir, { recursive: true, force: true }))
