@@ -28,8 +28,10 @@ type Prepared = {
 }
 
 type SolverQuote = {
+  amountOutGross: bigint
   amountOutNet: bigint
   minAmountOutNet: bigint
+  feeBps: number
   settler: Address | null
   allowanceTarget: Address | null
   tx: { requiredFrom?: Address; to: Address; value: bigint; data: Hex } | null
@@ -46,8 +48,10 @@ const basePrepared: Prepared = {
 }
 
 const baseQuote: SolverQuote = {
+  amountOutGross: 1_000n,
   amountOutNet: 1_000n,
   minAmountOutNet: 990n,
+  feeBps: 0,
   settler: SETTLER,
   allowanceTarget: SPENDER,
   tx: { to: SETTLER, value: 0n, data: '0xfeed' },
@@ -65,6 +69,7 @@ let delivered = 1_000n
 // --- what the run did ---
 let prepareCalls = 0
 let solverCalls = 0
+let solverSlippageRequests: number[] = []
 let steps: string[] = []
 let sent: Record<string, unknown>[] = []
 let preflighted: unknown[] = []
@@ -81,6 +86,7 @@ function begin() {
   delivered = 1_000n
   prepareCalls = 0
   solverCalls = 0
+  solverSlippageRequests = []
   steps = []
   sent = []
   preflighted = []
@@ -116,8 +122,9 @@ mock.module('./directSwap', {
 })
 mock.module('./solver', {
   namedExports: {
-    fetchSolverQuote: async () => {
+    fetchSolverQuote: async (args: { slippageBps: number }) => {
       solverCalls += 1
+      solverSlippageRequests.push(args.slippageBps)
       return quoteAt(solverCalls)
     },
   },
@@ -302,11 +309,28 @@ test('a solver re-quote below the caller minimum halts after the approval', asyn
   assert.deepEqual(sent, [])
 })
 
-test('a solver quote with an execution floor below the displayed minimum is refused', async () => {
+test('a solver quote above the displayed minimum tightens its transaction floor instead of refusing a small move', async () => {
   begin()
-  quoteAt = () => ({ ...baseQuote, minAmountOutNet: 989n })
-  await assert.rejects(executeSolverSwap(solverIntent), SlippageError)
-  assert.deepEqual(sent, [])
+  quoteAt = (call) => call === 1
+    ? { ...baseQuote, amountOutGross: 999n, amountOutNet: 999n, minAmountOutNet: 989n }
+    : { ...baseQuote, amountOutGross: 999n, amountOutNet: 999n, minAmountOutNet: 990n }
+
+  await executeSolverSwap(solverIntent)
+
+  assert.deepEqual(solverSlippageRequests, [100, 90])
+  assert.equal(sent.length, 1)
+})
+
+test('solver floor tightening includes the terminal fee and integer rounding', async () => {
+  begin()
+  quoteAt = (call) => call === 1
+    ? { ...baseQuote, amountOutNet: 997n, minAmountOutNet: 988n, feeBps: 30 }
+    : { ...baseQuote, amountOutNet: 997n, minAmountOutNet: 990n, feeBps: 30 }
+
+  await executeSolverSwap(solverIntent)
+
+  assert.deepEqual(solverSlippageRequests, [100, 80])
+  assert.equal(sent.length, 1)
 })
 
 test('a solver allowance target that moved after approval stops the swap', async () => {

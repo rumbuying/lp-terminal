@@ -6,7 +6,7 @@ import { swapFee } from '../config/env'
 import { wagmiConfig } from '../config/wagmi'
 import { t } from '../i18n'
 import { buildDirectTransaction, erc20Of, isNative, quoteDirectRoute, type DirectRoute } from './directSwap'
-import { fetchSolverQuote } from './solver'
+import { fetchSolverQuote, type SolverQuote } from './solver'
 import { preflightSolverTransaction } from './solverPreflight'
 import {
   accountChangedMessage,
@@ -216,25 +216,66 @@ export type SolverSwapIntent = {
   onStepFail?: (why: StepFailWhy) => void
 }
 
+/** The displayed minimum is an absolute promise, while solver slippage is
+ * relative to the newest quote. If the market moves down but remains above the
+ * displayed floor, reusing the original percentage would put a lower minimum
+ * in the fresh transaction and reject virtually every small downward tick.
+ * Find the widest (least restrictive) tolerance whose server-computed net
+ * minimum still preserves the displayed floor. */
+function solverSlippageForMinimum(
+  quote: Pick<SolverQuote, 'amountOutGross' | 'feeBps'>,
+  minimumAmountOut: bigint,
+  maximumBps: number,
+): number {
+  const fee = BigInt(quote.feeBps)
+  const minimumAt = (bps: number) => {
+    const grossMinimum = (quote.amountOutGross * BigInt(10_000 - bps)) / 10_000n
+    return grossMinimum - (grossMinimum * fee) / 10_000n
+  }
+  let low = 0
+  let high = maximumBps
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2)
+    if (minimumAt(mid) >= minimumAmountOut) low = mid
+    else high = mid - 1
+  }
+  return low
+}
+
 /** Solver-routed swap: fetch a fresh quote WITH a tx, approve the
  *  AllowanceHolder for exactly amountIn, send the tx as-is. Mirrors
  *  executeSwap's shape — pre-flight re-quote, post-approval re-prepare with
  *  a spender-consistency check, Transfer-log delivery verification. */
 export async function executeSolverSwap(args: SolverSwapIntent): Promise<ConfirmedSwap | null> {
   requireSender(args.sender)
-  const fresh = () =>
+  const fresh = (slippageBps: number) =>
     fetchSolverQuote({
       tokenIn: args.tokenIn,
       tokenOut: args.tokenOut,
       amountIn: args.amountIn,
-      slippageBps: args.slippageBps,
+      slippageBps,
       recipient: args.recipient,
       sender: args.sender,
       feeBps: args.feeBps,
     })
-  let quote = await fresh()
-  if (quote.amountOutNet < args.minimumAmountOut || quote.minAmountOutNet < args.minimumAmountOut)
+  const freshPreservingMinimum = async (): Promise<SolverQuote> => {
+    let slippageBps = args.slippageBps
+    // Usually the second quote is identical apart from its tighter floor. A
+    // third bounded attempt covers a block advancing between those requests.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const quote = await fresh(slippageBps)
+      if (quote.amountOutNet < args.minimumAmountOut) {
+        throw new SlippageError(t('swap.errQuoteMoved'))
+      }
+      if (quote.minAmountOutNet >= args.minimumAmountOut) return quote
+      const tighter = solverSlippageForMinimum(quote, args.minimumAmountOut, slippageBps)
+      if (tighter >= slippageBps) break
+      slippageBps = tighter
+    }
     throw new SlippageError(t('swap.errQuoteMoved'))
+  }
+
+  let quote = await freshPreservingMinimum()
 
   if (quote.allowanceTarget !== null) {
     const allowance = await ensureAllowance(
@@ -248,9 +289,7 @@ export async function executeSolverSwap(args: SolverSwapIntent): Promise<Confirm
     if (allowance === 'approved') {
       requireSender(args.sender)
       const approvedSpender = quote.allowanceTarget
-      quote = await fresh()
-      if (quote.amountOutNet < args.minimumAmountOut || quote.minAmountOutNet < args.minimumAmountOut)
-        throw new SlippageError(t('swap.errQuoteMoved'))
+      quote = await freshPreservingMinimum()
       if (quote.allowanceTarget === null || getAddress(quote.allowanceTarget) !== getAddress(approvedSpender)) {
         throw new Error('solver allowance target changed after approval')
       }
