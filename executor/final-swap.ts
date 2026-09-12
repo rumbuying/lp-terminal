@@ -9,9 +9,22 @@ import { convertPoolAmount } from './risk'
 const rawCurrency = (token: Address): Address => token.toLowerCase() === NATIVE.toLowerCase() ? zeroAddress : token
 const routeCurrency = (token: Address): Address => token.toLowerCase() === zeroAddress ? NATIVE : token
 
-/** Impact and slippage have separate limits. A recovery retry may widen its
- * quoted slippage only within the original combined execution-loss budget;
- * retries must not silently turn a 1% impact + 1% slippage policy into 11%. */
+/**
+ * Impact and slippage have separate limits. The impact leg is absolute: a
+ * fresh quote more than `maxImpactBps` below this pool's own spot is refused
+ * no matter what the retry history is — a toxic market never gets wider
+ * tolerance on the quote itself.
+ *
+ * The slippage leg uses the EFFECTIVE tolerance of this send. For a recovery
+ * retry that is the swap-escalation ladder's widened value (still capped at
+ * 10%, see swap-escalation), so a revert-bounded retry can genuinely re-quote
+ * at a wider `minOut`. Pinning the floor to the base slippage instead makes
+ * every escalated send unsatisfiable: a `minOut` of quote*(1-4%) can never
+ * reach a floor computed at base 1% unless the quote beats spot by ~2%, so
+ * past the second revert the job can neither send nor succeed — the live
+ * CASHCAT recovery of 2026-09-11 wedged exactly there (streak 2 → E_SWAP_IMPACT
+ * on every subsequent attempt, pre-send, with the funds already in the wallet).
+ */
 export function assertFinalSwapBounds(args: {
   amountOut: bigint
   minOut: bigint
@@ -32,7 +45,7 @@ export function assertFinalSwapBounds(args: {
   // Ceiling arithmetic: accepting a fractional raw-unit deficit would exceed
   // the configured limit, especially for small fee/recovery swaps.
   const quoteFloor = (args.referenceOut * (10_000n - impact) + 9_999n) / 10_000n
-  const executionFloor = (args.referenceOut * (10_000n - impact) * BigInt(10_000 - args.baseSlippageBps) + 99_999_999n) / 100_000_000n
+  const executionFloor = (args.referenceOut * (10_000n - impact) * BigInt(10_000 - args.slippageBps) + 99_999_999n) / 100_000_000n
   if (args.amountOut < quoteFloor || args.minOut < executionFloor) throw new Error('E_SWAP_IMPACT')
 }
 

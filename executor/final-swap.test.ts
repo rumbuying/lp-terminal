@@ -62,10 +62,19 @@ test('changed spender or route identity fails before send', async () => {
   }
 })
 
-test('recovery escalation cannot exceed the original combined loss budget', async () => {
-  await assert.rejects(prepare({ slippageBps: 400 }), /E_SWAP_IMPACT/)
-  amountOut = 10_300n // improved quote can fund wider tolerance within the same floor
+test('recovery escalation widens the execution floor within the 10% cap, never the impact leg', async () => {
+  // A spot quote with an escalated minOut must be sendable: the ladder's whole
+  // purpose is re-quoting at a wider minOut after consecutive reverts. With
+  // the old base-slippage floor this exact shape (streak 2 → 400 bps) threw
+  // E_SWAP_IMPACT pre-send on every later attempt and wedged the recovery.
   await prepare({ slippageBps: 400 })
+  await prepare({ slippageBps: 1000 })
+  // Slippage past the escalation cap stays invalid…
+  await assert.rejects(prepare({ slippageBps: 1001 }), /E_SWAP_SLIPPAGE/)
+  // …and the impact leg stays absolute: a deteriorated quote is refused even
+  // with escalated tolerance, because the market itself is the problem.
+  amountOut = 9_899n
+  await assert.rejects(prepare({ slippageBps: 400 }), /E_SWAP_IMPACT/)
 })
 
 test('native currency sentinel is normalized to the pool reference', async () => {
@@ -90,4 +99,18 @@ test('invalid or insufficient minOut is rejected even without an impact referenc
 test('raw-unit rounding cannot undercut a configured zero-impact floor', () => {
   assert.throws(() => assertFinalSwapBounds({ amountOut: 101n, minOut: 99n, slippageBps: 100,
     baseSlippageBps: 100, maxImpactBps: 0, referenceOut: 101n }), /E_SWAP_IMPACT/)
+})
+
+test('the live CASHCAT wedge shape is admissible: near-spot quote at 400 bps escalation', () => {
+  // spot reference 10_000; quote 26 bps below spot (the healthy re-quote);
+  // streak 2 → escalated slippage 400 bps, base policy 100 bps.
+  const referenceOut = 10_000n
+  const amountOut = 9_974n
+  const minOut = applySlippage(amountOut, 400)
+  assertFinalSwapBounds({ amountOut, minOut, slippageBps: 400, baseSlippageBps: 100, maxImpactBps: 150, referenceOut })
+  // At the escalation cap (1000 bps) the widest legal minOut still passes…
+  assertFinalSwapBounds({ amountOut, minOut: applySlippage(amountOut, 1000), slippageBps: 1000, baseSlippageBps: 100, maxImpactBps: 150, referenceOut })
+  // …while an execution floor below the effective tolerance is still refused.
+  assert.throws(() => assertFinalSwapBounds({ amountOut, minOut: applySlippage(amountOut, 400) - 1n,
+    slippageBps: 400, baseSlippageBps: 100, maxImpactBps: 150, referenceOut }), /E_SWAP_MIN_OUT/)
 })
