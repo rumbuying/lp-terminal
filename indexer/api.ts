@@ -3721,6 +3721,94 @@ export function getV4Positions(params: Params): {
   };
 }
 
+/**
+ * The complete UP33 home CL registry, for the POOLS tab's browser scan.
+ *
+ * `syncUp33Cl` enumerates the registry (CLFactory.allPools) in full and the
+ * state sweep keeps every row's slot0/liquidity/gauge figures fresh — but the
+ * registry is deliberately outside the public Uniswap/Pancake catalog
+ * (/api/pools), whose clients cannot render an `up33cl` row. The surface that
+ * renders home pools instead is the browser's own factory scan, and that scan
+ * is bounded by a browser RPC budget: the registry outgrew the budget, and
+ * rows past its head became unreachable on the pools page while the rank
+ * table (subgraph-fed) still showed them. This endpoint is the completion
+ * source — every row, registry tail included. It is a top-up, never a
+ * replacement: the browser's own chain reads stay authoritative for the rows
+ * its budget covered, and a row whose first state sweep has not landed yet is
+ * served with stateReady=false so the reader can tell the two apart.
+ */
+export function getUp33Pools(): {
+  schemaVersion: number;
+  chainId: number;
+  ready: boolean;
+  chain: { key: string; id: number };
+  pools: Record<string, unknown>[];
+  tokens: Record<string, unknown>;
+} {
+  const rows = db
+    .prepare(
+      `SELECT p.address, p.token0, p.token1, p.fee_ppm, p.unstaked_fee_ppm,
+              p.tick_spacing, p.gauge, p.pair_index,
+              s.sqrt_price, s.tick, s.liquidity, s.staked_liquidity,
+              s.reward_rate, s.period_finish, s.gauge_alive,
+              s.updated AS state_updated,
+              t0.symbol AS symbol0, t0.decimals AS decimals0, t0.meta_ok AS meta0_ok,
+              t1.symbol AS symbol1, t1.decimals AS decimals1, t1.meta_ok AS meta1_ok
+       FROM pools p
+       LEFT JOIN pool_state s ON s.address = p.address
+       LEFT JOIN tokens t0 ON t0.address = p.token0
+       LEFT JOIN tokens t1 ON t1.address = p.token1
+       WHERE p.proto = 'up33cl'
+       ORDER BY p.pair_index ASC, p.address ASC`,
+    )
+    .all() as Record<string, unknown>[];
+  const pools = rows.map((r) => ({
+    address: r.address,
+    token0: r.token0,
+    token1: r.token1,
+    feePpm: r.fee_ppm,
+    unstakedFeePpm: r.unstaked_fee_ppm,
+    tickSpacing: r.tick_spacing,
+    gauge: r.gauge,
+    pairIndex: r.pair_index,
+    sqrtPriceX96: r.sqrt_price,
+    tick: r.tick,
+    liquidity: r.liquidity,
+    stakedLiquidity: r.staked_liquidity ?? '0',
+    rewardRate: r.reward_rate ?? '0',
+    periodFinish: r.period_finish ?? 0,
+    gaugeAlive: r.gauge_alive === 1,
+    stateUpdated: typeof r.state_updated === 'number' ? r.state_updated : null,
+    stateReady:
+      r.sqrt_price !== null && r.sqrt_price !== undefined &&
+      r.tick !== null && r.tick !== undefined &&
+      r.liquidity !== null && r.liquidity !== undefined,
+  }));
+  // Token metadata travels alongside, so the reader can render and search
+  // rows its own scan never reached. A token the metadata pass has not named
+  // yet is simply absent — the pool row stays, and the client decides.
+  const tokens: Record<string, unknown> = {};
+  for (const r of rows) {
+    for (const side of [0, 1] as const) {
+      const address = String(side === 0 ? r.token0 : r.token1);
+      if (tokens[address]) continue;
+      const symbol = side === 0 ? r.symbol0 : r.symbol1;
+      const decimals = side === 0 ? r.decimals0 : r.decimals1;
+      const metaOk = side === 0 ? r.meta0_ok : r.meta1_ok;
+      if (symbol === null || symbol === undefined || decimals === null || decimals === undefined) continue;
+      tokens[address] = { address, symbol, decimals, metaOk: metaOk === 1 };
+    }
+  }
+  return {
+    schemaVersion: 1,
+    chainId: CHAIN.id,
+    ready: kvGet('ready') === '1',
+    chain: { key: CHAIN.key, id: CHAIN.id },
+    pools,
+    tokens,
+  };
+}
+
 export function createApiServer(): Server {
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     const started = Date.now();
@@ -3763,6 +3851,9 @@ export function createApiServer(): Server {
       } else if (url.pathname === '/api/pool-rank') {
         body = getPoolRankApi();
         cache = 'public, max-age=300';
+      } else if (url.pathname === '/api/up33/pools') {
+        body = getUp33Pools();
+        cache = 'public, max-age=60';
       } else if (url.pathname === '/api/volume/pair') {
         // kv-verbatim read (see pairVolume.ts): the cycle computed everything;
         // the route only routes an identity or a token pair to its family.

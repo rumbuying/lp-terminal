@@ -17,6 +17,10 @@ import { FEATURES } from '../config/features'
 import { PUBLIC_POOL_QUERY_POLICY } from '../config/query'
 import { chainKey } from '../lib/chainStore'
 import { effectiveClFeePpm } from '../lib/poolIdentity'
+import {
+  fetchUp33Registry,
+  mergeUp33Registry,
+} from '../lib/up33Registry'
 import type { ClPool, Pool, PoolsData, TokenInfo, V2Pool } from '../types'
 
 type McRes = { status: 'success' | 'failure'; result?: unknown; error?: Error }
@@ -76,6 +80,9 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
   // allPools) and its gauges are ve(3,3) — a chain without that protocol never
   // reaches here; usePools answers with an empty catalogue instead.
   const gov = requireGov()
+  // The indexer's complete registry top-up fetches in parallel with the scan;
+  // mergeUp33Registry decides what it can add once the scan's own head is in.
+  const registryPromise = fetchUp33Registry().catch(() => null)
   const head = await mc(pc, [
     { abi: v2FactoryAbi, address: ADDR.V2_FACTORY, functionName: 'allPoolsLength' },
     { abi: clFactoryAbi, address: ADDR.CL_FACTORY, functionName: 'allPoolsLength' },
@@ -87,6 +94,12 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
   ])
   const blockNumber = await pc.getBlockNumber()
 
+  // RPC budgets, not catalog claims: the enumeration covers the registry's
+  // head (voted, gauged, high-weight rows) at bounded browser cost, and
+  // mergeUp33Registry below fills whatever the indexer's full registry says
+  // this cut off. Without that top-up the registry tail — where newly created
+  // Robinhood markets sit — would be invisible here while the rank table
+  // still showed it.
   const v2N = Math.min(Number(ok<bigint>(head[0]) ?? 0n), 300)
   const clN = Math.min(Number(ok<bigint>(head[1]) ?? 0n), 600)
 
@@ -270,6 +283,17 @@ export async function fetchPools(pc: PublicClient): Promise<PoolsData> {
     })
     saveTokenCache(cache)
   }
+
+  // The scan reads head rows straight from the chain and always wins; the
+  // indexer's full registry only fills what the scan's RPC budget cut off.
+  // Without this, a registry that outgrows the budget silently hides its tail
+  // — the pools a ranking page can still show, and the pools a wallet can
+  // hold a position in — from the one page meant to browse them.
+  const registry = await registryPromise
+  const mergedRegistry = mergeUp33Registry({ pools: allPools, tokens }, registry)
+  allPools.length = 0
+  for (const p of mergedRegistry.pools) allPools.push(p)
+  for (const [k, info] of Object.entries(mergedRegistry.tokens)) tokens[k] = info
 
   // sort: gauged & emitting first (by vote weight), then by kind
   allPools.sort((a, b) => {
