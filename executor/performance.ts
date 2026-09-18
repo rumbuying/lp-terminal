@@ -121,19 +121,59 @@ function isIncomeTaxInput(row: LedgerRow): boolean {
   try { return JSON.parse(row.meta_json).purpose === 'fee_tax' } catch { return false }
 }
 
-/** Actual settlement-token income retained in the owner wallet (income_tax ledger rows). */
+function isSettlementIncomeTaxRow(row: LedgerRow): row is LedgerRow & { token: string; amount: string } {
+  return row.kind === 'income_tax' && row.token !== null && row.amount !== null
+    && /^\d+$/.test(row.amount) && low(row.token) === low(SETTLEMENT)
+}
+
+function isFeeTaxSwapOutputRow(row: LedgerRow): row is LedgerRow & { token: string; amount: string } {
+  if (row.kind !== 'swap_out' || row.token === null || row.amount === null || !/^\d+$/.test(row.amount)) return false
+  if (low(row.token) !== low(SETTLEMENT)) return false
+  try { return JSON.parse(row.meta_json).purpose === 'fee_tax' } catch { return false }
+}
+
+/**
+ * Settlement income retained in the owner wallet. Explicit income_tax rows are
+ * authoritative; cycles recorded before swap-funded retention wrote those rows
+ * fall back to their fee_tax swap output (the actual settlement received), so
+ * the two representations are never summed for the same cycle.
+ */
 export function retainedIncomeSettlementRaw(rows: LedgerRow[]): bigint {
-  return rows
-    .filter((row): row is LedgerRow & { token: string; amount: string } =>
-      row.kind === 'income_tax' && row.token !== null && row.amount !== null
-      && /^\d+$/.test(row.amount) && low(row.token) === low(SETTLEMENT))
-    .reduce((sum, row) => sum + BigInt(row.amount), 0n)
+  const byCycle = new Map<string, LedgerRow[]>()
+  for (const row of rows) {
+    if (row.kind !== 'income_tax' && !isFeeTaxSwapOutputRow(row)) continue
+    const key = row.cycle_id ?? ''
+    const bucket = byCycle.get(key)
+    if (bucket) bucket.push(row)
+    else byCycle.set(key, [row])
+  }
+  let total = 0n
+  for (const bucket of byCycle.values()) {
+    const explicit = bucket.filter(isSettlementIncomeTaxRow).reduce((sum, row) => sum + BigInt(row.amount), 0n)
+    if (explicit > 0n) {
+      total += explicit
+      continue
+    }
+    total += bucket.filter(isFeeTaxSwapOutputRow).reduce((sum, row) => sum + BigInt(row.amount), 0n)
+  }
+  return total
+}
+
+/**
+ * The cycle's retention rows: explicit income_tax rows when present, otherwise
+ * the swapped tax input rows. Never both — the same retention must not be
+ * counted twice now that swap-funded retention also writes an income_tax row.
+ */
+export function incomeTaxRetentionRows(rows: LedgerRow[]): LedgerRow[] {
+  const retainedRows = rows.filter((row) => row.kind === 'income_tax')
+  return retainedRows.length ? retainedRows : rows.filter(isIncomeTaxInput)
 }
 
 function cycleIncomeTaxQuote(cycle: CycleRow, rows: LedgerRow[], config: StrategyConfig, price: CyclePrice): bigint {
-  const swappedTax = sum(rows.filter(isIncomeTaxInput).map((row) => quotedAmount(row, config, price)))
-  const retainedRows = rows.filter((row) => row.kind === 'income_tax')
-  if (retainedRows.length) return swappedTax + sum(retainedRows.map((row) => quotedAmount(row, config, price)))
+  const retentionRows = incomeTaxRetentionRows(rows)
+  const swappedTax = sum(retentionRows.map((row) => quotedAmount(row, config, price)))
+  const hasExplicitRetention = retentionRows.some((row) => row.kind === 'income_tax')
+  if (hasExplicitRetention) return swappedTax
 
   // Backfill completed cycles written before direct USDG retention received
   // its own ledger kind. The durable job context is part of the same atomic

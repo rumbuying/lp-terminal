@@ -705,7 +705,10 @@ export async function finishHoldQuote(job: RunnableJob, privateKey: `0x${string}
   }
   const retainedTaxEntry = incomeTaxRetentionEntry({
     id: `${job.id}-income-tax-retained`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now,
-    token: SETTLEMENT, amount: tax.retainedUsdg, txHash: collectReceipt.transactionHash, blockNumber: collectReceipt.blockNumber.toString(),
+    token: SETTLEMENT, amount: tax.retainedUsdg + taxReceipts
+      .filter((item) => low(item.intent.tokenOut) === low(SETTLEMENT))
+      .reduce((total, item) => total + item.gained, 0n),
+    txHash: collectReceipt.transactionHash, blockNumber: collectReceipt.blockNumber.toString(),
   })
   if (retainedTaxEntry) ledger.push(retainedTaxEntry)
   ledger.push(...gasLedgerEntries(job.config, job.id, records.map((row) => row.receipt)), ...stakingRewardLedger(job, now))
@@ -927,7 +930,7 @@ export async function finishFeeCollection(job: RunnableJob, privateKey: `0x${str
   }
   const retainedTaxEntry = incomeTaxRetentionEntry({
     id: `${job.id}-income-tax-retained`, strategyId: job.config.id, jobId: job.id, ts: now,
-    token: SETTLEMENT, amount: tax.retainedUsdg, txHash: collectReceipt.transactionHash, blockNumber: collectReceipt.blockNumber.toString(),
+    token: SETTLEMENT, amount: taxUsdgActual, txHash: collectReceipt.transactionHash, blockNumber: collectReceipt.blockNumber.toString(),
   })
   if (retainedTaxEntry) ledger.push(retainedTaxEntry)
   ledger.push(...gasLedgerEntries(job.config, job.id, records.map((row) => row.receipt)))
@@ -1026,12 +1029,14 @@ async function commitFromChainFacts(job: RunnableJob, privateKey?: `0x${string}`
   }).map((entry, index) => ({ ...entry, id: `${job.id}-collect-${index}`, jobId: job.id }))
 
   const swapPlan = getJobContext<SwapPlanContext>(job.id, 'swap_plan')
+  let replayedRetainedTaxUsdg = 0n
   for (const row of records.filter((item) => item.stepIndex === 5)) {
     const record = latestSwapRecord(swapPlan?.swaps, row.txIndex)
     if (!record) throw new Error('E_RECOVERY_CONTEXT')
     const intent = plannedIntent(record)
     const spent = -receiptTokenDelta(row.receipt, intent.tokenIn, job.config.owner)
     const gained = receiptTokenDelta(row.receipt, intent.tokenOut, job.config.owner)
+    if (intent.purpose === 'fee_tax' && low(intent.tokenOut) === low(SETTLEMENT)) replayedRetainedTaxUsdg += gained
     const execution = allocateSwapExecution(intent, spent, gained, 0n)
     const common = { strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, txHash: row.receipt.transactionHash, blockNumber: row.receipt.blockNumber.toString() }
     ledger.push(
@@ -1042,7 +1047,8 @@ async function commitFromChainFacts(job: RunnableJob, privateKey?: `0x${string}`
   }
   const retainedTaxEntry = incomeTaxRetentionEntry({
     id: `${job.id}-income-tax-retained`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now,
-    token: SETTLEMENT, amount: BigInt(feeTaxContext?.retainedUsdg ?? '0'), txHash: collectReceipt.transactionHash, blockNumber: collectReceipt.blockNumber.toString(),
+    token: SETTLEMENT, amount: BigInt(feeTaxContext?.retainedUsdg ?? '0') + replayedRetainedTaxUsdg,
+    txHash: collectReceipt.transactionHash, blockNumber: collectReceipt.blockNumber.toString(),
   })
   if (retainedTaxEntry) ledger.push(retainedTaxEntry)
   if (capital?.triggered) ledger.push(

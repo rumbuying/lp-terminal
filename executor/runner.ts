@@ -652,6 +652,13 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
         { id: `${job.id}-reward-quote-swap-out`, strategyId: job.config.id, cycleId: `cycle-${job.id}`, jobId: job.id, ts: now, kind: 'swap_out', token: job.config.quoteToken, amount: rewardQuote.toString(), txHash: rewardContext.quoteSwapTxHash, meta: { source: 'staking_reward', rewardFinal: true, quotedOut: rewardQuotedQuote.toString() } },
       )
     }
+    // Tax funded from a non-settlement leg reaches the wallet as settlement
+    // through the fee_tax swap; retain its actual output, not just the
+    // direct-retention amount, or the wallet custody is never recorded.
+    const retainedTaxUsdg = tax.retainedUsdg
+      + executedSwaps
+        .filter(({ intent }) => intent.purpose === 'fee_tax' && low(intent.tokenOut) === low(SETTLEMENT))
+        .reduce((sum, { gained }) => sum + gained, 0n)
     const retainedTaxEntry = incomeTaxRetentionEntry({
       id: `${job.id}-income-tax-retained`,
       strategyId: job.config.id,
@@ -659,7 +666,7 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
       jobId: job.id,
       ts: now,
       token: SETTLEMENT,
-      amount: tax.retainedUsdg,
+      amount: retainedTaxUsdg,
       txHash: collectReceipt.transactionHash,
       blockNumber: collectReceipt.blockNumber.toString(),
     })
