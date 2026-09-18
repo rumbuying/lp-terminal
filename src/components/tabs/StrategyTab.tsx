@@ -878,6 +878,16 @@ export function StrategyTab() {
     return `${alternate} · ${status}`
   }
 
+  // Cumulative P/L plus the income retained in the owner wallet — wealth the
+  // position P/L never sees because retention sits outside the strategy.
+  const performancePnlWithRetention = (performance: ExecutorPerformance) => {
+    const summary = performance.summary
+    if (!summary) return null
+    return pnlUnit === 'stable'
+      ? { raw: summary.pnlWithRetentionUsdgRaw ?? null, text: usdgAmount(summary.pnlWithRetentionUsdgRaw ?? null, true), pct: summary.pnlWithRetentionUsdgPct ?? null }
+      : { raw: summary.pnlWithRetentionQuoteRaw ?? null, text: quoteAmount(summary.pnlWithRetentionQuoteRaw ?? null, performance, true), pct: summary.pnlWithRetentionQuotePct ?? null }
+  }
+
   const runningStrategies = executorStrategyList
     .filter((remote) => !!user && remote.config.owner.toLowerCase() === user.toLowerCase() && ACTIVE_EXECUTOR_STATES.has(remote.state) && !remote.config.execution.dryRun)
     .map((remote) => ({
@@ -1377,6 +1387,17 @@ export function StrategyTab() {
                       {cardPnl.text}
                     </strong>
                     <small>{performancePnlDetail(performance)}</small>
+                    {(() => {
+                      const withRetention = performancePnlWithRetention(performance)
+                      if (!withRetention || withRetention.raw == null) return null
+                      const pct = withRetention.pct == null ? '' : ` (${withRetention.pct >= 0 ? '+' : ''}${withRetention.pct.toFixed(2)}%)`
+                      return (
+                        <small>
+                          {t('strategy.perfPnlWithRetention')}{' '}
+                          <span className={BigInt(withRetention.raw) >= 0n ? 'green' : 'red'}>{withRetention.text}{pct}</span>
+                        </small>
+                      )
+                    })()}
                   </div>
                   <div className="performance-metric">
                     <span>{t('strategy.perfAssets')}</span>

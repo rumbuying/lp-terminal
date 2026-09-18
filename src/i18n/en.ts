@@ -336,6 +336,7 @@ export const en = {
     perfNetFees: 'net income after reserve',
     perfIncomeTax: 'total income reserve',
     perfPnl: 'CUMULATIVE P/L',
+    perfPnlWithRetention: 'total P/L incl. wallet retention',
     perfAssets: 'CURRENT STRATEGY ASSETS',
     perfUncollected: 'total unclaimed',
     perfUncollectedLp: 'uncollected LP fees',

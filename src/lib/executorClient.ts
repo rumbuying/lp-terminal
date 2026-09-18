@@ -135,6 +135,14 @@ export type ExecutorPerformance = {
     gasCostUsdgRaw: string | null
     pnlUsdgRaw: string | null
     pnlUsdgPct: number | null
+    /** Settlement tokens actually retained in the owner wallet (income_tax ledger). */
+    retainedIncomeUsdgRaw?: string | null
+    /** P/L plus wallet-retained income, quote-denominated at cycle prices. */
+    pnlWithRetentionQuoteRaw?: string | null
+    pnlWithRetentionQuotePct?: number | null
+    /** P/L plus wallet-retained income, USDG-denominated (exact retained amount). */
+    pnlWithRetentionUsdgRaw?: string | null
+    pnlWithRetentionUsdgPct?: number | null
   }
   baseline?: {
     kind: 'strategy_start' | 'original_mint'

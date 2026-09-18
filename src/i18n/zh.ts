@@ -335,6 +335,7 @@ export const zh: typeof en = {
     perfNetFees: '扣除保留后的净收益',
     perfIncomeTax: '累计收益保留金',
     perfPnl: '累计盈亏',
+    perfPnlWithRetention: '含钱包留存的总盈亏',
     perfAssets: '当前策略资产',
     perfUncollected: '未领取合计',
     perfUncollectedLp: '未领取 LP 手续费',

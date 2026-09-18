@@ -121,6 +121,15 @@ function isIncomeTaxInput(row: LedgerRow): boolean {
   try { return JSON.parse(row.meta_json).purpose === 'fee_tax' } catch { return false }
 }
 
+/** Actual settlement-token income retained in the owner wallet (income_tax ledger rows). */
+export function retainedIncomeSettlementRaw(rows: LedgerRow[]): bigint {
+  return rows
+    .filter((row): row is LedgerRow & { token: string; amount: string } =>
+      row.kind === 'income_tax' && row.token !== null && row.amount !== null
+      && /^\d+$/.test(row.amount) && low(row.token) === low(SETTLEMENT))
+    .reduce((sum, row) => sum + BigInt(row.amount), 0n)
+}
+
 function cycleIncomeTaxQuote(cycle: CycleRow, rows: LedgerRow[], config: StrategyConfig, price: CyclePrice): bigint {
   const swappedTax = sum(rows.filter(isIncomeTaxInput).map((row) => quotedAmount(row, config, price)))
   const retainedRows = rows.filter((row) => row.kind === 'income_tax')
@@ -553,6 +562,15 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
   const pnlUsdg = baselineValueUsdg !== undefined && currentValueUsdg !== undefined && gasCostUsdg !== undefined
     ? distributionAdjustedPnl({ currentValue: currentValueUsdg, withdrawnValue: withdrawnProfitUsdg, baselineValue: baselineValueUsdg, gasCost: gasCostUsdg })
     : undefined
+  // Wallet-retention-inclusive totals. Income kept in the owner wallet
+  // (income_tax ledger rows, actual settlement tokens) is strategy wealth that
+  // never re-enters the position, so both P/L denominations exclude it by
+  // default; these fields add it back. Quote terms value the retention at each
+  // cycle's price (same basis as the P/L itself); USDG terms use the exact
+  // retained settlement amount.
+  const retainedIncomeUsdg = retainedIncomeSettlementRaw(ledger)
+  const pnlWithRetentionQuote = pnl === undefined ? undefined : pnl + incomeTaxQuote
+  const pnlWithRetentionUsdg = pnlUsdg === undefined ? undefined : pnlUsdg + retainedIncomeUsdg
   const netFeesQuote = grossFeesQuote - protocolFeesQuote - incomeTaxQuote
   // Reconciliation: P/L = net income after tax - gas - execution cost + market/LP residual.
   // The residual includes token-price movement, concentrated-liquidity inventory
@@ -615,6 +633,11 @@ export async function strategyPerformance(config: StrategyConfig, state: string)
       gasCostUsdgRaw: gasCostUsdg?.toString() ?? null,
       pnlUsdgRaw: pnlUsdg?.toString() ?? null,
       pnlUsdgPct: pnlUsdg === undefined || baselineValueUsdg === undefined ? null : pnlPct(pnlUsdg, baselineValueUsdg),
+      retainedIncomeUsdgRaw: retainedIncomeUsdg.toString(),
+      pnlWithRetentionQuoteRaw: pnlWithRetentionQuote?.toString() ?? null,
+      pnlWithRetentionQuotePct: pnlWithRetentionQuote === undefined ? null : pnlPct(pnlWithRetentionQuote, baselineValue),
+      pnlWithRetentionUsdgRaw: pnlWithRetentionUsdg?.toString() ?? null,
+      pnlWithRetentionUsdgPct: pnlWithRetentionUsdg === undefined || baselineValueUsdg === undefined ? null : pnlPct(pnlWithRetentionUsdg, baselineValueUsdg),
     },
     baseline: startBaseline ? {
       kind: 'strategy_start',
@@ -727,7 +750,8 @@ export async function archivedAccountingPerformance(config: StrategyConfig, arch
       profitReserveQuoteRaw: null, withdrawnProfitQuoteRaw: '0', withdrawnProfitUsdgRaw: '0',
       currentUncollectedFeesQuoteRaw: null, currentUnclaimedRewardsQuoteRaw: null, currentUnclaimedTotalQuoteRaw: null,
       baselineValueQuoteRaw: null, pnlQuoteRaw: null, pnlPct: null,
-      currentValueUsdgRaw: null, baselineValueUsdgRaw: null, gasCostUsdgRaw: null, pnlUsdgRaw: null, pnlUsdgPct: null },
+      currentValueUsdgRaw: null, baselineValueUsdgRaw: null, gasCostUsdgRaw: null, pnlUsdgRaw: null, pnlUsdgPct: null,
+      retainedIncomeUsdgRaw: '0', pnlWithRetentionQuoteRaw: null, pnlWithRetentionQuotePct: null, pnlWithRetentionUsdgRaw: null, pnlWithRetentionUsdgPct: null },
     baseline: null, currentPosition: { tokenId: config.activeTokenId, tick: null, tickLower: null, tickUpper: null },
     uncollectedFees: null,
     unclaimedReward: null, feeTokens: [], profitWithdrawals: [], cycles: cycleDetails, warnings: ['historical_final_valuation_unavailable', ...(!gasValuation.quoteComplete ? ['gas_historical_price_unavailable'] : [])],
