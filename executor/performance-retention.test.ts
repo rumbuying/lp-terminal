@@ -8,7 +8,7 @@ const dir = mkdtempSync(join(tmpdir(), 'lp-performance-retention-'))
 process.env.LP_EXECUTOR_DATA_DIR = dir
 
 const { EXECUTOR } = await import('./config')
-const { incomeTaxRetentionRows, retainedIncomeSettlementRaw } = await import('./performance')
+const { cycleIncomeTaxQuote, incomeTaxRetentionRows, retainedIncomeSettlementRaw } = await import('./performance')
 
 after(() => {
   rmSync(dir, { recursive: true, force: true })
@@ -95,4 +95,65 @@ test('cycles without income_tax rows fall back to swapped tax inputs', () => {
   const other = row({ kind: 'swap_in', token: riskToken, amount: '1', meta_json: '{"purpose":"strategy"}' })
   assert.deepEqual(incomeTaxRetentionRows([swapIn, other]), [swapIn])
   assert.deepEqual(incomeTaxRetentionRows([]), [])
+})
+
+const quoteToken = '0x0bd7d308f8e1639fab988df18a8011f41eacad73'
+const priceBase = {
+  snapshot: {
+    token0: settlement, token1: quoteToken, token0Decimals: 6, token1Decimals: 18,
+    sqrtPriceX96: '0', tick: 0, tickLower: -10, tickUpper: 10, liquidity: '0', observedAt: 0, blockNumber: '1',
+  },
+  sqrtPriceX96: 1n << 96n,
+  tick: 0, observedAt: 0, blockNumber: '1', source: 'rebalance_snapshot',
+}
+const price = priceBase as never
+const taxCycle = { id: 'cycle-a', job_id: 'job-a' } as never
+
+test('settlement retention on an out-of-pool quote values through its funding swap, never E_POOL_IDENTITY', () => {
+  // WETH-quoted strategy (quote/risk are neither settlement): the explicit
+  // income_tax row is settlement-denominated and must not be pool-priced.
+  const config = { quoteToken, riskToken } as never
+  const rows = [
+    row({ cycle_id: 'cycle-a', amount: '181778' }),
+    row({ kind: 'swap_in', token: quoteToken, amount: '73347201677222', meta_json: '{"purpose":"fee_tax"}' }),
+    row({ kind: 'swap_out', token: settlement, amount: '181778', meta_json: '{"purpose":"fee_tax"}' }),
+  ]
+  assert.equal(cycleIncomeTaxQuote(taxCycle, rows, config, price), 73347201677222n)
+})
+
+test('direct settlement retention without a funding swap values to zero instead of throwing', () => {
+  const config = { quoteToken, riskToken } as never
+  assert.equal(cycleIncomeTaxQuote(taxCycle, [row({ amount: '181778' })], config, price), 0n)
+})
+
+test('settlement-denominated retention keeps pricing directly when settlement is a pool token', () => {
+  // risk-token-as-settlement strategy (e.g. USDG risk legs): the explicit row
+  // pool-converts at the rebalance mark; 2^96 sqrt means a 1:1 mark here.
+  const config = { quoteToken, riskToken: settlement } as never
+  assert.equal(cycleIncomeTaxQuote(taxCycle, [row({ amount: '1000000' })], config, price), 1000000n)
+})
+
+test('quote-denominated retention keeps pricing directly', () => {
+  const config = { quoteToken: settlement, riskToken } as never
+  assert.equal(cycleIncomeTaxQuote(taxCycle, [row({ amount: '250000' })], config, price), 250000n)
+})
+
+test('cycles before explicit rows keep their legacy swapped-tax valuation', () => {
+  const config = { quoteToken, riskToken } as never
+  const rows = [
+    row({ kind: 'swap_in', token: quoteToken, amount: '73347201677222', meta_json: '{"purpose":"fee_tax"}' }),
+  ]
+  assert.equal(cycleIncomeTaxQuote(taxCycle, rows, config, price), 73347201677222n)
+})
+
+test('legacy swapped tax on the risk leg pool-converts at the cycle mark', () => {
+  const config = { quoteToken: settlement, riskToken } as never
+  const riskLegPrice = {
+    ...priceBase,
+    snapshot: { ...priceBase.snapshot, token0: riskToken, token1: settlement },
+  } as never
+  const rows = [
+    row({ kind: 'swap_in', token: riskToken, amount: '19700000000000000', meta_json: '{"purpose":"fee_tax"}' }),
+  ]
+  assert.equal(cycleIncomeTaxQuote(taxCycle, rows, config, riskLegPrice), 19700000000000000n)
 })

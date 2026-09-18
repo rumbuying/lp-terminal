@@ -169,9 +169,29 @@ export function incomeTaxRetentionRows(rows: LedgerRow[]): LedgerRow[] {
   return retainedRows.length ? retainedRows : rows.filter(isIncomeTaxInput)
 }
 
-function cycleIncomeTaxQuote(cycle: CycleRow, rows: LedgerRow[], config: StrategyConfig, price: CyclePrice): bigint {
+const isPoolTokenRow = (row: LedgerRow, config: StrategyConfig) => row.token !== null && row.amount !== null
+  && (low(row.token) === low(config.quoteToken) || low(row.token) === low(config.riskToken))
+
+/**
+ * Quote-side value of swap-funded retention: the fee_tax swap inputs of the
+ * same cycle at the cycle's rebalance mark. Explicit income_tax rows are
+ * settlement custody facts, and settlement is not always a pool token —
+ * WETH-quoted strategies retain USDG, and pool-pricing that row raises
+ * E_POOL_IDENTITY, which turned the whole live valuation into "performance
+ * unavailable" (seen live 2026-09-18). Out-of-pool retention rows are
+ * therefore valued through the swap inputs that funded them and never priced
+ * against the pool directly.
+ */
+function swapFundedIncomeTaxQuote(rows: LedgerRow[], config: StrategyConfig, price: CyclePrice): bigint {
+  return sum(rows.filter((row) => isIncomeTaxInput(row) && isPoolTokenRow(row, config))
+    .map((row) => quotedAmount(row, config, price)))
+}
+
+export function cycleIncomeTaxQuote(cycle: CycleRow, rows: LedgerRow[], config: StrategyConfig, price: CyclePrice): bigint {
   const retentionRows = incomeTaxRetentionRows(rows)
-  const swappedTax = sum(retentionRows.map((row) => quotedAmount(row, config, price)))
+  const outOfPoolRetention = retentionRows.some((row) => row.token !== null && row.amount !== null && !isPoolTokenRow(row, config))
+  const swappedTax = sum(retentionRows.filter((row) => isPoolTokenRow(row, config)).map((row) => quotedAmount(row, config, price)))
+    + (outOfPoolRetention ? swapFundedIncomeTaxQuote(rows, config, price) : 0n)
   const hasExplicitRetention = retentionRows.some((row) => row.kind === 'income_tax')
   if (hasExplicitRetention) return swappedTax
 

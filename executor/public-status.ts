@@ -59,9 +59,12 @@ export async function publicStrategyStatus(owner: Address, from: number, to: num
     try {
       const value = await loadPerformance(row.config, row.state)
       recordPerformance(value)
-      return { row, value }
-    } catch {
-      return { row, value: undefined }
+      return { row, value, error: undefined as string | undefined }
+    } catch (error) {
+      // A bare "performance unavailable" hides whether the strategy is
+      // unhealthy or the valuation hit a data bug; mirror the authenticated
+      // /v1/performance handler and surface the short reason.
+      return { row, value: undefined, error: error instanceof Error ? error.message.slice(0, 160) : 'performance unavailable' }
     }
   }))
   const strategyIds = new Set(selected.map((row) => row.config.id))
@@ -79,7 +82,7 @@ export async function publicStrategyStatus(owner: Address, from: number, to: num
     address: owner,
     generatedAt: deps.now?.() ?? Math.floor(Date.now() / 1000),
     intervalSeconds: INTERVAL_SECONDS,
-    strategies: performance.map(({ row, value }) => ({
+    strategies: performance.map(({ row, value, error }) => ({
       id: row.config.id,
       name: row.config.name,
       protocol: row.config.protocol,
@@ -88,7 +91,7 @@ export async function publicStrategyStatus(owner: Address, from: number, to: num
       pool: row.config.pool,
       activeTokenId: row.config.activeTokenId,
       range: row.config.range,
-      ...(value ? { performance: publicPerformance(value) } : { error: 'performance unavailable' }),
+      ...(value ? { performance: publicPerformance(value) } : { error: error ?? 'performance unavailable' }),
     })),
     points: pnlCurveRows(from, to)
       .filter((point) => strategyIds.has(point.strategyId))
