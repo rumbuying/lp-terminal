@@ -10,7 +10,7 @@
 // The API starts listening immediately; `ready:false` in responses tells the
 // frontend to keep using its client-side fallback until the first pass lands.
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
-import { CHAIN, INDEX_V2, V4, log, now, PORT, sleep, TUNE } from './config';
+import { CHAIN, EMERGING_TUNE, INDEX_V2, V4, log, now, PORT, sleep, TUNE } from './config';
 import { RpcChainMismatchError, safeError, usingPrivateRpc, verifyRpcChain } from './rpc';
 import { backfillV3, syncV2, tailV3 } from './catalog';
 import {
@@ -51,6 +51,12 @@ import { backfillV4, ensureV4TokenMeta, refreshV4FeaturedStats, tailV4 } from '.
 import { backfillV4Rpc, tailV4Rpc } from './v4Rpc';
 import { tailV4Positions } from './v4Positions';
 import { syncUp33Cl } from './up33';
+import { emergingObserveEnabled, runEmergingDiscoverySweep } from './emerging';
+import { runEmergingScanSweep } from './emergingScan';
+import { runEmergingAggregateSweep } from './emergingAggregate';
+import { runEmergingActorsSweep } from './emergingActors';
+import { runEmergingRetentionSweep } from './emergingArchive';
+import { runEmergingSignalSweep } from './emergingSignals';
 import { POOL_RANK_ENABLED, runPoolRankCycle } from './poolRank';
 import { refreshRecommendationSamples } from './recommendation';
 
@@ -461,6 +467,34 @@ function startLoops(): void {
     if (sampled.addressPools || sampled.v4Pools)
       log(`[analytics] sampled ${sampled.addressPools} address pools + ${sampled.v4Pools} v4 pools`);
   });
+  // Emerging-pool observation (docs/EMERGING-POOL-LP-PRD.zh-CN.md): read-only
+  // discovery ledger + event streams. Off by default (§10.2); the switch name
+  // is the contract. One loop keeps the two passes non-overlapping (§4.5).
+  if (emergingObserveEnabled()) {
+    loop('emerging-discovery', EMERGING_TUNE.sweepMs, async () => {
+      const r = await runEmergingDiscoverySweep();
+      const s = await runEmergingScanSweep();
+      const a = await runEmergingAggregateSweep();
+      const actors = await runEmergingActorsSweep();
+      const signals = runEmergingSignalSweep();
+      if (r.discovered || r.agedOut || r.admitted || s.eventsDelta || s.decodeFailures || a.minutes || signals.candidates || signals.invalidated)
+        log(
+          `[emerging] +${r.discovered} discovered, ${r.admitted} admitted, ` +
+            `${r.deferred} deferred, ${r.agedOut} aged out; ` +
+            `scan ${s.streams} streams, +${s.eventsDelta} events, ${s.requests} rpc, ` +
+            `${s.decodeFailures} decode fails; agg ${a.minutes}m/${a.hours}h; ` +
+            `actors ${actors.tokens}t/${actors.consumed}x; ` +
+            `signals +${signals.candidates}c/-${signals.invalidated}i`,
+        );
+    }, false);
+    // Retention/archive on its own loop (§4.5: never on the request path,
+    // never competing with the collection loops' request budgets).
+    loop('emerging-retention', 6 * 3_600_000, async () => {
+      const r = await runEmergingRetentionSweep();
+      if (r.prunedBuckets || r.prunedEvents)
+        log(`[emerging-retention] pruned ${r.prunedBuckets} buckets, ${r.prunedEvents} events (archived ${r.archivedEvents}, verified=${r.verified})`);
+    }, false);
+  } else log('[emerging] observe disabled (INDEXER_EMERGING_OBSERVE != 1)');
   // A repeating keyset census over BSC's multi-million identity directory took
   // longer than its nominal interval and spent millions of reads on dust. Large
   // catalogs retain every identity but hydrate only bounded useful tiers.

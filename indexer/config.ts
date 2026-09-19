@@ -160,6 +160,39 @@ export const TUNE = {
   maxPoolTvlUsd: 1e9, // above this a TVL figure is corrupt, not a whale: never ranked, never swept fast
 };
 
+// --- emerging-pool pipeline (docs/EMERGING-POOL-LP-PRD.zh-CN.md §4.5/§6.1) ---
+// Engineering parameters only. Research thresholds (gate values, retention
+// windows) belong to the signal layer and its versioned EMERGING_THRESHOLDS,
+// never here. Off by default: §10.2 requires all three feature switches
+// (observe/signals/execution) to default false.
+const envPositiveInt = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+export const EMERGING_TUNE = {
+  enabled: process.env.INDEXER_EMERGING_OBSERVE === '1',
+  sweepMs: envMs('EMERGING_SWEEP_MS', 60_000),
+  trackMaxPools: envPositiveInt(process.env.EMERGING_TRACK_MAX_POOLS, 200),
+  trackMaxAgeDays: envPositiveInt(process.env.EMERGING_TRACK_MAX_AGE_DAYS, 7),
+  // Discovery sources are consumed with a durable watermark and a re-read
+  // overlap; upserts are idempotent by pool key, so a re-read never duplicates.
+  sourceOverlapSec: envPositiveInt(process.env.EMERGING_SOURCE_OVERLAP_SEC, 600),
+  // Birth-timestamp backfills per sweep. Leftovers stay NULL and the next
+  // sweep continues — never a cross-fill from another age field (§3.1).
+  blockTsFetchesPerSweep: envPositiveInt(process.env.EMERGING_BLOCK_TS_BUDGET, 80),
+  // Event scan (EMG-A02). Three durable streams total (CL pools, v4
+  // PoolManager, base tokens); the knobs bound per-sweep RPC spend under the
+  // §4.5 pipeline budget of ~5 req/s at the 60s cadence.
+  scanMaxStreamsPerSweep: envPositiveInt(process.env.EMERGING_SCAN_MAX_STREAMS, 3),
+  scanRequestsPerSweep: envPositiveInt(process.env.EMERGING_SCAN_REQUEST_BUDGET, 240),
+  scanStartWindowBlocks: envPositiveInt(process.env.EMERGING_SCAN_START_WINDOW, 5_000),
+  scanMaxWindowBlocks: envPositiveInt(process.env.EMERGING_SCAN_MAX_WINDOW, 50_000),
+  // Zero-volume minute buckets materialize only within this trailing window
+  // of the aggregation watermark — older quiet minutes stay absent (missing,
+  // never zero), keeping the first-pass write burst bounded (§4.4/§4.5).
+  zeroBackfillHours: envPositiveInt(process.env.EMERGING_ZERO_BACKFILL_HOURS, 48),
+} as const;
+
 /**
  * Explicit `RPC` (SECRET — never log/print it), then the chain's public RPC.
  * The workspace .env predates multi-chain support and documents its RPC as

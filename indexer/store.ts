@@ -313,6 +313,234 @@ CREATE INDEX IF NOT EXISTS idx_v4_market_depth
   ON v4_market_stats(COALESCE(tvl_usd, liq_usd) DESC, pool_id);
 
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+
+-- Emerging-pool discovery ledger (docs/EMERGING-POOL-LP-PRD.zh-CN.md §4.3).
+-- Every discovered young-window pool enters here, INCLUDING pools detailed
+-- collection never reaches — the admission outcome is data, not silence.
+-- Age fields are separate by contract (§3.1): NULL stays NULL until its own
+-- evidence lands; no column is ever backfilled from another.
+CREATE TABLE IF NOT EXISTS emerging_discovery (
+  pool_key         TEXT PRIMARY KEY,       -- chainId:venue:canonicalId (shared/emerging)
+  venue            TEXT NOT NULL,          -- 'up33-cl' | 'univ3' | 'univ4'
+  canonical_id     TEXT NOT NULL,          -- lowercase address, or bytes32 PoolId for univ4
+  token0           TEXT,
+  token1           TEXT,
+  base_token       TEXT,                   -- the provably-new token, when provable (§3.1)
+  quote_is_usdg    INTEGER NOT NULL DEFAULT 0,
+  pool_created_at  INTEGER,                -- unix sec; NULL = unknown
+  token_created_at INTEGER,
+  launch_at        INTEGER,
+  first_seen_at    INTEGER NOT NULL,
+  origin           TEXT NOT NULL,          -- discovery source stream that named it
+  state            TEXT NOT NULL,          -- EmergingObservationState
+  reason           TEXT,                   -- EmergingObservationReason, or NULL
+  admitted_rank    INTEGER,                -- queue position while detail-tracked; NULL otherwise
+  pinned_until     INTEGER,                -- experiment pins survive capacity pressure (§4.1)
+  updated_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_emerging_discovery_state
+  ON emerging_discovery(state, first_seen_at);
+
+-- Append-only observation history (§4.3 separates occurredAt from observedAt).
+-- Transitions live here and nowhere else: the row holds the current state,
+-- the events hold how it got there.
+CREATE TABLE IF NOT EXISTS emerging_observation_events (
+  seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+  pool_key    TEXT NOT NULL,
+  occurred_at INTEGER NOT NULL,
+  from_state  TEXT,
+  to_state    TEXT NOT NULL,
+  reason      TEXT,
+  detail      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_emerging_obs_events_pool
+  ON emerging_observation_events(pool_key, seq);
+
+-- Raw ordered facts per stream (§4.3). Identity is the emitting LOG —
+-- (chain_id, tx_hash, log_index) — so re-reads over an overlap are naturally
+-- idempotent, and a reorg ARCHIVES orphans (canonical=0) instead of deleting
+-- them: §4.3 keeps old versions in the archive. block_ts stays NULL until its
+-- block is dated by the bounded budget in the aggregator; NULL is unknown,
+-- never a guess (§3.1).
+CREATE TABLE IF NOT EXISTS emerging_chain_events (
+  chain_id     INTEGER NOT NULL,
+  tx_hash      TEXT NOT NULL,
+  log_index    INTEGER NOT NULL,
+  block_number INTEGER NOT NULL,
+  block_hash   TEXT NOT NULL,
+  tx_index     INTEGER NOT NULL,
+  block_ts     INTEGER,
+  contract     TEXT NOT NULL,          -- emitting contract (pool / PoolManager / token)
+  kind         TEXT NOT NULL,          -- 'swap'|'mint'|'burn'|'modifyLiquidity'|'donate'|'transfer'
+  pool_key     TEXT,                   -- EmergingPoolKey when attributed to a tracked pool
+  token        TEXT,                   -- token address for transfer streams
+  payload      TEXT NOT NULL,          -- JSON of decoded fields, amounts as strings
+  observed_at  INTEGER NOT NULL,
+  available_at INTEGER NOT NULL,       -- first moment complete AND confirmed (§3.2)
+  canonical    INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(chain_id, tx_hash, log_index)
+);
+CREATE INDEX IF NOT EXISTS idx_emerging_events_pool
+  ON emerging_chain_events(pool_key, block_number, tx_index, log_index)
+  WHERE pool_key IS NOT NULL AND canonical = 1;
+CREATE INDEX IF NOT EXISTS idx_emerging_events_token
+  ON emerging_chain_events(token, block_number)
+  WHERE token IS NOT NULL AND canonical = 1;
+
+-- Historical state checkpoints (§4.3): the initial and periodic anchors a
+-- replay must start from — ticks, fee config, per-pool protocol state.
+CREATE TABLE IF NOT EXISTS emerging_state_snapshots (
+  pool_key      TEXT NOT NULL,
+  block_hash    TEXT NOT NULL,
+  snapshot_kind TEXT NOT NULL,         -- 'initial' | 'periodic' | …
+  block_number  INTEGER NOT NULL,
+  block_ts      INTEGER,
+  state         TEXT NOT NULL,         -- JSON payload
+  completeness  TEXT NOT NULL,         -- 'complete' | 'partial'
+  source        TEXT NOT NULL,
+  observed_at   INTEGER NOT NULL,
+  available_at  INTEGER NOT NULL,
+  PRIMARY KEY(pool_key, block_hash, snapshot_kind)
+);
+
+-- Per-stream durable watermarks (§4.2): a stream advances only across a
+-- completed window prefix and carries the block hash it was proven against —
+-- the same fail-closed discipline as the v4 RPC directory cursor.
+CREATE TABLE IF NOT EXISTS emerging_scan_cursors (
+  chain_id     INTEGER NOT NULL,
+  stream_key   TEXT NOT NULL,
+  block_number INTEGER NOT NULL,
+  block_hash   TEXT NOT NULL,          -- '' only for the pre-history seed row
+  last_scan_at INTEGER NOT NULL,
+  complete_through_ts INTEGER,         -- unix sec through which the stream is COMPLETE
+  status       TEXT NOT NULL,          -- 'active' | 'reorg_repair' | 'data_gap'
+  PRIMARY KEY(chain_id, stream_key)
+);
+
+-- Minute buckets over the tracked young set (§4.4, EMG-A05). UTC left-closed
+-- [minute_ts, minute_ts+60); a row is complete only when EVERY required
+-- stream scanned through the window's close (proven via the stream cursors'
+-- complete_through_ts) — a full scan with no swaps is a valid ZERO-volume
+-- bucket; unscanned/unknown is a missing row, never a zero (§3.2).
+CREATE TABLE IF NOT EXISTS pool_minute_buckets (
+  pool_key             TEXT NOT NULL,
+  minute_ts            INTEGER NOT NULL,
+  complete             INTEGER NOT NULL DEFAULT 0,
+  missing_sources      TEXT,           -- JSON array of stream keys short of the window
+  source_through_block INTEGER,
+  aggregate_version    INTEGER NOT NULL,
+  swap_count           INTEGER NOT NULL DEFAULT 0,
+  amount0              TEXT,           -- signed sums in smallest units (strings)
+  amount1              TEXT,
+  vol_quote            TEXT,           -- quote-side volume when the quote is known
+  vol_usd              REAL,           -- display/statistics only (§4.3)
+  buy_count            INTEGER,
+  sell_count           INTEGER,
+  buy_vol_quote        TEXT,
+  sell_vol_quote       TEXT,
+  open_price           REAL,
+  high_price           REAL,
+  low_price            REAL,
+  close_price          REAL,
+  vwap_price           REAL,
+  price_coverage       INTEGER,        -- swaps whose sqrtPrice contributed to OHLC
+  resolved_traders     INTEGER,        -- §4.3 trader resolution (A03 fills these)
+  unknown_traders      INTEGER,
+  PRIMARY KEY(pool_key, minute_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_pool_minute_buckets_ts
+  ON pool_minute_buckets(minute_ts);
+
+-- IDX-01's public pool history (implementation spec §11.1) — created here with
+-- the emerging 1h interval columns PRD §4.4 adds. The shared base columns
+-- belong to the existing sweeps (state/stats writers land with full IDX-01);
+-- emerging writes only bucket='1h' interval rows for the tracked young set.
+CREATE TABLE IF NOT EXISTS pool_history (
+  address        TEXT NOT NULL,         -- lowercase; pool_history.address stays the canonical id (§4.4)
+  bucket         TEXT NOT NULL,         -- '1m' | '5m' | '1h'
+  bucket_ts      INTEGER NOT NULL,
+  proto          TEXT,
+  sqrt_price     TEXT,
+  tick           INTEGER,
+  tvl_usd        REAL,
+  vol24h_usd     REAL,
+  fee_apr        REAL,
+  state_updated  INTEGER NOT NULL,
+  stats_updated  INTEGER,
+  interval_volume_quote TEXT,
+  interval_volume_usd   REAL,
+  interval_fee0  TEXT,
+  interval_fee1  TEXT,
+  interval_ohlc  TEXT,                  -- JSON [o,h,l,c]
+  quality        TEXT,                  -- 'complete' | 'partial' | 'unsupported'
+  source_block   INTEGER,
+  aggregate_version INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(address, bucket, bucket_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_pool_history_ts ON pool_history(bucket_ts);
+
+-- Actor role evidence (§4.3/§5.2). Every claim about WHO an address is
+-- carries its own provenance, confidence and validity window — a large
+-- genesis recipient is 'inferred', never asserted insider. Cluster ids land
+-- with a later policyVersion; the schema already carries the key.
+CREATE TABLE IF NOT EXISTS emerging_actor_evidence (
+  evidence_id  TEXT PRIMARY KEY,   -- deterministic: role:token:address:version
+  token        TEXT NOT NULL,
+  address      TEXT NOT NULL,      -- lowercase
+  role         TEXT NOT NULL,      -- 'tx_initiator'|'factory_caller'|'launcher'|'declared_beneficiary'|'genesis_recipient'|'funding_related'
+  cluster_id   TEXT,
+  confidence   TEXT NOT NULL,      -- 'proven'|'inferred'|'weak'
+  source       TEXT NOT NULL,      -- 'uerc20-creator()' | 'genesis-window' | …
+  version      INTEGER NOT NULL,
+  valid_from   INTEGER NOT NULL,
+  valid_until  INTEGER,
+  available_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_emerging_actor_evidence_token
+  ON emerging_actor_evidence(token, role, address);
+
+-- Immutable signal decision snapshots (§4.3/§6.3). A candidate is a research
+-- observation, never an order: canCreateStrategy stays false everywhere.
+-- Re-satisfaction after invalidation creates a NEW signalId; old rows are
+-- history, never resurrected (§6.3 不回填).
+CREATE TABLE IF NOT EXISTS emerging_signal_events (
+  signal_id        TEXT PRIMARY KEY,   -- poolKey:profile:decisionAt:seq
+  pool_key         TEXT NOT NULL,
+  research_profile_hash TEXT NOT NULL,
+  state            TEXT NOT NULL,      -- 'watch_candidate' | 'invalidated'
+  decision_at      INTEGER NOT NULL,
+  anchor_low       REAL,
+  metrics          TEXT,               -- JSON: behavior/retention/stabilization summary
+  gates            TEXT,               -- JSON gate bundle snapshot
+  threshold_version TEXT NOT NULL,
+  policy_version   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_emerging_signals_pool
+  ON emerging_signal_events(pool_key, decision_at);
+
+-- Time-point supply ledger (§5.2): balances replayed from the token's proven
+-- supply start over its canonical Transfer stream, reconciled against the
+-- contract's totalSupply. Insertion-order rowid is the consumption
+-- watermark within the tokens stream; a reorg's full replay resets it.
+CREATE TABLE IF NOT EXISTS emerging_supply_balances (
+  token   TEXT NOT NULL,
+  address TEXT NOT NULL,
+  balance TEXT NOT NULL,
+  PRIMARY KEY(token, address)
+);
+CREATE TABLE IF NOT EXISTS emerging_supply_state (
+  token            TEXT PRIMARY KEY,
+  watermark_rowid  INTEGER NOT NULL DEFAULT 0,
+  total_supply     TEXT NOT NULL DEFAULT '0',
+  minted           TEXT NOT NULL DEFAULT '0',
+  burned           TEXT NOT NULL DEFAULT '0',
+  balance_sum      TEXT NOT NULL DEFAULT '0',
+  birth_ts         INTEGER,
+  supply_block     INTEGER,
+  reconciled_at    INTEGER,
+  reconcile_status TEXT,           -- 'matched' | 'mismatch' | 'reorg_stale' | NULL
+  version          INTEGER NOT NULL DEFAULT 1
+);
 `);
 
 // Freeze an address traversal at an insertion high-water mark without making
@@ -1045,6 +1273,151 @@ const kvGetQ = db.prepare('SELECT v FROM kv WHERE k = ?');
 const kvSetQ = db.prepare('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v');
 export const kvGet = (k: string): string | undefined => (kvGetQ.get(k) as { v: string } | undefined)?.v;
 export const kvSet = (k: string, v: string) => void kvSetQ.run(k, v);
+
+// --- emerging discovery ledger (docs/EMERGING-POOL-LP-PRD.zh-CN.md §4.3) ---
+
+const emergingInsertQ = db.prepare(`
+  INSERT INTO emerging_discovery(
+    pool_key, venue, canonical_id, token0, token1, base_token, quote_is_usdg,
+    pool_created_at, token_created_at, launch_at, first_seen_at, origin,
+    state, reason, admitted_rank, pinned_until, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered', NULL, NULL, NULL, ?)
+  ON CONFLICT(pool_key) DO NOTHING
+`);
+
+/** Idempotent discovery upsert; true only when THIS call named the pool first
+ *  (first_seen_at is immutable — a re-read over the overlap never re-dates it).
+ *  The row and its birth event commit atomically: history can never lack the
+ *  one transition that named the pool (§4.3). */
+export function upsertEmergingDiscovery(row: {
+  poolKey: string;
+  venue: string;
+  canonicalId: string;
+  token0: string | null;
+  token1: string | null;
+  baseToken: string | null;
+  quoteIsUsdg: boolean;
+  poolCreatedAt: number | null;
+  tokenCreatedAt: number | null;
+  launchAt: number | null;
+  firstSeenAt: number;
+  origin: string;
+}): boolean {
+  let inserted = false;
+  tx(() => {
+    const r = emergingInsertQ.run(
+      row.poolKey, row.venue, row.canonicalId, row.token0, row.token1,
+      row.baseToken, row.quoteIsUsdg ? 1 : 0,
+      row.poolCreatedAt, row.tokenCreatedAt, row.launchAt,
+      row.firstSeenAt, row.origin, row.firstSeenAt,
+    );
+    inserted = Number(r.changes) > 0;
+    if (inserted)
+      emergingEventQ.run(
+        row.poolKey, row.firstSeenAt, null, 'discovered',
+        null, `origin=${row.origin}`,
+      );
+  });
+  return inserted;
+}
+
+/** Fill age evidence. Only non-null values land; NULL never overwrites (§3.1). */
+const emergingAgeQ = db.prepare(`
+  UPDATE emerging_discovery SET
+    base_token = COALESCE(base_token, ?),
+    quote_is_usdg = MAX(quote_is_usdg, ?),
+    pool_created_at = COALESCE(pool_created_at, ?),
+    token_created_at = COALESCE(token_created_at, ?),
+    launch_at = COALESCE(launch_at, ?),
+    updated_at = ?
+  WHERE pool_key = ?
+`);
+
+export function recordEmergingAges(
+  poolKey: string,
+  ages: {
+    baseToken: string | null;
+    quoteIsUsdg: boolean;
+    poolCreatedAt: number | null;
+    tokenCreatedAt: number | null;
+    launchAt: number | null;
+  },
+  updatedAt: number,
+): void {
+  emergingAgeQ.run(
+    ages.baseToken, ages.quoteIsUsdg ? 1 : 0,
+    ages.poolCreatedAt, ages.tokenCreatedAt, ages.launchAt,
+    updatedAt, poolKey,
+  );
+}
+
+export type EmergingLedgerRow = {
+  poolKey: string;
+  venue: string;
+  token0: string | null;
+  token1: string | null;
+  poolCreatedAt: number | null;
+  tokenCreatedAt: number | null;
+  firstSeenAt: number;
+  state: string;
+  reason: string | null;
+  admittedRank: number | null;
+  pinnedUntil: number | null;
+};
+
+const emergingActiveQ = db.prepare(`
+  SELECT pool_key AS poolKey, venue, token0, token1,
+         pool_created_at AS poolCreatedAt, token_created_at AS tokenCreatedAt,
+         first_seen_at AS firstSeenAt, state, reason,
+         admitted_rank AS admittedRank, pinned_until AS pinnedUntil
+  FROM emerging_discovery
+  WHERE state != 'aged_out'
+`);
+
+export const listEmergingActive = (): EmergingLedgerRow[] =>
+  emergingActiveQ.all() as unknown as EmergingLedgerRow[];
+
+/** One state transition: the row update and its append-only event commit
+ *  together, so history can never disagree with the current state (§4.3). */
+const emergingTransitionQ = db.prepare(`
+  UPDATE emerging_discovery
+  SET state = ?, reason = ?, admitted_rank = ?, pinned_until = COALESCE(?, pinned_until), updated_at = ?
+  WHERE pool_key = ?
+`);
+const emergingEventQ = db.prepare(`
+  INSERT INTO emerging_observation_events(pool_key, occurred_at, from_state, to_state, reason, detail)
+  VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+export function recordEmergingTransition(args: {
+  poolKey: string;
+  fromState: string | null;
+  toState: string;
+  reason: string | null;
+  admittedRank: number | null;
+  pinUntil?: number | null;
+  occurredAt: number;
+  detail?: string | null;
+}): void {
+  tx(() => {
+    emergingTransitionQ.run(
+      args.toState, args.reason, args.admittedRank,
+      args.pinUntil ?? null, args.occurredAt, args.poolKey,
+    );
+    emergingEventQ.run(
+      args.poolKey, args.occurredAt, args.fromState, args.toState,
+      args.reason, args.detail ?? null,
+    );
+  });
+}
+
+export const emergingCounts = (): Record<string, number> => {
+  const rows = db
+    .prepare('SELECT state, COUNT(*) AS n FROM emerging_discovery GROUP BY state')
+    .all() as Array<{ state: string; n: number }>;
+  return Object.fromEntries(rows.map((r) => [r.state, r.n]));
+};
+
 
 export const solverAdjacencyProjectionReady = (): boolean =>
   kvGet('solver_adjacency_projection_version') === '1' &&

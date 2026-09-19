@@ -12,7 +12,7 @@ import { LangControl } from './LangControl'
 import { NewsButton } from './NewsButton'
 import { MobileThemeControl } from './ThemeControl'
 
-export type TabId = 'pools' | 'recommendations' | 'positions' | 'swap' | 'bridge' | 'strategy' | 'strategy-history' | 'pnl-calendar' | 'pool-rank' | 'v4-create'
+export type TabId = 'pools' | 'recommendations' | 'positions' | 'swap' | 'bridge' | 'strategy' | 'strategy-history' | 'pnl-calendar' | 'pool-rank' | 'v4-create' | 'emerging'
 // Reading order is the order of the trade: find a market, take it, then watch
 // what you are left holding. POOLS now carries the swap form beside the market
 // list, so SWAP sits next to it as the same act at full width; POSITIONS is
@@ -28,12 +28,13 @@ const ALL_TABS = [
   { id: 'strategy-history', labelKey: 'hdr.strategyHistory', key: '7' },
   { id: 'pnl-calendar', labelKey: 'hdr.pnlCalendar', key: '8' },
   { id: 'pool-rank', labelKey: 'hdr.poolRank', key: '4' },
+  { id: 'emerging', labelKey: 'hdr.emerging', key: '' },
   { id: 'v4-create', labelKey: 'hdr.v4Create', key: '0' },
 ] as const
 // a chain with no bridge route model never shows the tab (FEATURES.bridge);
 // the ranking has the same rule — its pipeline is Robinhood-pinned for now,
 // and so is pool creation (FEATURES.v4Create)
-const TABS = ALL_TABS.filter((tb) => (tb.id !== 'bridge' || FEATURES.bridge) && (tb.id !== 'pool-rank' || FEATURES.poolRank) && (tb.id !== 'v4-create' || FEATURES.v4Create))
+const TABS = ALL_TABS.filter((tb) => (tb.id !== 'bridge' || FEATURES.bridge) && (tb.id !== 'pool-rank' || FEATURES.poolRank) && (tb.id !== 'v4-create' || FEATURES.v4Create) && (tb.id !== 'emerging' || FEATURES.emergingObserve))
 
 export function Header(props: { tab: TabId; onTab: (t: TabId) => void }) {
   const { t } = useTranslation()
@@ -60,7 +61,7 @@ export function Header(props: { tab: TabId; onTab: (t: TabId) => void }) {
             className={`tab ${props.tab === tb.id ? 'active' : ''}`}
             onClick={() => props.onTab(tb.id)}
           >
-            <span className="key">[{tb.key}]</span>
+            {tb.key !== '' && <span className="key">[{tb.key}]</span>}
             {t(tb.labelKey)}
           </button>
         ))}

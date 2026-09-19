@@ -84,6 +84,8 @@ export const FEATURES = {
    * has an equivalent pipeline, not merely an indexer.
    */
   poolRank: CHAIN.key === 'robinhood',
+  // Emerging-pool observation page (read-only; PRD §8.2)
+  emergingObserve: CHAIN.key === 'robinhood',
   /**
    * The V4 CREATE tab — initialize a brand-new v4 pool and seed it. Pinned to
    * Robinhood Chain by product decision: the write path is chain-agnostic in

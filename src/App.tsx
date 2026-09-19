@@ -28,6 +28,7 @@ const StrategyTab = lazy(() => import('./components/tabs/StrategyTab').then(({ S
 const StrategyHistoryTab = lazy(() => import('./components/tabs/StrategyHistoryTab').then(({ StrategyHistoryTab }) => ({ default: StrategyHistoryTab })))
 const PnlCalendarTab = lazy(() => import('./components/tabs/PnlCalendarTab').then(({ PnlCalendarTab }) => ({ default: PnlCalendarTab })))
 const PoolRankTab = lazy(() => import('./components/tabs/PoolRankTab').then(({ PoolRankTab }) => ({ default: PoolRankTab })))
+const EmergingTab = lazy(() => import('./components/tabs/EmergingTab').then(({ EmergingTab }) => ({ default: EmergingTab })))
 const V4CreateTab = lazy(() => import('./components/tabs/V4CreateTab').then(({ V4CreateTab }) => ({ default: V4CreateTab })))
 
 export default function App() {
@@ -83,8 +84,9 @@ const validTab = (h: string): TabId | null => {
   if (h === 'lab') return 'pools' // hidden component lab rides the pools slot
   if (h === 'bridge' && !FEATURES.bridge) return null
   if (h === 'pool-rank' && !FEATURES.poolRank) return null
+  if (h === 'emerging' && !FEATURES.emergingObserve) return null
   if (h === 'v4-create' && !FEATURES.v4Create) return null
-  return (['pools', 'recommendations', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar', 'pool-rank', 'v4-create'] as const).includes(h as TabId) ? (h as TabId) : null
+  return (['pools', 'recommendations', 'positions', 'swap', 'bridge', 'strategy', 'strategy-history', 'pnl-calendar', 'pool-rank', 'v4-create', 'emerging'] as const).includes(h as TabId) ? (h as TabId) : null
 }
 
 function Shell() {
@@ -158,6 +160,7 @@ function Shell() {
           {tab === 'strategy-history' && <StrategyHistoryTab />}
           {tab === 'pnl-calendar' && <PnlCalendarTab />}
           {tab === 'pool-rank' && <PoolRankTab onOpenPool={() => setTab('pools')} onOpenRecommendations={() => setTab('recommendations')} />}
+          {tab === 'emerging' && <EmergingTab />}
           {tab === 'v4-create' && FEATURES.v4Create && <V4CreateTab />}
         </Suspense>
       </div>

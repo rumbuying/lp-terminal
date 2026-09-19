@@ -37,6 +37,7 @@ import {
 } from './v3Subgraph';
 import { getPoolRankApi, getPoolRankSnapshot, POOL_RANK_ENABLED, type PoolRankRow } from './poolRank';
 import { getPairVolumeApi } from './pairVolume';
+import { getEmergingPools, getEmergingPool } from './emergingApi';
 import { SerializedResponseCache, type SerializedResponse } from './responseCache';
 import { dataFreshness, type DataFreshness } from './freshness';
 
@@ -3854,6 +3855,14 @@ export function createApiServer(): Server {
       } else if (url.pathname === '/api/up33/pools') {
         body = getUp33Pools();
         cache = 'public, max-age=60';
+      } else if (url.pathname === '/api/emerging/pools') {
+        // Emerging observation (§8.1): read-only; a stale cursor is a 409 and
+        // a disabled pipeline is a 503 carrying E_EMERGING_DISABLED.
+        body = getEmergingPools(url.searchParams);
+        cache = NO_STORE;
+      } else if (url.pathname.startsWith('/api/emerging/pools/')) {
+        body = getEmergingPool(decodeURIComponent(url.pathname.slice('/api/emerging/pools/'.length)));
+        cache = NO_STORE;
       } else if (url.pathname === '/api/volume/pair') {
         // kv-verbatim read (see pairVolume.ts): the cycle computed everything;
         // the route only routes an identity or a token pair to its family.

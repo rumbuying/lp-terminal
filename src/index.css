@@ -1,0 +1,16 @@
+
+/* Emerging-observation section (§8.2): a fact sheet, not a pitch. */
+.emerging-section { border: 1px solid var(--line, #2a2a2a); border-radius: 8px; padding: 8px 10px; margin: 0 0 12px; }
+.emerging-section summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+.emerging-title { font-weight: 600; }
+.emerging-count { color: var(--dim, #888); font-size: 12px; }
+.emerging-empty { padding: 8px 0; color: var(--dim, #888); font-size: 13px; }
+.emerging-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+.emerging-table th, .emerging-table td { text-align: left; padding: 4px 8px; border-top: 1px solid var(--line, #222); }
+.emerging-pair { font-family: var(--mono, monospace); }
+.emerging-sep { color: var(--dim, #888); padding: 0 4px; }
+.emerging-badge { padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line, #333); }
+.emerging-state-aged { opacity: 0.55; }
+.emerging-data-stale, .emerging-data-unsupported { color: #c9a227; }
+.emerging-data-partial { color: var(--dim, #888); }
+.emerging-footnote { margin-top: 6px; font-size: 11.5px; color: var(--dim, #888); }
