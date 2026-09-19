@@ -80,6 +80,15 @@ export type EmergingPoolView = {
   /** Resolved symbol from the indexer's token metadata; null = not yet named. */
   baseTokenSymbol?: string | null
   quoteToken: string | null
+  /** Both sides verbatim — the page shows the PAIR, not just the proven base. */
+  token0: string | null
+  token1: string | null
+  token0Symbol?: string | null
+  token1Symbol?: string | null
+  /** canonicalId exposed for identification (address, or bytes32 PoolId). */
+  poolId: string
+  /** Canonical swap/v4raw events observed in the trailing hour (null = unknown). */
+  trades1h?: number | null
   poolCreatedAt: number | null
   tokenCreatedAt: number | null
   observation: { state: EmergingObservationState; reasons: EmergingObservationReason[]; pinnedUntil: number | null }

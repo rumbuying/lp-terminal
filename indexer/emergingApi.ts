@@ -29,6 +29,7 @@ const lastCompleteMinuteQ = db.prepare(`
 
 function buildView(row: {
   poolKey: string; venue: string; canonicalId: string;
+  token0?: string | null; token1?: string | null;
   baseToken: string | null; quoteIsUsdg: number;
   poolCreatedAt: number | null; tokenCreatedAt: number | null;
   state: string; reason: string | null; pinnedUntil: number | null;
@@ -51,6 +52,11 @@ function buildView(row: {
     baseToken: row.baseToken,
     baseTokenSymbol: (row as { baseTokenSymbol?: string | null }).baseTokenSymbol ?? null,
     quoteToken: row.quoteIsUsdg ? CHAIN.addr.STABLE.toLowerCase() : null,
+    token0: row.token0 ?? null,
+    token1: row.token1 ?? null,
+    token0Symbol: (row as { token0Symbol?: string | null }).token0Symbol ?? null,
+    token1Symbol: (row as { token1Symbol?: string | null }).token1Symbol ?? null,
+    poolId: row.canonicalId,
     poolCreatedAt: row.poolCreatedAt,
     tokenCreatedAt: row.tokenCreatedAt,
     observation: {
@@ -102,35 +108,53 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
 
   // Filters map onto the ledger's own columns; the list stays poolKey-ordered
   // so a cursor page is a stable slice of one generation (§8.1).
-  const clauses: string[] = ['pool_key > ?'];
+  const clauses: string[] = ['d.pool_key > ?'];
   const args: string[] = [afterKey];
-  if (status) { clauses.push('state = ?'); args.push(status); }
-  if (venue) { clauses.push('venue = ?'); args.push(venue); }
+  if (status) { clauses.push('d.state = ?'); args.push(status); }
+  if (venue) { clauses.push('d.venue = ?'); args.push(venue); }
   const rows = db
     .prepare(`SELECT d.pool_key AS poolKey, d.venue, d.canonical_id AS canonicalId,
+                     d.token0, d.token1,
                      d.base_token AS baseToken, d.quote_is_usdg AS quoteIsUsdg,
                      d.pool_created_at AS poolCreatedAt, d.token_created_at AS tokenCreatedAt,
                      d.state, d.reason, d.pinned_until AS pinnedUntil, d.updated_at AS updatedAt,
-                     tb.symbol AS baseTokenSymbol
+                     tb.symbol AS baseTokenSymbol, t0s.symbol AS token0Symbol, t1s.symbol AS token1Symbol
               FROM emerging_discovery d
               LEFT JOIN tokens tb ON tb.address = d.base_token
+              LEFT JOIN tokens t0s ON t0s.address = d.token0
+              LEFT JOIN tokens t1s ON t1s.address = d.token1
               WHERE ${clauses.join(' AND ')}
               ORDER BY d.pool_key LIMIT ${limit + 1}`)
     .all(...args) as Array<Parameters<typeof buildView>[0]>;
 
-  const page = rows.slice(0, limit);
+  // Trailing-hour activity per pool in one aggregate pass — the honest
+  // heartbeat even for v4 pools whose decode is still pending (v4raw counts).
+  const hourAgo = Math.floor(Date.now() / 1000) - 3_600;
+  const tradesByPool = new Map<string, number>(
+    (db.prepare(`
+      SELECT pool_key AS k, COUNT(*) AS n FROM emerging_chain_events
+      WHERE canonical = 1 AND kind IN ('swap', 'v4raw') AND block_ts >= ?
+        AND pool_key IS NOT NULL
+      GROUP BY pool_key`).all(hourAgo) as Array<{ k: string; n: number }>)
+      .map((r) => [r.k, r.n]),
+  );
+
+  const page = rows.slice(0, limit).map((row) => ({
+    view: buildView(row),
+    trades1h: tradesByPool.get(row.poolKey) ?? 0,
+  }));
   const generation = emergingGeneration();
   const counts = emergingCounts();
   return {
     schemaVersion: 1,
     generation,
     generatedAt: Math.floor(Date.now() / 1000),
-    nextCursor: rows.length > limit ? `${generation}:${page[page.length - 1].poolKey}` : null,
+    nextCursor: rows.length > limit ? `${generation}:${page[page.length - 1].view.poolKey}` : null,
     phase: 'observe',
     ready: true,
     readyReason: null,
     counts,
-    pools: page.map(buildView),
+    pools: page.map((p) => ({ ...p.view, trades1h: p.trades1h })),
   };
 }
 

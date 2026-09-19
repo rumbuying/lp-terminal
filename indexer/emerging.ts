@@ -18,6 +18,7 @@ import { CHAIN, EMERGING_TUNE, now, sleep } from './config';
 import { pc } from './rpc';
 import {
   db,
+  enqueueHydrationDemand,
   isLaunchpadToken,
   kvGet,
   kvSet,
@@ -232,6 +233,19 @@ export async function runEmergingDiscoverySweep(): Promise<{
     const gen = kvGet('emerging_generation');
     kvSet('emerging_generation', String(Number(gen ?? '0') + 1));
   }
+
+  // The observation page names tokens — queue metadata hydration for every
+  // young-set token so symbols fill in within minutes of admission.
+  const hydrate = new Set<string>();
+  for (const row of [...v4Rows, ...v23Rows]) {
+    if (row.token0) hydrate.add(row.token0);
+    if (row.token1) hydrate.add(row.token1);
+  }
+  for (const r of active) {
+    if (r.token0) hydrate.add(r.token0);
+    if (r.token1) hydrate.add(r.token1);
+  }
+  enqueueHydrationDemand([...hydrate], 2_000);
 
   return counters;
 }

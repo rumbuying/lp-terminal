@@ -633,6 +633,10 @@ export const zh: typeof en = {
       title: '观察 · 新上线池子',
       updated: '更新于 {{time}} · 已发现 {{discovered}} · 跟踪 {{queued}} · 过期 {{aged}}',
       colObserved: '发现于',
+      colPair: '币对',
+      colVenue: '场所',
+      colPool: '池地址',
+      colTrades1h: '1h 笔数',
       footnote: '仅观察——这里是采集事实,不是安全结论;本页不提供任何操作。',
       reason: {
         capacity_deferred: ' · 容量排队',

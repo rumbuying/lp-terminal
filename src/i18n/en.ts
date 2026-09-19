@@ -635,6 +635,10 @@ export const en = {
       title: 'Emerging pools · live observations',
       updated: 'updated {{time}} · {{discovered}} discovered · {{queued}} tracked · {{aged}} aged out',
       colObserved: 'observed',
+      colPair: 'pair',
+      colVenue: 'venue',
+      colPool: 'pool',
+      colTrades1h: 'swaps 1h',
       footnote: 'Observation only — collection facts, not a safety verdict. No actions are offered on this page.',
       reason: {
         capacity_deferred: ' · capacity queue',
