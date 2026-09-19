@@ -88,7 +88,10 @@ function buildView(row: {
   // list — the three display fields simply stay null for that row, and the
   // first failure logs its shape for diagnosis.
   try {
-  if (sqrtText && liqText && spec !== null && majorUsd !== null && majorUsd > 0) {
+  // Numeric-string defense: garbage in the depth cache ("undefined",
+  // "[object Object]") must never reach BigInt — skip the row's figures.
+  const numeric = (v: string | null | undefined): v is string => v !== undefined && v !== null && /^\d+$/.test(v)
+  if (numeric(sqrtText) && numeric(liqText) && spec !== null && majorUsd !== null && majorUsd > 0) {
     const sqrtP = BigInt(sqrtText)
     const L = BigInt(liqText)
     const amounts = getAmountsForLiquidity(sqrtP, getSqrtRatioAtTick(MIN_TICK), getSqrtRatioAtTick(MAX_TICK), L)

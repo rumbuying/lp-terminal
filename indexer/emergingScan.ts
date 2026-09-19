@@ -412,9 +412,11 @@ export async function runEmergingV4DepthSweep(): Promise<number> {
     const results = await mc(calls);
     const t = now();
     for (let i = 0; i < rows.length; i++) {
+      // mc may hand back per-call failure objects — validate the SHAPES before
+      // persisting: a failed sub-call stringified into the cache once already.
       const slot0 = results[i * 2] as unknown as readonly [bigint, number, number, number] | undefined;
       const liquidity = results[i * 2 + 1] as unknown as bigint | undefined;
-      if (!slot0 || liquidity === undefined) continue;
+      if (typeof slot0?.[0] !== 'bigint' || typeof liquidity !== 'bigint') continue;
       v4UpsertQ.run(rows[i].poolKey, String(slot0[0]), String(liquidity), t);
       ok++;
     }
