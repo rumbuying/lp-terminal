@@ -36,6 +36,8 @@ const lastCompleteMinuteQ = db.prepare(`
   WHERE pool_key = ? AND complete = 1
 `);
 
+let buildViewWarned = false
+
 function buildView(row: {
   poolKey: string; venue: string; canonicalId: string;
   token0?: string | null; token1?: string | null;
@@ -82,6 +84,10 @@ function buildView(row: {
   let liquidityUsd: number | null = external
   let priceUsd: number | null = row.basePriceUsd ?? null
   let marketCapUsd: number | null = null
+  // Per-row isolation: one pool's malformed figures must never 500 the whole
+  // list — the three display fields simply stay null for that row, and the
+  // first failure logs its shape for diagnosis.
+  try {
   if (sqrtText && liqText && spec !== null && majorUsd !== null && majorUsd > 0) {
     const sqrtP = BigInt(sqrtText)
     const L = BigInt(liqText)
@@ -110,6 +116,15 @@ function buildView(row: {
       const baseAddr = row.baseToken?.toLowerCase() ?? null
       if (sup !== null && sup > 0 && specAddr === baseAddr)
         marketCapUsd = specUsd * sup
+    }
+  }
+  } catch (error) {
+    if (!buildViewWarned) {
+      buildViewWarned = true
+      console.log('[emerging-api] display-figure compute failed once:', String(error).slice(0, 160),
+        JSON.stringify({ venue: row.venue, v3Sqrt: row.v3SqrtPrice?.slice(0, 10), v3Liq: row.v3Liquidity?.slice(0, 10),
+          v4Sqrt: row.v4SqrtPrice?.slice(0, 10), v4Liq: row.v4Liquidity?.slice(0, 10),
+          t0: row.t0PriceUsd, t1: row.t1PriceUsd }))
     }
   }
   // Liquidity per venue: external figures (v4 chain-derived TVL / GT) win
