@@ -21,6 +21,7 @@ function wnativePrice(): number | null {
   const r = wnativePriceQ.get(CHAIN.addr.WNATIVE.toLowerCase()) as { p: number | null } | undefined;
   return r?.p ?? null;
 }
+const sidePriceQ = db.prepare(`SELECT price_usd AS p FROM tokens WHERE address = ?`);
 const VIEW_SCHEMA_VERSION = 1;
 /** A young set with no complete minute newer than this is 'stale' (§6.1). */
 const FRESHNESS_SECONDS = 180;
@@ -61,54 +62,54 @@ function buildView(row: {
   const zero = '0x' + '0'.repeat(40)
   const stable = CHAIN.addr.STABLE.toLowerCase()
   const wnative = CHAIN.addr.WNATIVE.toLowerCase()
-  const sideUsd = (addr: string | null, priceUsd: number | null | undefined): number | null => {
+  const sideUsd = (addr: string | null): number | null => {
     if (addr === null) return null
     const a = addr.toLowerCase()
     if (a === zero) return wnativePrice() // native priced at Wrapped parity
-    if (a === stable) return priceUsd ?? 1 // the audited stable ≈ its peg (§4.4 note)
-    return priceUsd ?? null
+    if (a === stable) return 1 // the audited stable ≈ its peg (§4.4 note)
+    const r = sidePriceQ.get(a) as { p: number | null } | undefined
+    return r?.p ?? null
   }
   const t0 = row.token0 ?? null
   const t1 = row.token1 ?? null
   const t0Low = t0?.toLowerCase() ?? null
   const t1Low = t1?.toLowerCase() ?? null
-  const usd0 = sideUsd(t0, row.t0PriceUsd)
-  const usd1 = sideUsd(t1, row.t1PriceUsd)
   const isMajor = (a: string | null) => a !== null && (a === zero || a === stable || a === wnative)
   const spec: 't0' | 't1' | null = isMajor(t0Low) && !isMajor(t1Low) ? 't1'
     : isMajor(t1Low) && !isMajor(t0Low) ? 't0' : null
-  const majorUsd = spec === 't1' ? usd0 : spec === 't0' ? usd1 : null
+  const majorUsd = spec === 't1' ? sideUsd(t0) : spec === 't0' ? sideUsd(t1) : null
 
   let liquidityUsd: number | null = external
   let priceUsd: number | null = row.basePriceUsd ?? null
   let marketCapUsd: number | null = null
-  if (sqrtText && liqText && usd0 !== null && usd1 !== null) {
+  if (sqrtText && liqText && spec !== null && majorUsd !== null && majorUsd > 0) {
     const sqrtP = BigInt(sqrtText)
     const L = BigInt(liqText)
-    const { amount0, amount1 } = getAmountsForLiquidity(sqrtP, getSqrtRatioAtTick(MIN_TICK), getSqrtRatioAtTick(MAX_TICK), L)
-    const liqUsdSelf = Number(amount0) / 10 ** (row.t0Decimals ?? 18) * (usd0 ?? 0)
-      + Number(amount1) / 10 ** (row.t1Decimals ?? 18) * (usd1 ?? 0)
+    const amounts = getAmountsForLiquidity(sqrtP, getSqrtRatioAtTick(MIN_TICK), getSqrtRatioAtTick(MAX_TICK), L)
+    // The pool's own ratio makes the two sides' values EQUAL at mid price, so
+    // the whole active-L value prices from the MAJOR side alone (whose USD
+    // price the graph carries) — the speculative side's price is then read
+    // BACK out of the same ratio. Display-grade; the $300 trading gate stays.
+    const majorAmount = spec === 't1' ? amounts.amount0 : amounts.amount1
+    const majorDec = spec === 't1' ? (row.t0Decimals ?? 18) : (row.t1Decimals ?? 18)
+    const liqUsdSelf = 2 * Number(majorAmount) / 10 ** majorDec * majorUsd
     if (Number.isFinite(liqUsdSelf) && liqUsdSelf > 0)
       liquidityUsd = liquidityUsd === null ? liqUsdSelf : Math.max(liquidityUsd, liqUsdSelf)
-    if (spec !== null && majorUsd !== null && majorUsd > 0) {
-      const nSqrt = Number(sqrtP) / 2 ** 96
-      const raw = nSqrt * nSqrt // token1_raw per token0_raw
-      const decAdj = 10 ** ((row.t0Decimals ?? 18) - (row.t1Decimals ?? 18))
-      const t1PerT0 = raw * decAdj
-      const dSpec = spec === 't0' ? (row.t0Decimals ?? 18) : (row.t1Decimals ?? 18)
-      // speculative-side USD price through the pool's own last-known price
-      const specUsd = spec === 't0' ? majorUsd / t1PerT0 : majorUsd * t1PerT0
-      if (Number.isFinite(specUsd) && specUsd > 0) {
-        priceUsd = priceUsd ?? specUsd
-        const sup = row.baseTotalSupply !== null && row.baseTotalSupply !== undefined
-          ? Number(row.baseTotalSupply) / 10 ** (row.baseDecimals ?? dSpec) : null
-        // FDV only when the speculative side IS the proven base (§5.2 supply
-        // ledger denominator); otherwise the figure would be meaningless.
-        const specAddr = spec === 't0' ? t0Low : t1Low
-        const baseAddr = row.baseToken?.toLowerCase() ?? null
-        if (sup !== null && sup > 0 && specAddr === baseAddr)
-          marketCapUsd = specUsd * sup
-      }
+    const nSqrt = Number(sqrtP) / 2 ** 96
+    const raw = nSqrt * nSqrt // token1_raw per token0_raw
+    const decAdj = 10 ** ((row.t0Decimals ?? 18) - (row.t1Decimals ?? 18))
+    const t1PerT0 = raw * decAdj
+    const specUsd = spec === 't0' ? majorUsd / t1PerT0 : majorUsd * t1PerT0
+    if (Number.isFinite(specUsd) && specUsd > 0) {
+      priceUsd = priceUsd ?? specUsd
+      const sup = row.baseTotalSupply !== null && row.baseTotalSupply !== undefined
+        ? Number(row.baseTotalSupply) / 10 ** (row.baseDecimals ?? 18) : null
+      // FDV only when the speculative side IS the proven base (§5.2 supply
+      // ledger denominator); otherwise the figure would be meaningless.
+      const specAddr = spec === 't0' ? t0Low : t1Low
+      const baseAddr = row.baseToken?.toLowerCase() ?? null
+      if (sup !== null && sup > 0 && specAddr === baseAddr)
+        marketCapUsd = specUsd * sup
     }
   }
   // Liquidity per venue: external figures (v4 chain-derived TVL / GT) win
