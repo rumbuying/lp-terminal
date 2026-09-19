@@ -640,6 +640,8 @@ export const en = {
       colVenue: 'venue',
       colPool: 'pool',
       colTrades1h: 'swaps 1h',
+      colLiq: 'liquidity',
+      colMcap: 'mcap (FDV)',
       footnote: 'Observation only — collection facts, not a safety verdict. No actions are offered on this page.',
       reason: {
         capacity_deferred: ' · capacity queue',

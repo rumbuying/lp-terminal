@@ -33,7 +33,24 @@ function buildView(row: {
   baseToken: string | null; quoteIsUsdg: number;
   poolCreatedAt: number | null; tokenCreatedAt: number | null;
   state: string; reason: string | null; pinnedUntil: number | null;
+  basePriceUsd?: number | null; baseDecimals?: number | null; baseTotalSupply?: string | null;
+  statsLiqUsd?: number | null; v4TvlUsd?: number | null; v4LiqUsd?: number | null;
 }): EmergingPoolView {
+  // Liquidity per venue: v4 carries a chain-derived TVL; address-keyed venues
+  // carry GT's reserve figure (brand-new pools list there late — null stays
+  // null, §3.2). Market cap is price × TOTAL supply: an FDV-shaped figure by
+  // construction, labeled as such in the UI (§5.2 keeps the total-supply
+  // denominator).
+  const liquidityUsd = row.venue === 'univ4'
+    ? (row.v4TvlUsd ?? row.v4LiqUsd ?? null)
+    : (row.statsLiqUsd ?? null)
+  let marketCapUsd: number | null = null
+  if (row.basePriceUsd !== null && row.basePriceUsd !== undefined &&
+      row.baseTotalSupply !== null && row.baseTotalSupply !== undefined) {
+    const decimals = row.baseDecimals ?? 18
+    const supply = Number(row.baseTotalSupply) / 10 ** decimals
+    if (Number.isFinite(supply) && supply > 0) marketCapUsd = row.basePriceUsd * supply
+  }
   const lastMinute = (lastCompleteMinuteQ.get(row.poolKey) as { t: number | null } | null)?.t ?? null;
   // v4 stays 'unsupported' until this deployment's raw event shapes are
   // decoded and pinned (§4.4) — never zeros that read like a dead market.
@@ -57,6 +74,10 @@ function buildView(row: {
     token0Symbol: (row as { token0Symbol?: string | null }).token0Symbol ?? null,
     token1Symbol: (row as { token1Symbol?: string | null }).token1Symbol ?? null,
     poolId: row.canonicalId,
+    liquidityUsd,
+    priceUsd: row.basePriceUsd ?? null,
+    marketCapUsd,
+    totalSupply: row.baseTotalSupply ?? null,
     poolCreatedAt: row.poolCreatedAt,
     tokenCreatedAt: row.tokenCreatedAt,
     observation: {
@@ -118,11 +139,18 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
                      d.base_token AS baseToken, d.quote_is_usdg AS quoteIsUsdg,
                      d.pool_created_at AS poolCreatedAt, d.token_created_at AS tokenCreatedAt,
                      d.state, d.reason, d.pinned_until AS pinnedUntil, d.updated_at AS updatedAt,
-                     tb.symbol AS baseTokenSymbol, t0s.symbol AS token0Symbol, t1s.symbol AS token1Symbol
+                     tb.symbol AS baseTokenSymbol, t0s.symbol AS token0Symbol, t1s.symbol AS token1Symbol,
+                     tb.price_usd AS basePriceUsd, tb.decimals AS baseDecimals,
+                     ss.total_supply AS baseTotalSupply,
+                     ps.liq_usd AS statsLiqUsd,
+                     vm.tvl_usd AS v4TvlUsd, vm.liq_usd AS v4LiqUsd
               FROM emerging_discovery d
               LEFT JOIN tokens tb ON tb.address = d.base_token
               LEFT JOIN tokens t0s ON t0s.address = d.token0
               LEFT JOIN tokens t1s ON t1s.address = d.token1
+              LEFT JOIN emerging_supply_state ss ON ss.token = d.base_token
+              LEFT JOIN pool_stats ps ON ps.address = d.canonical_id
+              LEFT JOIN v4_market_stats vm ON vm.pool_id = d.canonical_id
               WHERE ${clauses.join(' AND ')}
               ORDER BY d.pool_key LIMIT ${limit + 1}`)
     .all(...args) as Array<Parameters<typeof buildView>[0]>;

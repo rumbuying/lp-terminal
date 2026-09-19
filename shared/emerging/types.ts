@@ -89,6 +89,13 @@ export type EmergingPoolView = {
   poolId: string
   /** Canonical swap/v4raw events observed in the trailing hour (null = unknown). */
   trades1h?: number | null
+  /** v4: chain-derived TVL; v3/UP33: GT reserve figure. null = not listed yet. */
+  liquidityUsd?: number | null
+  /** Base-token USD price from the pricing graph (null until credible depth). */
+  priceUsd?: number | null
+  /** price × TOTAL supply — FDV-shaped by construction (§5.2), labeled in UI. */
+  marketCapUsd?: number | null
+  totalSupply?: string | null
   poolCreatedAt: number | null
   tokenCreatedAt: number | null
   observation: { state: EmergingObservationState; reasons: EmergingObservationReason[]; pinnedUntil: number | null }
