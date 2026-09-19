@@ -29,6 +29,9 @@ import {
   type EmergingLedgerRow,
 } from './store';
 import { planAdmission, type LedgerRow } from './emergingCore';
+import { EMERGING_THRESHOLDS } from './emergingPolicy';
+
+const quietDemoteSeconds = EMERGING_THRESHOLDS.quietDemoteSeconds;
 
 export const emergingObserveEnabled = (): boolean => EMERGING_TUNE.enabled;
 
@@ -98,9 +101,10 @@ export async function runEmergingDiscoverySweep(): Promise<{
   deferred: number;
   agedOut: number;
   blockTsFetches: number;
+  demoted: number;
 }> {
   const seenAt = now();
-  const counters = { discovered: 0, admitted: 0, deferred: 0, agedOut: 0, blockTsFetches: 0 };
+  const counters = { discovered: 0, admitted: 0, deferred: 0, agedOut: 0, blockTsFetches: 0, demoted: 0 };
 
   // --- consume durable discovery sources ---
   const overlap = seenAt - EMERGING_TUNE.sourceOverlapSec;
@@ -171,6 +175,30 @@ export async function runEmergingDiscoverySweep(): Promise<{
   // --- admission plan over the active rows (capacity collapses to zero when
   // the §4.5 disk guard says the filesystem is nearly full) ---
   const active = listEmergingActive();
+
+  // --- quiet demotion (变更记录 2026-09-19): tracked pools with zero
+  // observed swaps quietDemoteSeconds after first seeing yield their slot.
+  // Pinned pools are exempt; nothing is deleted — the row keeps its history
+  // and rejoins the queue behind fresh discoveries. ---
+  if (active.length) {
+    const traded = new Set(
+      (db.prepare(`
+        SELECT DISTINCT pool_key AS k FROM emerging_chain_events
+        WHERE canonical = 1 AND kind IN ('swap', 'v4raw') AND pool_key IS NOT NULL`)
+        .all() as Array<{ k: string }>).map((r) => r.k),
+    )
+    for (const r of active) {
+      if (r.admittedRank === null || r.pinnedUntil !== null) continue
+      if (seenAt - r.firstSeenAt < quietDemoteSeconds) continue
+      if (traded.has(r.poolKey)) continue
+      recordEmergingTransition({
+        poolKey: r.poolKey, fromState: r.state, toState: 'queued',
+        reason: 'quiet_demoted', admittedRank: null, occurredAt: seenAt,
+      })
+      counters.demoted = (counters.demoted ?? 0) + 1
+    }
+  }
+
   const plan = planAdmission({
     rows: active.map((r): LedgerRow & { firstSeenAt: number } => ({
       poolKey: r.poolKey,

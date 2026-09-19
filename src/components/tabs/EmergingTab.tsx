@@ -70,6 +70,7 @@ const REASON_KEYS = {
   data_gap: 'emerging.page.reason.data_gap',
   reorg_repair: 'emerging.page.reason.reorg_repair',
   age_exceeded: 'emerging.page.reason.age_exceeded',
+  quiet_demoted: 'emerging.page.reason.quiet_demoted',
 } as const
 
 const DATA_RANK: Record<string, number> = { complete: 3, partial: 2, stale: 1, unsupported: 0 }
@@ -236,7 +237,7 @@ export function EmergingTab() {
                       <span className={`emerging-badge ${stateClass[p.observation.state] ?? ''}`}>
                         {t(`pools.emerging.state.${p.observation.state}`)}
                       </span>
-                      {p.observation.reasons.filter((r): r is keyof typeof REASON_KEYS => r !== null && r in REASON_KEYS).map((r) => (
+                      {p.observation.reasons.filter((r): r is keyof typeof REASON_KEYS => typeof r === 'string' && r in REASON_KEYS).map((r) => (
                         <span key={r} className="emerging-sep">{t(REASON_KEYS[r])}</span>
                       ))}
                     </td>

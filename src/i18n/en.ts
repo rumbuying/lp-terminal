@@ -648,6 +648,7 @@ export const en = {
         data_gap: ' · data gap',
         reorg_repair: ' · reorg repair',
         age_exceeded: ' · aged',
+        quiet_demoted: ' · quiet (demoted)',
       },
     },
   },

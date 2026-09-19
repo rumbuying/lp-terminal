@@ -62,6 +62,10 @@ export const EMERGING_THRESHOLDS = {
   /** §6.1 freshness floors. */
   sourceStaleSeconds: 180,
   permissionStaleSeconds: 300,
+  /** Quiet-demotion (变更记录 2026-09-19): a tracked pool with ZERO observed
+   *  swaps this long after admission yields its slot — demoted, not deleted;
+   *  the ledger keeps it and it rejoins the queue behind fresh discoveries. */
+  quietDemoteSeconds: 6 * 3_600,
 } as const
 
 export type EmergingThresholds = typeof EMERGING_THRESHOLDS

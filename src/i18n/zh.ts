@@ -646,6 +646,7 @@ export const zh: typeof en = {
         data_gap: ' · 数据缺口',
         reorg_repair: ' · 重组修复',
         age_exceeded: ' · 已过期',
+        quiet_demoted: ' · 零成交降级',
       },
     },
   },

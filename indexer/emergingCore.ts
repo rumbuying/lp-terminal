@@ -127,9 +127,17 @@ export function planAdmission(args: {
     .filter((r) => !(r.pinnedUntil !== null && r.pinnedUntil > nowSec))
     .sort((a, b) => (a.admittedRank ?? 0) - (b.admittedRank ?? 0))
 
+  // Waiting order: fresh discoveries first, previously quiet-demoted pools
+  // last (变更记录 2026-09-19 — a demoted pool re-admitted under pressure
+  // would just burn another observation window on the same silence).
   const waiting = young
     .filter((r) => r.admittedRank === null && !(r.pinnedUntil !== null && r.pinnedUntil > nowSec))
-    .sort((a, b) => a.firstSeenAt - b.firstSeenAt || (a.poolKey < b.poolKey ? -1 : a.poolKey > b.poolKey ? 1 : 0))
+    .sort((a, b) => {
+      const da = a.reason === 'quiet_demoted' ? 1 : 0
+      const db = b.reason === 'quiet_demoted' ? 1 : 0
+      if (da !== db) return da - db
+      return a.firstSeenAt - b.firstSeenAt || (a.poolKey < b.poolKey ? -1 : a.poolKey > b.poolKey ? 1 : 0)
+    })
 
   const keep = Math.min(unpinnedTracked.length, free)
   const kept = unpinnedTracked.slice(0, keep)

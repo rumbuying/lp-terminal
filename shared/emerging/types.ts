@@ -35,6 +35,7 @@ export type EmergingObservationReason =
   | 'data_gap'
   | 'reorg_repair'
   | 'age_exceeded'
+  | 'quiet_demoted'
   | null
 
 /**
