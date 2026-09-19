@@ -3324,3 +3324,11 @@ tr.pr-focus td { background: rgba(var(--acc-rgb), 0.06); }
   white-space: nowrap;
 }
 .pv-mini .pr-trend { gap: 4px; }
+
+/* Emerging page: roomier rows, nowrap sortable headers */
+.emerging-full { font-size: 13px; }
+.emerging-full .emerging-th { white-space: nowrap; padding: 10px 14px 8px; }
+.emerging-full th { padding: 10px 14px 8px; }
+.emerging-full td { padding: 9px 14px; white-space: nowrap; }
+.emerging-full tbody tr:nth-child(odd) { background: color-mix(in srgb, var(--fg) 3%, transparent); }
+.emerging-full tbody tr:hover { background: color-mix(in srgb, var(--acc) 7%, transparent); }

@@ -4,8 +4,9 @@
 // A fact sheet, not a pitch: the PAIR (both sides, symbols when named),
 // the pool identity with an explorer link, ages, collection state, trailing
 // activity — and a footer that says observation ≠ safety verdict. No action
-// buttons; canCreateStrategy is false at the API contract.
-import { useCallback, useEffect, useState } from 'react'
+// buttons; canCreateStrategy is false at the API contract. Every column
+// sorts client-side over the fetched page; default is newest pool first.
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { EmergingPoolView } from '../../../shared/emerging/types'
 import { fetchCatalog } from '../../lib/catalogFetch'
@@ -52,11 +53,32 @@ const REASON_KEYS = {
   age_exceeded: 'emerging.page.reason.age_exceeded',
 } as const
 
+const DATA_RANK: Record<string, number> = { complete: 3, partial: 2, stale: 1, unsupported: 0 }
+const STATE_RANK: Record<string, number> = {
+  discovered: 0, queued: 1, backfilling: 2, tracking: 3, aged_out: 4,
+}
+
+type SortKey = 'pair' | 'pool' | 'venue' | 'poolAge' | 'tokenAge' | 'trades1h' | 'state' | 'data'
+
+const COMPARATORS: Record<SortKey, (a: EmergingPoolView, b: EmergingPoolView) => number> = {
+  pair: (a, b) =>
+    (sideName(a.token0, a.token0Symbol ?? null) + sideName(a.token1, a.token1Symbol ?? null))
+      .localeCompare(sideName(b.token0, b.token0Symbol ?? null) + sideName(b.token1, b.token1Symbol ?? null)),
+  pool: (a, b) => a.poolId.localeCompare(b.poolId),
+  venue: (a, b) => a.venue.localeCompare(b.venue),
+  poolAge: (a, b) => (a.poolCreatedAt ?? 0) - (b.poolCreatedAt ?? 0),
+  tokenAge: (a, b) => (a.tokenCreatedAt ?? 0) - (b.tokenCreatedAt ?? 0),
+  trades1h: (a, b) => (a.trades1h ?? 0) - (b.trades1h ?? 0),
+  state: (a, b) => (STATE_RANK[a.observation.state] ?? 9) - (STATE_RANK[b.observation.state] ?? 9),
+  data: (a, b) => (DATA_RANK[a.dataQuality.status] ?? 9) - (DATA_RANK[b.dataQuality.status] ?? 9),
+}
+
 export function EmergingTab() {
   const { t } = useTranslation()
   const [data, setData] = useState<Envelope | null>(null)
   const [failed, setFailed] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'desc' | 'asc' }>({ key: 'poolAge', dir: 'desc' })
 
   const load = useCallback(async () => {
     const path = indexerApiPath('emerging/pools?limit=200', CHAIN.key, ENV.chainGateway, ACTIVE_IS_BUILD)
@@ -77,6 +99,16 @@ export function EmergingTab() {
     return () => clearInterval(id)
   }, [load])
 
+  const rows = useMemo(() => {
+    const list = [...(data?.pools ?? [])]
+    const cmp = COMPARATORS[sort.key]
+    list.sort((a, b) => (sort.dir === 'desc' ? cmp(b, a) : cmp(a, b)))
+    return list
+  }, [data, sort])
+
+  const toggleSort = (key: SortKey) =>
+    setSort((s) => (s.key === key ? { key, dir: s.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }))
+
   const tNow = Math.floor(Date.now() / 1000)
   const ageText = (birth: number | null): string => {
     if (birth === null) return '—'
@@ -86,6 +118,15 @@ export function EmergingTab() {
   const generated = data?.generatedAt ? new Date(data.generatedAt * 1000) : null
   const explorerHref = (p: EmergingPoolView): string | null =>
     p.venue === 'univ4' ? null : `${EXPLORER}/address/${p.poolId}`
+
+  const th = (key: SortKey, label: string) => (
+    <th className="emerging-th">
+      <button className={`pr-sort ${sort.key === key ? 'on' : ''}`} onClick={() => toggleSort(key)}>
+        {label}
+        {sort.key === key && <span aria-hidden="true">{sort.dir === 'desc' ? ' ▼' : ' ▲'}</span>}
+      </button>
+    </th>
+  )
 
   return (
     <div className="panel">
@@ -111,25 +152,25 @@ export function EmergingTab() {
         <div className="emerging-empty">…</div>
       ) : data.ready === false ? (
         <div className="emerging-empty">{t('pools.emerging.backfilling')}</div>
-      ) : data.pools.length === 0 ? (
+      ) : rows.length === 0 ? (
         <div className="emerging-empty">{t('pools.emerging.empty')}</div>
       ) : (
         <div className="table-scroll">
           <table className="emerging-table emerging-full">
             <thead>
               <tr>
-                <th>{t('emerging.page.colPair')}</th>
-                <th>{t('emerging.page.colPool')}</th>
-                <th>{t('pools.emerging.colVenue')}</th>
-                <th>{t('pools.emerging.colPoolAge')}</th>
-                <th>{t('pools.emerging.colTokenAge')}</th>
-                <th>{t('emerging.page.colTrades1h')}</th>
-                <th>{t('pools.emerging.colState')}</th>
-                <th>{t('pools.emerging.colData')}</th>
+                {th('pair', t('emerging.page.colPair'))}
+                {th('pool', t('emerging.page.colPool'))}
+                {th('venue', t('pools.emerging.colVenue'))}
+                {th('poolAge', t('pools.emerging.colPoolAge'))}
+                {th('tokenAge', t('pools.emerging.colTokenAge'))}
+                {th('trades1h', t('emerging.page.colTrades1h'))}
+                {th('state', t('pools.emerging.colState'))}
+                {th('data', t('pools.emerging.colData'))}
               </tr>
             </thead>
             <tbody>
-              {data.pools.map((p) => {
+              {rows.map((p) => {
                 const href = explorerHref(p)
                 return (
                   <tr key={p.poolKey}>
