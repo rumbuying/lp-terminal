@@ -10,9 +10,17 @@ import { CHAIN } from './config';
 import { ApiCapacityError, ApiConflictError, ApiInputError } from './api';
 import { db, emergingCounts, kvGet, kvSet } from './store';
 import { emergingObserveEnabled } from './emerging';
+import { getAmountsForLiquidity, getSqrtRatioAtTick, MIN_TICK, MAX_TICK } from '../src/lib/clmath';
 import type { EmergingObservationReason, EmergingObservationState, EmergingPoolView, EmergingVenue } from '../shared/emerging/types';
 
 const GENERATION_KEY = 'emerging_generation';
+
+/** Native-ETH pricing anchor: the Wrapped-native row's pricing-graph price. */
+const wnativePriceQ = db.prepare(`SELECT price_usd AS p FROM tokens WHERE address = ?`);
+function wnativePrice(): number | null {
+  const r = wnativePriceQ.get(CHAIN.addr.WNATIVE.toLowerCase()) as { p: number | null } | undefined;
+  return r?.p ?? null;
+}
 const VIEW_SCHEMA_VERSION = 1;
 /** A young set with no complete minute newer than this is 'stale' (§6.1). */
 const FRESHNESS_SECONDS = 180;
@@ -35,22 +43,77 @@ function buildView(row: {
   state: string; reason: string | null; pinnedUntil: number | null;
   basePriceUsd?: number | null; baseDecimals?: number | null; baseTotalSupply?: string | null;
   statsLiqUsd?: number | null; v4TvlUsd?: number | null; v4LiqUsd?: number | null;
+  t0PriceUsd?: number | null; t0Decimals?: number | null;
+  t1PriceUsd?: number | null; t1Decimals?: number | null;
+  v3SqrtPrice?: string | null; v3Liquidity?: string | null;
+  v4SqrtPrice?: string | null; v4Liquidity?: string | null;
 }): EmergingPoolView {
-  // Liquidity per venue: v4 carries a chain-derived TVL; address-keyed venues
-  // carry GT's reserve figure (brand-new pools list there late — null stays
-  // null, §3.2). Market cap is price × TOTAL supply: an FDV-shaped figure by
-  // construction, labeled as such in the UI (§5.2 keeps the total-supply
-  // denominator).
-  const liquidityUsd = row.venue === 'univ4'
+  // --- display-grade self-computed figures (§8.2; NOT trading inputs) ---
+  // Liquidity: v4 from the StateView cache, v3/UP33 from pool_state's swept
+  // active L — full-range amounts at the pool's own price, in USD via the
+  // pricing graph (WETH/USDG prices are deep; the speculative side prices
+  // THROUGH the pool itself when the major side is priced).
+  const sqrtText = row.venue === 'univ4' ? row.v4SqrtPrice : row.v3SqrtPrice
+  const liqText = row.venue === 'univ4' ? row.v4Liquidity : row.v3Liquidity
+  const external = row.venue === 'univ4'
     ? (row.v4TvlUsd ?? row.v4LiqUsd ?? null)
     : (row.statsLiqUsd ?? null)
-  let marketCapUsd: number | null = null
-  if (row.basePriceUsd !== null && row.basePriceUsd !== undefined &&
-      row.baseTotalSupply !== null && row.baseTotalSupply !== undefined) {
-    const decimals = row.baseDecimals ?? 18
-    const supply = Number(row.baseTotalSupply) / 10 ** decimals
-    if (Number.isFinite(supply) && supply > 0) marketCapUsd = row.basePriceUsd * supply
+  const zero = '0x' + '0'.repeat(40)
+  const stable = CHAIN.addr.STABLE.toLowerCase()
+  const wnative = CHAIN.addr.WNATIVE.toLowerCase()
+  const sideUsd = (addr: string | null, priceUsd: number | null | undefined): number | null => {
+    if (addr === null) return null
+    const a = addr.toLowerCase()
+    if (a === zero) return wnativePrice() // native priced at Wrapped parity
+    if (a === stable) return priceUsd ?? 1 // the audited stable ≈ its peg (§4.4 note)
+    return priceUsd ?? null
   }
+  const t0 = row.token0 ?? null
+  const t1 = row.token1 ?? null
+  const t0Low = t0?.toLowerCase() ?? null
+  const t1Low = t1?.toLowerCase() ?? null
+  const usd0 = sideUsd(t0, row.t0PriceUsd)
+  const usd1 = sideUsd(t1, row.t1PriceUsd)
+  const isMajor = (a: string | null) => a !== null && (a === zero || a === stable || a === wnative)
+  const spec: 't0' | 't1' | null = isMajor(t0Low) && !isMajor(t1Low) ? 't1'
+    : isMajor(t1Low) && !isMajor(t0Low) ? 't0' : null
+  const majorUsd = spec === 't1' ? usd0 : spec === 't0' ? usd1 : null
+
+  let liquidityUsd: number | null = external
+  let priceUsd: number | null = row.basePriceUsd ?? null
+  let marketCapUsd: number | null = null
+  if (sqrtText && liqText && usd0 !== null && usd1 !== null) {
+    const sqrtP = BigInt(sqrtText)
+    const L = BigInt(liqText)
+    const { amount0, amount1 } = getAmountsForLiquidity(sqrtP, getSqrtRatioAtTick(MIN_TICK), getSqrtRatioAtTick(MAX_TICK), L)
+    const liqUsdSelf = Number(amount0) / 10 ** (row.t0Decimals ?? 18) * (usd0 ?? 0)
+      + Number(amount1) / 10 ** (row.t1Decimals ?? 18) * (usd1 ?? 0)
+    if (Number.isFinite(liqUsdSelf) && liqUsdSelf > 0)
+      liquidityUsd = liquidityUsd === null ? liqUsdSelf : Math.max(liquidityUsd, liqUsdSelf)
+    if (spec !== null && majorUsd !== null && majorUsd > 0) {
+      const nSqrt = Number(sqrtP) / 2 ** 96
+      const raw = nSqrt * nSqrt // token1_raw per token0_raw
+      const decAdj = 10 ** ((row.t0Decimals ?? 18) - (row.t1Decimals ?? 18))
+      const t1PerT0 = raw * decAdj
+      const dSpec = spec === 't0' ? (row.t0Decimals ?? 18) : (row.t1Decimals ?? 18)
+      // speculative-side USD price through the pool's own last-known price
+      const specUsd = spec === 't0' ? majorUsd / t1PerT0 : majorUsd * t1PerT0
+      if (Number.isFinite(specUsd) && specUsd > 0) {
+        priceUsd = priceUsd ?? specUsd
+        const sup = row.baseTotalSupply !== null && row.baseTotalSupply !== undefined
+          ? Number(row.baseTotalSupply) / 10 ** (row.baseDecimals ?? dSpec) : null
+        // FDV only when the speculative side IS the proven base (§5.2 supply
+        // ledger denominator); otherwise the figure would be meaningless.
+        const specAddr = spec === 't0' ? t0Low : t1Low
+        const baseAddr = row.baseToken?.toLowerCase() ?? null
+        if (sup !== null && sup > 0 && specAddr === baseAddr)
+          marketCapUsd = specUsd * sup
+      }
+    }
+  }
+  // Liquidity per venue: external figures (v4 chain-derived TVL / GT) win
+  // when present; otherwise the self-computed active-L value stands in —
+  // display-grade, labeled as估算 in the UI.
   const lastMinute = (lastCompleteMinuteQ.get(row.poolKey) as { t: number | null } | null)?.t ?? null;
   // v4 stays 'unsupported' until this deployment's raw event shapes are
   // decoded and pinned (§4.4) — never zeros that read like a dead market.
@@ -143,7 +206,11 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
                      tb.price_usd AS basePriceUsd, tb.decimals AS baseDecimals,
                      ss.total_supply AS baseTotalSupply,
                      ps.liq_usd AS statsLiqUsd,
-                     vm.tvl_usd AS v4TvlUsd, vm.liq_usd AS v4LiqUsd
+                     vm.tvl_usd AS v4TvlUsd, vm.liq_usd AS v4LiqUsd,
+                     t0s.price_usd AS t0PriceUsd, t0s.decimals AS t0Decimals,
+                     t1s.price_usd AS t1PriceUsd, t1s.decimals AS t1Decimals,
+                     pst.sqrt_price AS v3SqrtPrice, pst.liquidity AS v3Liquidity,
+                     vs.sqrt_price AS v4SqrtPrice, vs.liquidity AS v4Liquidity
               FROM emerging_discovery d
               LEFT JOIN tokens tb ON tb.address = d.base_token
               LEFT JOIN tokens t0s ON t0s.address = d.token0
@@ -151,6 +218,8 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
               LEFT JOIN emerging_supply_state ss ON ss.token = d.base_token
               LEFT JOIN pool_stats ps ON ps.address = d.canonical_id
               LEFT JOIN v4_market_stats vm ON vm.pool_id = d.canonical_id
+              LEFT JOIN pool_state pst ON pst.address = d.canonical_id
+              LEFT JOIN emerging_v4_state vs ON vs.pool_key = d.pool_key
               WHERE ${clauses.join(' AND ')}
               ORDER BY d.pool_key LIMIT ${limit + 1}`)
     .all(...args) as Array<Parameters<typeof buildView>[0]>;

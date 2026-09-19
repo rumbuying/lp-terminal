@@ -22,7 +22,7 @@
 // closed as reorg_repair (人工修复) rather than guess (§4.2).
 import { decodeEventLog, parseAbi, toEventSelector, type Address } from 'viem';
 import { CHAIN, EMERGING_TUNE, INDEXER_FINALITY_BLOCKS, V4, log, now } from './config';
-import { pc } from './rpc';
+import { mc, pc } from './rpc';
 import { db, kvSet } from './store';
 import {
   commitEmergingScanBatch,
@@ -376,4 +376,55 @@ async function measureBlockTime(): Promise<number> {
   } catch {
     return blockTimeSec;
   }
+}
+
+// --- v4 display-depth sweep (§8.2): StateView slot0+liquidity for the young
+// v4 set, batched into one multicall every Nth discovery sweep. This is a
+// DISPLAY cache for the observation page — the trading price gate ($300
+// credible depth) is untouched. ---
+const V4_STATEVIEW_ABI = parseAbi([
+  'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint8 protocolFee, uint8 lpFee)',
+  'function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)',
+]);
+const v4DepthQ = () => db.prepare(`
+  SELECT d.pool_key AS poolKey, d.canonical_id AS poolId
+  FROM emerging_discovery d
+  WHERE d.venue = 'univ4' AND d.admitted_rank IS NOT NULL AND d.state != 'aged_out'`);
+const v4UpsertQ = db.prepare(`
+  INSERT INTO emerging_v4_state(pool_key, sqrt_price, liquidity, updated)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(pool_key) DO UPDATE SET
+    sqrt_price = excluded.sqrt_price,
+    liquidity = excluded.liquidity,
+    updated = excluded.updated`);
+
+export async function runEmergingV4DepthSweep(): Promise<number> {
+  const v4 = V4;
+  if (!v4) return 0;
+  const rows = v4DepthQ().all() as Array<{ poolKey: string; poolId: string }>;
+  if (!rows.length) return 0;
+  const calls = rows.flatMap((r) => [
+    { abi: V4_STATEVIEW_ABI[0], address: v4.STATE_VIEW, functionName: 'getSlot0' as const, args: [r.poolId as `0x${string}`] },
+    { abi: V4_STATEVIEW_ABI[1], address: v4.STATE_VIEW, functionName: 'getLiquidity' as const, args: [r.poolId as `0x${string}`] },
+  ]);
+  let ok = 0;
+  try {
+    const results = await mc(calls);
+    const t = now();
+    for (let i = 0; i < rows.length; i++) {
+      const slot0 = results[i * 2] as unknown as readonly [bigint, number, number, number] | undefined;
+      const liquidity = results[i * 2 + 1] as unknown as bigint | undefined;
+      if (!slot0 || liquidity === undefined) continue;
+      v4UpsertQ.run(rows[i].poolKey, String(slot0[0]), String(liquidity), t);
+      ok++;
+    }
+  } catch (error) {
+    log(`[emerging] v4 depth sweep failed: ${safeErrorShort(error)}`);
+  }
+  return ok;
+}
+
+function safeErrorShort(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.replace(/https?:\/\/[^\s"']+/g, '<rpc>').slice(0, 160);
 }

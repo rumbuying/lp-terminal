@@ -518,6 +518,16 @@ CREATE TABLE IF NOT EXISTS emerging_signal_events (
 CREATE INDEX IF NOT EXISTS idx_emerging_signals_pool
   ON emerging_signal_events(pool_key, decision_at);
 
+-- Display-grade v4 depth (§8.2): slot0/liquidity batch-read from StateView on
+-- a slow loop — the observation page computes liquidity/FDV from this. It is
+-- a DISPLAY cache, never a trading price input (that gate stays $300).
+CREATE TABLE IF NOT EXISTS emerging_v4_state (
+  pool_key   TEXT PRIMARY KEY,
+  sqrt_price TEXT NOT NULL,
+  liquidity  TEXT NOT NULL,
+  updated    INTEGER NOT NULL
+);
+
 -- Time-point supply ledger (§5.2): balances replayed from the token's proven
 -- supply start over its canonical Transfer stream, reconciled against the
 -- contract's totalSupply. Insertion-order rowid is the consumption

@@ -57,6 +57,7 @@ import { runEmergingAggregateSweep } from './emergingAggregate';
 import { runEmergingActorsSweep } from './emergingActors';
 import { runEmergingRetentionSweep } from './emergingArchive';
 import { runEmergingSignalSweep } from './emergingSignals';
+import { runEmergingV4DepthSweep } from './emergingScan';
 import { POOL_RANK_ENABLED, runPoolRankCycle } from './poolRank';
 import { refreshRecommendationSamples } from './recommendation';
 
@@ -477,6 +478,13 @@ function startLoops(): void {
       const a = await runEmergingAggregateSweep();
       const actors = await runEmergingActorsSweep();
       const signals = runEmergingSignalSweep();
+      // v4 display-depth: one batched StateView pass every 5th sweep keeps
+      // the extra RPC at ~1.3 rps, inside the §4.5 pipeline budget.
+      if (Number(kvGet('emerging_depth_seq') ?? '0') % 5 === 0) {
+        const depth = await runEmergingV4DepthSweep();
+        if (depth) log(`[emerging] v4 depth refreshed for ${depth} pools`);
+      }
+      kvSet('emerging_depth_seq', String(Number(kvGet('emerging_depth_seq') ?? '0') + 1));
       if (r.discovered || r.agedOut || r.admitted || s.eventsDelta || s.decodeFailures || a.minutes || signals.candidates || signals.invalidated)
         log(
           `[emerging] +${r.discovered} discovered, ${r.admitted} admitted, ` +
