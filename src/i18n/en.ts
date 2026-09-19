@@ -636,6 +636,7 @@ export const en = {
       updated: 'updated {{time}} · {{discovered}} discovered · {{queued}} tracked · {{aged}} aged out',
       colObserved: 'observed',
       colPair: 'pair',
+      okx: 'OKX ↗',
       colVenue: 'venue',
       colPool: 'pool',
       colTrades1h: 'swaps 1h',

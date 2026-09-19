@@ -634,6 +634,7 @@ export const zh: typeof en = {
       updated: '更新于 {{time}} · 已发现 {{discovered}} · 跟踪 {{queued}} · 过期 {{aged}}',
       colObserved: '发现于',
       colPair: '币对',
+      okx: 'OKX ↗',
       colVenue: '场所',
       colPool: '池地址',
       colTrades1h: '1h 笔数',

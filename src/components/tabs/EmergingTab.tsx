@@ -27,6 +27,25 @@ type Envelope = {
 
 const ZERO = '0x0000000000000000000000000000000000000000'
 const EXPLORER = 'https://robinhoodchain.blockscout.com'
+// OKX Web3 token page (user-facing link). The slug is this chain's, and the
+// page is gated to Robinhood — the majors excluded here are the ones whose
+// OKX pages say nothing about a NEW token (the side worth inspecting).
+const OKX_TOKEN = 'https://web3.okx.com/zh-hans/token/robinhood-chain'
+const MAJORS = new Set(
+  [ZERO, CHAIN.addr.WNATIVE, CHAIN.addr.STABLE].map((a) => a.toLowerCase()),
+)
+
+/** The speculative side of the pair — first side that is not ETH/WETH/USDG. */
+function candidateToken(p: EmergingPoolView): string | null {
+  for (const t of [p.token0, p.token1]) {
+    if (t !== null && !MAJORS.has(t.toLowerCase())) return t
+  }
+  return null
+}
+const okxHref = (p: EmergingPoolView): string | null => {
+  const token = candidateToken(p)
+  return token === null ? null : `${OKX_TOKEN}/${token}`
+}
 
 const short = (a: string | null) => {
   if (!a) return '—'
@@ -178,6 +197,12 @@ export function EmergingTab() {
                       {sideName(p.token0, p.token0Symbol ?? null)}
                       <span className="emerging-sep">/</span>
                       {sideName(p.token1, p.token1Symbol ?? null)}
+                      {(() => {
+                        const okx = okxHref(p)
+                        return okx
+                          ? <a className="emerging-okx" href={okx} target="_blank" rel="noreferrer">{t('emerging.page.okx')}</a>
+                          : null
+                      })()}
                     </td>
                     <td className="emerging-pair">
                       {href
