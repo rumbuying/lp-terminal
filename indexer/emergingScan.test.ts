@@ -12,7 +12,7 @@ const previous = { chain: process.env.CHAIN, db: process.env.INDEXER_DB };
 process.env.CHAIN = 'robinhood';
 process.env.INDEXER_DB = join(tmp, 'catalog.db');
 
-const { nextWindow, findCommonAncestor, buildTrackedSet, buildStreams } = await import('./emergingScan');
+const { nextWindow, findCommonAncestor, buildTrackedSet, buildStreams, eventBlockTs } = await import('./emergingScan');
 const store = await import('./store');
 const emergingStore = await import('./emergingStore');
 
@@ -49,6 +49,21 @@ test('findCommonAncestor: no provable reference → null (fail closed, §4.2)', 
   // A stored hash that MISMATCHES the current chain is not a proof either —
   // the walk keeps going and, finding nothing provable, reports null.
   assert.equal(findCommonAncestor(current, new Map([[98, '0xdifferent']])), null);
+});
+
+test('eventBlockTs: log blockTimestamp dates at insert; garbage stays NULL', () => {
+  // The production-proven shape: viem hands the RPC's hex field through as bigint.
+  assert.equal(eventBlockTs(0x6aaef588n), 0x6aaef588);
+  // Some providers/shapes hand the raw hex string through instead.
+  assert.equal(eventBlockTs('0x6aaef588'), 0x6aaef588);
+  assert.equal(eventBlockTs(1_789_836_867), 1_789_836_867);
+  // Absent field (providers without it) → null: the §4.4 backfill owns dating.
+  assert.equal(eventBlockTs(undefined), null);
+  assert.equal(eventBlockTs(null), null);
+  // Garbage shapes must never become a wrong timestamp (§3.1).
+  assert.equal(eventBlockTs('undefined'), null);
+  assert.equal(eventBlockTs(0n), null, 'block 0 timestamp is not a fact');
+  assert.equal(eventBlockTs(-5), null);
 });
 
 // --- tracked-set + scan-cursor behaviour on the tmp DB ---

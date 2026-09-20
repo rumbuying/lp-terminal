@@ -135,6 +135,20 @@ type BlockInfo = { hash: string; ts: number };
 const blockCache = new Map<number, BlockInfo>();
 let blockTimeSec = 2;
 
+/**
+ * Chain-truth dating at insert (§3.1): this deployment's RPC stamps every log
+ * with its block's header timestamp (production-proven: 3514/3514 logs carry
+ * blockTimestamp, equal to eth_getBlock's field), so events land DATED and the
+ * per-sweep getBlock backfill (§4.4's dateEmergingBlocks) only sweeps up
+ * stragglers from providers without the field. Garbage shapes stay NULL —
+ * a wrong timestamp is worse than a late one.
+ */
+export function eventBlockTs(blockTimestamp: bigint | string | number | undefined | null): number | null {
+  if (blockTimestamp === undefined || blockTimestamp === null) return null;
+  const n = typeof blockTimestamp === 'number' ? blockTimestamp : Number(blockTimestamp);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
 async function blockInfo(n: number): Promise<BlockInfo | null> {
   const cached = blockCache.get(n);
   if (cached) return cached;
@@ -313,7 +327,7 @@ async function scanStream(spec: StreamSpec, set: TrackedSet, finalityHead: numbe
         return {
           txHash: raw.transactionHash, logIndex: raw.logIndex,
           blockNumber: Number(raw.blockNumber), blockHash: raw.blockHash,
-          txIndex: raw.transactionIndex, blockTs: null,
+          txIndex: raw.transactionIndex, blockTs: eventBlockTs(raw.blockTimestamp),
           contract: raw.address, kind: decoded.kind,
           poolKey: decoded.poolKey, token: decoded.token, payload: decoded.payload,
         };
