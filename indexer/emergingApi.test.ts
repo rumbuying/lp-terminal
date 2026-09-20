@@ -97,6 +97,25 @@ test('API: a stale generation cursor is a 409-style conflict', () => {
   );
 });
 
+test('API: tracked=1 narrows to the scan set; un-scanned rows carry null, not 0 (§3.2)', () => {
+  const ranked = admit('univ3', addr(0xb1));
+  const deferred = admit('univ3', addr(0xb2), { deferred: true });
+
+  const tracked = getEmergingPools(new URLSearchParams('tracked=1&limit=200'));
+  const keys = tracked.pools.map((p) => p.poolKey);
+  assert.ok(keys.includes(ranked), 'the scan set is served');
+  assert.ok(!keys.includes(deferred), 'a capacity-deferred pool is never event-scanned — not in the set');
+  for (const p of tracked.pools) assert.notEqual(p.trades1h, null, 'tracked pools carry a real number');
+
+  const whole = getEmergingPools(new URLSearchParams('limit=200'));
+  const dView = whole.pools.find((p) => p.poolKey === deferred)!;
+  assert.equal(dView.trades1h, null, '未扫描 ≠ 零: the queue row reports unknown, never 0');
+  const rView = whole.pools.find((p) => p.poolKey === ranked)!;
+  assert.equal(rView.trades1h, 0, 'a tracked pool with no trailing-hour trades is honestly 0');
+  assert.equal(typeof whole.counts.tracked, 'number', 'the header can name the scan set size');
+  assert.ok(whole.counts.tracked >= 1);
+});
+
 test('API: single-pool lookup validates the key shape', () => {
   const good = admit('up33-cl', addr(0xa0));
   const single = getEmergingPool(good);

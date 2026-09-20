@@ -633,7 +633,7 @@ export const en = {
   emerging: {
     page: {
       title: 'Emerging pools · live observations',
-      updated: 'updated {{time}} · {{discovered}} discovered · {{queued}} tracked · {{aged}} aged out',
+      updated: 'updated {{time}} · {{discovered}} discovered · {{tracked}} scanned · {{queued}} queued · {{aged}} aged out',
       colObserved: 'observed',
       colPair: 'pair',
       okx: 'OKX ↗',

@@ -44,6 +44,8 @@ function buildView(row: {
   baseToken: string | null; quoteIsUsdg: number;
   poolCreatedAt: number | null; tokenCreatedAt: number | null;
   state: string; reason: string | null; pinnedUntil: number | null;
+  /** Carried by the list query; buildView itself is rank-agnostic. */
+  admittedRank?: number | null;
   basePriceUsd?: number | null; baseDecimals?: number | null; baseTotalSupply?: string | null;
   statsLiqUsd?: number | null; v4TvlUsd?: number | null; v4LiqUsd?: number | null;
   t0PriceUsd?: number | null; t0Decimals?: number | null;
@@ -211,8 +213,12 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
 
   // Filters map onto the ledger's own columns; the list stays poolKey-ordered
   // so a cursor page is a stable slice of one generation (§8.1).
+  // `tracked=1` narrows to the scan set (§4.2's buildTrackedSet predicate):
+  // the only pools whose chain events are collected, and thus the only ones
+  // whose activity column can carry a number.
   const clauses: string[] = ['d.pool_key > ?'];
   const args: string[] = [afterKey];
+  if (params.get('tracked') === '1') { clauses.push('d.admitted_rank IS NOT NULL', "d.state != 'aged_out'"); }
   if (status) { clauses.push('d.state = ?'); args.push(status); }
   if (venue) { clauses.push('d.venue = ?'); args.push(venue); }
   const rows = db
@@ -221,6 +227,7 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
                      d.base_token AS baseToken, d.quote_is_usdg AS quoteIsUsdg,
                      d.pool_created_at AS poolCreatedAt, d.token_created_at AS tokenCreatedAt,
                      d.state, d.reason, d.pinned_until AS pinnedUntil, d.updated_at AS updatedAt,
+                     d.admitted_rank AS admittedRank,
                      tb.symbol AS baseTokenSymbol, t0s.symbol AS token0Symbol, t1s.symbol AS token1Symbol,
                      tb.price_usd AS basePriceUsd, tb.decimals AS baseDecimals,
                      ss.total_supply AS baseTotalSupply,
@@ -245,6 +252,9 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
 
   // Trailing-hour activity per pool in one aggregate pass — the honest
   // heartbeat even for v4 pools whose decode is still pending (v4raw counts).
+  // §3.2's 未扫描 ≠ 零: a pool OUTSIDE the scan set never event-scanned, so
+  // its count is UNKNOWN — null, never 0. Only ranked (tracked) rows can
+  // carry a real number.
   const hourAgo = Math.floor(Date.now() / 1000) - 3_600;
   const tradesByPool = new Map<string, number>(
     (db.prepare(`
@@ -257,7 +267,9 @@ export function getEmergingPools(params: URLSearchParams): EmergingApiEnvelope {
 
   const page = rows.slice(0, limit).map((row) => ({
     view: buildView(row),
-    trades1h: tradesByPool.get(row.poolKey) ?? 0,
+    trades1h: row.admittedRank !== null && row.admittedRank !== undefined
+      ? (tradesByPool.get(row.poolKey) ?? 0)
+      : null,
   }));
   const generation = emergingGeneration();
   const counts = emergingCounts();

@@ -1425,7 +1425,13 @@ export const emergingCounts = (): Record<string, number> => {
   const rows = db
     .prepare('SELECT state, COUNT(*) AS n FROM emerging_discovery GROUP BY state')
     .all() as Array<{ state: string; n: number }>;
-  return Object.fromEntries(rows.map((r) => [r.state, r.n]));
+  const byState = Object.fromEntries(rows.map((r) => [r.state, r.n]));
+  // The scan set's own size — 'queued' alone conflates the tracked minority
+  // with the capacity queue that is never event-scanned.
+  const tracked = (db
+    .prepare('SELECT COUNT(*) AS n FROM emerging_discovery WHERE admitted_rank IS NOT NULL AND state != \'aged_out\'')
+    .get() as { n: number }).n;
+  return { ...byState, tracked };
 };
 
 

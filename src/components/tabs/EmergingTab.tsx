@@ -104,13 +104,31 @@ export function EmergingTab() {
 
   const load = useCallback(async () => {
     const path = indexerApiPath('emerging/pools?limit=200', CHAIN.key, ENV.chainGateway, ACTIVE_IS_BUILD)
-    if (!path) { setFailed(true); return }
+    const trackedPath = indexerApiPath('emerging/pools?limit=200&tracked=1', CHAIN.key, ENV.chainGateway, ACTIVE_IS_BUILD)
+    if (!path || !trackedPath) { setFailed(true); return }
     setBusy(true)
     try {
-      const r = await fetchCatalog(new URL(path, location.origin), {}, undefined, 8_000)
-      if (!r.ok) { setFailed(true); return }
+      // Two slices of one generation: the SCAN SET (the only pools with a
+      // real 1h count — the rest are capacity queue, never event-scanned)
+      // plus the default discovery feed. Merged, the visible table answers
+      // both questions: what is new, and what is actually trading.
+      const [r, rt] = await Promise.all([
+        fetchCatalog(new URL(path, location.origin), {}, undefined, 8_000),
+        fetchCatalog(new URL(trackedPath, location.origin), {}, undefined, 8_000),
+      ])
+      if (!r.ok || !rt.ok) { setFailed(true); return }
       const j = (await r.json()) as Envelope
-      if (j?.schemaVersion === 1 && Array.isArray(j.pools)) { setData(j); setFailed(false) }
+      const jt = (await rt.json()) as Envelope
+      if (j?.schemaVersion === 1 && Array.isArray(j.pools) && jt?.schemaVersion === 1 && Array.isArray(jt.pools)) {
+        const byKey = new Map<string, EmergingPoolView>()
+        for (const p of [...jt.pools, ...j.pools]) byKey.set(p.poolKey, p)
+        setData({
+          ...j,
+          pools: [...byKey.values()],
+          counts: { ...j.counts, tracked: jt.counts.tracked ?? j.counts.tracked ?? 0 },
+        })
+        setFailed(false)
+      }
     } catch { setFailed(true) }
     finally { setBusy(false) }
   }, [])
@@ -171,6 +189,7 @@ export function EmergingTab() {
               ? t('emerging.page.updated', {
                   time: generated ? generated.toLocaleString() : '—',
                   discovered: data.counts.discovered ?? 0,
+                  tracked: data.counts.tracked ?? 0,
                   queued: data.counts.queued ?? 0,
                   aged: data.counts.aged_out ?? 0,
                 })

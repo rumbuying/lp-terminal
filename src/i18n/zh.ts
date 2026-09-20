@@ -631,7 +631,7 @@ export const zh: typeof en = {
   emerging: {
     page: {
       title: '观察 · 新上线池子',
-      updated: '更新于 {{time}} · 已发现 {{discovered}} · 跟踪 {{queued}} · 过期 {{aged}}',
+      updated: '更新于 {{time}} · 已发现 {{discovered}} · 扫描中 {{tracked}} · 排队 {{queued}} · 过期 {{aged}}',
       colObserved: '发现于',
       colPair: '币对',
       okx: 'OKX ↗',
