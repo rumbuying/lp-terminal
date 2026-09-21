@@ -1,5 +1,6 @@
 import type { StrategyConfig } from './types'
 import { tickDistanceBps } from './market-guard'
+import { nextUtcDayStart } from './cycle-caps'
 
 /**
  * A concrete, user-facing evaluation of every automated safety condition.
@@ -14,6 +15,8 @@ export type GuardConditionId =
   | 'spot_twap_deviation'
   | 'guard_recovery_stability'
   | 'burst_throttle'
+  | 'daily_rebalance_cap'
+  | 'consecutive_lower_breaks'
   | 'trigger_cooldown'
   | 'boundary_confirmation'
   | 'boundary_pause'
@@ -86,6 +89,12 @@ export function buildGuardReport(args: {
   spotTick?: number
   marketStats?: GuardMarketStats
   recentCompletedCycles?: number
+  /** Cycles completed since the current UTC day start (daily rebalance cap). */
+  completedTodayCycles?: number
+  /** Current windowed consecutive lower-break streak. */
+  lowerBreakCount?: number
+  /** Epoch second the saturated lower-break cap releases; undefined while unsaturated. */
+  lowerBreakWaitUntil?: number
   pause?: GuardPauseInfo
   /** Present when the per-cycle economics gate is configured for the strategy. */
   economics?: {
@@ -186,6 +195,39 @@ export function buildGuardReport(args: {
     } else {
       conditions.push({ id: 'burst_throttle', status: 'pass', measured: recent, threshold: burstTriggerCount })
     }
+  }
+
+  // The runner's churn caps, mirrored so a saturated cap explains the wait
+  // (measured vs limit plus the exact release time) instead of looking like a
+  // silent failure loop.
+  const maxRebalancesPerDay = args.safeguards.enabled ? args.safeguards.maxRebalancesPerDay : undefined
+  if (maxRebalancesPerDay !== undefined && args.completedTodayCycles !== undefined) {
+    const saturated = args.completedTodayCycles >= maxRebalancesPerDay
+    const waitUntil = saturated ? nextUtcDayStart(args.now) : undefined
+    if (saturated) blocking.add('daily_rebalance_cap')
+    conditions.push({
+      id: 'daily_rebalance_cap',
+      status: saturated ? 'wait' : 'pass',
+      measured: args.completedTodayCycles,
+      threshold: maxRebalancesPerDay,
+      waitUntil,
+      remainingSeconds: waitUntil !== undefined ? waitUntil - args.now : undefined,
+    })
+  }
+
+  const maxConsecutiveLowerBreaks = args.safeguards.enabled ? args.safeguards.maxConsecutiveLowerBreaks : undefined
+  if (maxConsecutiveLowerBreaks !== undefined && args.lowerBreakCount !== undefined) {
+    const saturated = args.lowerBreakCount >= maxConsecutiveLowerBreaks
+    const waitUntil = saturated ? args.lowerBreakWaitUntil : undefined
+    if (saturated) blocking.add('consecutive_lower_breaks')
+    conditions.push({
+      id: 'consecutive_lower_breaks',
+      status: saturated ? 'wait' : 'pass',
+      measured: args.lowerBreakCount,
+      threshold: maxConsecutiveLowerBreaks,
+      waitUntil,
+      remainingSeconds: waitUntil !== undefined ? Math.max(0, waitUntil - args.now) : undefined,
+    })
   }
 
   if (args.cooldownUntil && args.cooldownUntil > args.now) {

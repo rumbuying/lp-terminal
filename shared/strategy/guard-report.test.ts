@@ -205,3 +205,54 @@ test('the economics condition is absent when the gate is not configured', () => 
   }))
   assert.equal(report.conditions.find((c) => c.id === 'cycle_economics'), undefined)
 })
+
+test('the daily cap condition is absent when the cap is not configured', () => {
+  const report = buildGuardReport(args({
+    recentCompletedCycles: 0,
+    marketStats: { count: 10, firstTs: NOW - 300, lastTs: NOW - 30, tick: 0, minTick: -10, maxTick: 10 },
+    completedTodayCycles: 8,
+  }))
+  assert.equal(report.conditions.find((c) => c.id === 'daily_rebalance_cap'), undefined)
+  assert.ok(!report.blocking.includes('daily_rebalance_cap'))
+})
+
+test('the daily cap blocks and counts down to UTC day roll when configured', () => {
+  const safeguards = { ...baseSafeguards, maxRebalancesPerDay: 8 }
+  const report = buildGuardReport(args({ safeguards, completedTodayCycles: 8 }))
+  const cap = report.conditions.find((c) => c.id === 'daily_rebalance_cap')
+  assert.equal(cap?.status, 'wait')
+  assert.equal(cap?.threshold, 8)
+  assert.equal(cap?.waitUntil, Math.floor(NOW / 86_400) * 86_400 + 86_400)
+  assert.ok(report.blocking.includes('daily_rebalance_cap'))
+})
+
+test('an unsaturated daily cap reports pass without blocking', () => {
+  const safeguards = { ...baseSafeguards, maxRebalancesPerDay: 8 }
+  const report = buildGuardReport(args({ state: 'monitoring', safeguards, completedTodayCycles: 3 }))
+  const cap = report.conditions.find((c) => c.id === 'daily_rebalance_cap')
+  assert.equal(cap?.status, 'pass')
+  assert.ok(!report.blocking.includes('daily_rebalance_cap'))
+})
+
+test('a saturated lower-break cap blocks with the streak decay time', () => {
+  const safeguards = { ...baseSafeguards, maxConsecutiveLowerBreaks: 4 }
+  const report = buildGuardReport(args({
+    safeguards,
+    completedTodayCycles: 0,
+    lowerBreakCount: 4,
+    lowerBreakWaitUntil: NOW + 3_600,
+  }))
+  const breaks = report.conditions.find((c) => c.id === 'consecutive_lower_breaks')
+  assert.equal(breaks?.status, 'wait')
+  assert.equal(breaks?.measured, 4)
+  assert.equal(breaks?.waitUntil, NOW + 3_600)
+  assert.ok(report.blocking.includes('consecutive_lower_breaks'))
+})
+
+test('an unsaturated lower-break streak reports pass', () => {
+  const safeguards = { ...baseSafeguards, maxConsecutiveLowerBreaks: 4 }
+  const report = buildGuardReport(args({ state: 'monitoring', safeguards, completedTodayCycles: 0, lowerBreakCount: 2 }))
+  const breaks = report.conditions.find((c) => c.id === 'consecutive_lower_breaks')
+  assert.equal(breaks?.status, 'pass')
+  assert.ok(!report.blocking.includes('consecutive_lower_breaks'))
+})

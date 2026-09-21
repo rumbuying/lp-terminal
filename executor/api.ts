@@ -4,7 +4,8 @@ import { parseStrategyConfig } from '../shared/strategy/schema'
 import { buildGuardReport, type GuardReport } from '../shared/strategy/guard-report'
 import type { StrategyConfig } from '../shared/strategy/types'
 import { EXECUTOR } from './config'
-import { addWallet, audit, clearRecoverySchedule, compoundHeldAllocations, completedCyclesSince, createPlannedJob, executorPaused, jobSteps, jobTransactions, jobsForRecovery, latestJobSummary, latestStrategyPause, listArchivedStrategies, listStrategies, listWallets, monitorState, reactivateRecoveryJob, sampledTickStats, scheduleRecoveryRetry, setExecutorPaused, setStrategyBaselineIfAbsent, setStrategyState, strategyById, updateWalletLabel, walletByAddress, walletById, upsertStrategy } from './store'
+import { addWallet, audit, clearRecoverySchedule, compoundHeldAllocations, completedCyclesSince, consecutiveLowerBreakResetAt, consecutiveLowerBreaks, createPlannedJob, executorPaused, jobSteps, jobTransactions, jobsForRecovery, latestJobSummary, latestStrategyPause, listArchivedStrategies, listStrategies, listWallets, monitorState, reactivateRecoveryJob, sampledTickStats, scheduleRecoveryRetry, setExecutorPaused, setStrategyBaselineIfAbsent, setStrategyState, strategyById, updateWalletLabel, walletByAddress, walletById, upsertStrategy } from './store'
+import { lowerBreakWindowSeconds } from '../shared/strategy/cycle-caps'
 import { importPrivateKey, privateKeyAddress, tokenMatches, unlockPrivateKey } from './vault'
 import { inspectRecovery } from './recovery'
 import { executeRecovery, stopAndArchiveStrategy } from './recovery-runner'
@@ -78,6 +79,17 @@ const guardReportFor = (config: StrategyConfig, state: string): GuardReport => {
     return Number.isFinite(value) ? Math.round(value * 10_000) / 10_000 : undefined
   }
   const gateCoverage = config.safeguards.enabled ? config.safeguards.minCycleFeeCoverage : undefined
+  // Churn-cap mirrors, recomputed live so the report can name the saturated
+  // cap and its exact release time (UTC day roll for the daily cap, streak
+  // decay for the lower-break cap).
+  const dailyCap = config.safeguards.enabled ? config.safeguards.maxRebalancesPerDay : undefined
+  const completedTodayCycles = dailyCap !== undefined ? completedCyclesSince(config.id, Math.floor(now / 86_400) * 86_400) : undefined
+  const lowerBreakCap = config.safeguards.enabled ? config.safeguards.maxConsecutiveLowerBreaks : undefined
+  const capWindowSeconds = lowerBreakCap !== undefined ? lowerBreakWindowSeconds(config.safeguards) : 0
+  const lowerBreakCount = lowerBreakCap !== undefined ? consecutiveLowerBreaks(config.id, { now, windowSeconds: capWindowSeconds }) : undefined
+  const lowerBreakWaitUntil = lowerBreakCap !== undefined && lowerBreakCount !== undefined && lowerBreakCount >= lowerBreakCap
+    ? consecutiveLowerBreakResetAt(config.id, { now, windowSeconds: capWindowSeconds, threshold: lowerBreakCap })
+    : undefined
   return buildGuardReport({
     state,
     now,
@@ -93,6 +105,9 @@ const guardReportFor = (config: StrategyConfig, state: string): GuardReport => {
     spotTick: ms?.lastTick,
     marketStats,
     recentCompletedCycles: burstConfigured ? completedCyclesSince(config.id, burstSince) : undefined,
+    completedTodayCycles,
+    lowerBreakCount,
+    lowerBreakWaitUntil,
     pause: state === 'paused_guard' || state === 'awaiting_manual' ? latestStrategyPause(config.id) : undefined,
     economics: gateCoverage && gateCoverage > 0
       ? {

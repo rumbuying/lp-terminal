@@ -23,6 +23,8 @@ const conditionLabel = (c: GuardCondition, t: Translate) => {
     case 'spot_twap_deviation': return t('strategy.guardCondSpotTwapDeviation', { threshold: c.threshold ?? '?' })
     case 'guard_recovery_stability': return t('strategy.guardCondRecoveryStability', { total: c.totalSeconds ?? 0 })
     case 'burst_throttle': return t('strategy.guardCondBurstThrottle', { threshold: c.threshold ?? '?' })
+    case 'daily_rebalance_cap': return t('strategy.guardCondDailyCap', { threshold: c.threshold ?? '?' })
+    case 'consecutive_lower_breaks': return t('strategy.guardCondLowerBreaks', { threshold: c.threshold ?? '?' })
     case 'trigger_cooldown': return t('strategy.guardCondTriggerCooldown')
     case 'boundary_confirmation': return t('strategy.guardCondBoundaryConfirmation', { side })
     case 'boundary_pause': return t('strategy.guardCondBoundaryPause', { side })
@@ -52,6 +54,14 @@ const conditionValue = (c: GuardCondition, remaining: number | undefined, now: n
     }
     case 'burst_throttle': {
       const base = t('strategy.guardValueBurst', { measured: c.measured ?? 0, threshold: c.threshold ?? '?' })
+      return c.status === 'wait' && remaining !== undefined && remaining > 0 ? `${base} · ${t('strategy.guardValueRemaining', { time: clock(remaining) })}` : base
+    }
+    case 'daily_rebalance_cap': {
+      const base = t('strategy.guardValueDailyCap', { measured: c.measured ?? 0, threshold: c.threshold ?? '?' })
+      return c.status === 'wait' && remaining !== undefined && remaining > 0 ? `${base} · ${t('strategy.guardValueRemaining', { time: clock(remaining) })}` : base
+    }
+    case 'consecutive_lower_breaks': {
+      const base = t('strategy.guardValueLowerBreaks', { measured: c.measured ?? 0, threshold: c.threshold ?? '?' })
       return c.status === 'wait' && remaining !== undefined && remaining > 0 ? `${base} · ${t('strategy.guardValueRemaining', { time: clock(remaining) })}` : base
     }
     case 'trigger_cooldown':

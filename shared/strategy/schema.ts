@@ -113,6 +113,9 @@ export function recommendedSafeguards(bandPct: number): StrategyConfig['safeguar
     maxRebalancesPerDay: Math.min(12, Math.max(4, Math.round(band * 1.6))),
     // Stop catching a falling knife after repeated lower breaks.
     maxConsecutiveLowerBreaks: 4,
+    // The streak decays after a day, so a position parked below the range
+    // always resumes instead of deadlocking behind a stale count.
+    lowerBreakWindowMinutes: 1440,
     // A symmetric recenter targets ~50/50; 60 keeps a hard risk-share ceiling.
     maxRiskAssetPct: 60,
     maxSwapImpactBps: 150,
@@ -250,6 +253,7 @@ export function parseStrategyConfig(v: unknown): StrategyConfig {
       economicsHoldMinutes: optionalFinite(x.safeguards.economicsHoldMinutes, 'economicsHoldMinutes', 1, 1440),
       maxRebalancesPerDay: optionalFinite(x.safeguards.maxRebalancesPerDay, 'maxRebalancesPerDay', 1, 1000),
       maxConsecutiveLowerBreaks: optionalFinite(x.safeguards.maxConsecutiveLowerBreaks, 'maxConsecutiveLowerBreaks', 1, 1000),
+      lowerBreakWindowMinutes: optionalFinite(x.safeguards.lowerBreakWindowMinutes, 'lowerBreakWindowMinutes', 1, 10_080),
       maxRiskAssetPct: optionalFinite(x.safeguards.maxRiskAssetPct, 'maxRiskAssetPct', 0, 100),
       maxSwapImpactBps: optionalFinite(x.safeguards.maxSwapImpactBps, 'maxSwapImpactBps', 0, 10_000),
       volatilityWindowSeconds: optionalFinite(x.safeguards.volatilityWindowSeconds, 'volatilityWindowSeconds', 10, 3600),

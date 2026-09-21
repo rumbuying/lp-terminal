@@ -13,13 +13,17 @@ import { strategyPerformance, cachedStrategyPerformance } from './performance'
 import {
   audit,
   completedCyclesSince,
+  consecutiveLowerBreakResetAt,
+  consecutiveLowerBreaks,
   createPlannedJob,
   enabledExecutorStrategies,
   executorPaused,
   latestCompletedCycleAt,
   latestCompletedCycleRange,
   latestFeeCollectionAt,
+  latestPrecheckGuard,
   monitorState,
+  recordPrecheckGuard,
   recordPriceSample,
   sampledAverageTick,
   sampledTickStats,
@@ -27,6 +31,7 @@ import {
   strategyBaseline,
   updateMonitorState,
 } from './store'
+import { lowerBreakWindowSeconds, nextUtcDayStart } from '../shared/strategy/cycle-caps'
 import { clearStrategyRetry, deferStrategyRetry, strategyRetryReady } from './retry-state'
 
 let running = false
@@ -445,6 +450,42 @@ export async function monitorOnce(options: { ignoreSchedule?: boolean } = {}) {
             })
             continue
           }
+        }
+        // Precheck mirrors of the runner's hard caps. When a cap is saturated,
+        // a freshly created plan can only fail at the runner — park the
+        // strategy in guard_wait with the computed release time instead of
+        // looping plan→fail on every retry. These are mirrors, not authority:
+        // the runner still enforces both caps before signing.
+        const dailyCap = config.safeguards.enabled ? config.safeguards.maxRebalancesPerDay : undefined
+        const dailyCount = dailyCap !== undefined ? completedCyclesSince(config.id, Math.floor(now / 86_400) * 86_400) : undefined
+        const lowerBreakCap = config.safeguards.enabled ? config.safeguards.maxConsecutiveLowerBreaks : undefined
+        const capWindowSeconds = lowerBreakCap !== undefined ? lowerBreakWindowSeconds(config.safeguards) : 0
+        const lowerBreakCount = lowerBreakCap !== undefined
+          ? consecutiveLowerBreaks(config.id, { now, windowSeconds: capWindowSeconds })
+          : undefined
+        const dailyWaitUntil = dailyCap !== undefined && dailyCount !== undefined && dailyCount >= dailyCap ? nextUtcDayStart(now) : undefined
+        const lowerWaitUntil = lowerBreakCap !== undefined && decision.side === 'lower' && lowerBreakCount !== undefined && lowerBreakCount >= lowerBreakCap
+          ? consecutiveLowerBreakResetAt(config.id, { now, windowSeconds: capWindowSeconds, threshold: lowerBreakCap })
+          : undefined
+        if (dailyWaitUntil !== undefined || lowerWaitUntil !== undefined) {
+          const guardCode = dailyWaitUntil !== undefined ? 'E_DAILY_LIMIT' : 'E_LOWER_BREAK_LIMIT'
+          const guardUntil = dailyWaitUntil ?? lowerWaitUntil
+          updateMonitorState(config.id, {
+            revision: config.revision,
+            outSide: side === 'in' ? undefined : side,
+            outSince,
+            cooldownUntil,
+            burstWaitUntil: previous?.burstWaitUntil,
+            burstResetAt: previous?.burstResetAt,
+            ...econCarry,
+            lastTick: snapshot.tick,
+            lastLiquidity: snapshot.liquidity,
+            lastTokenId: snapshot.tokenId,
+          })
+          setStrategyState(config.id, 'guard_wait')
+          const lastGuard = latestPrecheckGuard(config.id)
+          if (!lastGuard || lastGuard.code !== guardCode || lastGuard.until !== guardUntil) recordPrecheckGuard(config.id, guardCode, guardUntil)
+          continue
         }
         // Per-cycle economics gate: a recenter whose collectable fees do not
         // cover its expected cost (last cycle's realized gas + execution

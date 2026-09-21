@@ -100,6 +100,8 @@ export type StrategyConfig = {
     economicsHoldMinutes?: number
     maxRebalancesPerDay?: number
     maxConsecutiveLowerBreaks?: number
+    /** Rolling window over which the lower-break streak is counted; an older streak decays to zero so the cap can never deadlock a position parked out of range. */
+    lowerBreakWindowMinutes?: number
     maxRiskAssetPct?: number
     maxSwapImpactBps?: number
     /** Rolling tick-sample window used by unattended market-quality guards. */

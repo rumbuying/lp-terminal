@@ -38,6 +38,7 @@ import { allocateSwapExecution, allocateSwapOutput, planCycleSwaps } from './reb
 import { FEE_TAX_SELECTION_VERSION, planFeeTax } from './fee-tax'
 import { receiptLiquidityFlows, receiptV4MintedTokenId } from './receipts'
 import { freshRange, quoteTurnover, riskAssetPct, swapImpactBps } from './risk'
+import { lowerBreakWindowSeconds } from '../shared/strategy/cycle-caps'
 import { finishFeeCollection, finishHoldQuote } from './recovery-runner'
 import { preflightStrategy } from './preflight'
 import { walletBusy, withWalletLock } from './wallet-lock'
@@ -109,11 +110,16 @@ async function runJob(job: ReturnType<typeof runnableJobs>[number]) {
     const nativeBalance = await publicClient.getBalance({ address: job.config.owner })
     const reserve = (gasPrice * 5_000_000n * BigInt(Math.ceil(job.config.execution.gasReserveMultiplier * 100))) / 100n
     if (nativeBalance < reserve) throw new Error('E_GAS_LIMIT')
-    if (job.config.safeguards.enabled) {
-      const utcStart = Math.floor(Date.now() / 86_400_000) * 86_400
+    // Unattended executions are bounded by the churn caps. Operator-initiated
+    // plans bypass them: a saturated cap must never make an out-of-range
+    // position unrescuable, and the person clicking is the backstop the caps
+    // otherwise provide. Turnover and slippage limits still apply.
+    if (job.config.safeguards.enabled && !job.plan.manualExecution) {
+      const nowSec = Math.floor(Date.now() / 1000)
+      const utcStart = Math.floor(nowSec / 86_400) * 86_400
       if (job.config.safeguards.maxRebalancesPerDay !== undefined && completedCyclesSince(job.config.id, utcStart) >= job.config.safeguards.maxRebalancesPerDay)
         throw new Error('E_DAILY_LIMIT')
-      if (job.plan.triggerSide === 'lower' && job.config.safeguards.maxConsecutiveLowerBreaks !== undefined && consecutiveLowerBreaks(job.config.id) >= job.config.safeguards.maxConsecutiveLowerBreaks)
+      if (job.plan.triggerSide === 'lower' && job.config.safeguards.maxConsecutiveLowerBreaks !== undefined && consecutiveLowerBreaks(job.config.id, { now: nowSec, windowSeconds: lowerBreakWindowSeconds(job.config.safeguards) }) >= job.config.safeguards.maxConsecutiveLowerBreaks)
         throw new Error('E_LOWER_BREAK_LIMIT')
     }
     setJobContext(job.id, 'precheck', {

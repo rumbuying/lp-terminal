@@ -5,6 +5,7 @@ import type { StrategyConfig } from '../shared/strategy/types'
 import type { StrategyExecutionPlan } from '../shared/strategy/types'
 import type { LedgerEntry } from '../shared/strategy/types'
 import { parseStrategyConfig } from '../shared/strategy/schema'
+import { consecutiveLowerBreakResetAt as lowerBreakResetAt, countConsecutiveLowerBreaks } from '../shared/strategy/cycle-caps'
 import { EXECUTOR } from './config'
 import { atSlippageCap } from './swap-escalation'
 
@@ -1282,14 +1283,39 @@ export function completedCyclesSince(strategyId: string, since: number): number 
   return Number(row.n)
 }
 
-export function consecutiveLowerBreaks(strategyId: string): number {
-  const rows = db.prepare(`SELECT trigger_side FROM cycles WHERE strategy_id=? AND status='completed' ORDER BY completed_at DESC LIMIT 1000`).all(strategyId) as { trigger_side: string | null }[]
-  let count = 0
-  for (const row of rows) {
-    if (row.trigger_side !== 'lower') break
-    count += 1
+const recentCycleSides = (strategyId: string): { triggerSide: string | null; completedAt: number }[] =>
+  (db.prepare(`SELECT trigger_side,completed_at FROM cycles WHERE strategy_id=? AND status='completed' ORDER BY completed_at DESC LIMIT 1000`).all(strategyId) as { trigger_side: string | null; completed_at: number }[])
+    .map((row) => ({ triggerSide: row.trigger_side, completedAt: row.completed_at }))
+
+/** Windowed lower-break streak; see shared/strategy/cycle-caps.ts for the
+ *  decay rule that keeps this cap from deadlocking a position parked outside
+ *  the range (no non-lower cycle can complete there to reset the count). */
+export function consecutiveLowerBreaks(strategyId: string, args: { now: number; windowSeconds: number }): number {
+  return countConsecutiveLowerBreaks(recentCycleSides(strategyId), args)
+}
+
+/** When a currently-saturated lower-break cap releases; undefined while unsaturated. */
+export function consecutiveLowerBreakResetAt(strategyId: string, args: { now: number; windowSeconds: number; threshold: number }): number | undefined {
+  return lowerBreakResetAt(recentCycleSides(strategyId), args)
+}
+
+export type PrecheckGuardSnapshot = { code: string; until?: number; at: number }
+
+/** Latest saturated precheck cap recorded by the monitor, for audit-once dedup. */
+export function latestPrecheckGuard(strategyId: string): PrecheckGuardSnapshot | undefined {
+  const row = db.prepare(`SELECT ts,detail_json FROM audit_events WHERE action='precheck_guard_wait' AND target_type='strategy' AND target_id=? ORDER BY id DESC LIMIT 1`)
+    .get(strategyId) as { ts: number; detail_json: string } | undefined
+  if (!row) return undefined
+  try {
+    const detail = JSON.parse(row.detail_json) as { code?: string; until?: number | null }
+    return { code: detail.code ?? 'E_PRECHECK', until: detail.until ?? undefined, at: row.ts }
+  } catch {
+    return { code: 'E_PRECHECK', at: row.ts }
   }
-  return count
+}
+
+export function recordPrecheckGuard(strategyId: string, code: string, until: number | undefined) {
+  audit('monitor', 'precheck_guard_wait', 'strategy', strategyId, { code, until: until ?? null })
 }
 
 export type MonitorState = {

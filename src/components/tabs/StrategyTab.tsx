@@ -74,6 +74,7 @@ const SAFEGUARD_FIELDS = [
   { key: 'economicsHoldMinutes', label: 'strategy.editor.economicsHoldMinutes' },
   { key: 'maxRebalancesPerDay', label: 'strategy.editor.maxRebalancesPerDay' },
   { key: 'maxConsecutiveLowerBreaks', label: 'strategy.editor.maxConsecutiveLowerBreaks' },
+  { key: 'lowerBreakWindowMinutes', label: 'strategy.editor.lowerBreakWindowMinutes' },
   { key: 'maxRiskAssetPct', label: 'strategy.editor.maxRiskAssetPct' },
   { key: 'maxSwapImpactBps', label: 'strategy.editor.maxSwapImpactBps' },
   { key: 'volatilityWindowSeconds', label: 'strategy.editor.volatilityWindowSeconds' },
