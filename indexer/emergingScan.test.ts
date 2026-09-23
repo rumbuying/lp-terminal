@@ -213,3 +213,23 @@ test('v4DepthCalls: every multicall carries an ARRAY abi viem can encode', async
     encodeFunctionData({ abi: call.abi, functionName: call.functionName, args: call.args });
   }
 });
+
+test('parseV4DepthResults: unwraps mc {status,result} wrappers, skips failures', async () => {
+  // Production regression (2026-09-21, c816171): the persistence loop treated
+  // the mc wrapper itself as the decoded tuple, so every row failed the shape
+  // check and the v4 depth cache never refreshed.
+  const { parseV4DepthResults } = await import('./emergingScan');
+  const rows = [{ poolKey: '0x01' }, { poolKey: '0x02' }, { poolKey: '0x03' }];
+  const results = [
+    { status: 'success', result: [123456789n, 20, 0, 0] },   // slot0 for rows[0]
+    { status: 'success', result: 987654321n },               // liquidity for rows[0]
+    { status: 'failure' },                                   // slot0 missing for rows[1]
+    { status: 'success', result: 42n },
+    { status: 'success', result: ['not-bigint', 1, 0, 0] },  // garbage slot0
+    { status: 'success', result: 7n },
+  ];
+  const parsed = parseV4DepthResults(rows, results as never, 1700);
+  assert.deepEqual(parsed, [
+    { poolKey: '0x01', sqrtPrice: '123456789', liquidity: '987654321', updated: 1700 },
+  ]);
+});

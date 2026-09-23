@@ -22,7 +22,7 @@
 // closed as reorg_repair (人工修复) rather than guess (§4.2).
 import { decodeEventLog, parseAbi, toEventSelector, type Address } from 'viem';
 import { CHAIN, EMERGING_TUNE, INDEXER_FINALITY_BLOCKS, V4, log, now } from './config';
-import { mc, pc } from './rpc';
+import { mc, ok, pc, type McRes } from './rpc';
 import { db, kvSet } from './store';
 import {
   commitEmergingScanBatch,
@@ -433,23 +433,40 @@ export async function runEmergingV4DepthSweep(): Promise<number> {
   const rows = v4DepthQ().all() as Array<{ poolKey: string; poolId: string }>;
   if (!rows.length) return 0;
   const calls = v4DepthCalls(rows, v4.STATE_VIEW);
-  let ok = 0;
+  let refreshed = 0;
   try {
     const results = await mc(calls);
-    const t = now();
-    for (let i = 0; i < rows.length; i++) {
-      // mc may hand back per-call failure objects — validate the SHAPES before
-      // persisting: a failed sub-call stringified into the cache once already.
-      const slot0 = results[i * 2] as unknown as readonly [bigint, number, number, number] | undefined;
-      const liquidity = results[i * 2 + 1] as unknown as bigint | undefined;
-      if (typeof slot0?.[0] !== 'bigint' || typeof liquidity !== 'bigint') continue;
-      v4UpsertQ.run(rows[i].poolKey, String(slot0[0]), String(liquidity), t);
-      ok++;
+    for (const row of parseV4DepthResults(rows, results, now())) {
+      v4UpsertQ.run(row.poolKey, row.sqrtPrice, row.liquidity, row.updated);
+      refreshed++;
     }
   } catch (error) {
     log(`[emerging] v4 depth sweep failed: ${safeErrorShort(error)}`);
   }
-  return ok;
+  return refreshed;
+}
+
+/**
+ * Unwrap a v4 depth multicall into persistable rows.
+ *
+ * mc hands back per-call {status, result} wrappers — unwrap with ok() and
+ * validate the SHAPES before persisting: a failed sub-call stringified into
+ * the cache once already, and validating the wrapper itself (c816171)
+ * silently skipped every row for three days.
+ */
+export function parseV4DepthResults(
+  rows: Array<{ poolKey: string }>,
+  results: readonly McRes[],
+  at: number,
+): Array<{ poolKey: string; sqrtPrice: string; liquidity: string; updated: number }> {
+  const out: Array<{ poolKey: string; sqrtPrice: string; liquidity: string; updated: number }> = [];
+  for (let i = 0; i < rows.length; i++) {
+    const slot0 = ok<readonly [bigint, number, number, number]>(results[i * 2]);
+    const liquidity = ok<bigint>(results[i * 2 + 1]);
+    if (!slot0 || typeof slot0[0] !== 'bigint' || typeof liquidity !== 'bigint') continue;
+    out.push({ poolKey: rows[i].poolKey, sqrtPrice: String(slot0[0]), liquidity: String(liquidity), updated: at });
+  }
+  return out;
 }
 
 function safeErrorShort(e: unknown): string {
