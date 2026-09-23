@@ -233,6 +233,8 @@ async function gtFetch(path: string, cacheKey: string): Promise<unknown | null> 
     lastGtCall = Date.now();
     try {
       const r = await fetch(`${GT}${path}`, {
+        // Same rule as stats.ts gtJson: an untimed fetch can hang its loop.
+        signal: AbortSignal.timeout(12_000),
         headers: { accept: 'application/json', 'user-agent': 'up33-lp-indexer/0.1 (pool-rank)' },
       });
       if (r.status === 429) throw new Error(`gt rate limited (${r.status})`);

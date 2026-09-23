@@ -251,7 +251,17 @@ function enqueueRefresh(fn: () => Promise<void>): Promise<void> {
 function loop(name: string, ms: number, fn: () => Promise<void>, queued = true): void {
   const tick = async () => {
     try {
-      await (queued ? enqueueRefresh(fn) : fn());
+      // The reschedule only happens after the tick settles, so one tick that
+      // never resolves silently kills the pipeline — production lost two days
+      // of price seeds to a single untimed external fetch (stats/GT, 2026-09-21).
+      // Bound every tick: an overrun is logged, the loop reschedules, and the
+      // abandoned promise stays observed by the race so it can never surface
+      // as an unhandled rejection when it eventually settles.
+      const run = queued ? enqueueRefresh(fn) : fn();
+      const overrun = sleep(TUNE.loopTickCapMs).then(() => {
+        throw new Error(`tick exceeded ${Math.round(TUNE.loopTickCapMs / 1000)}s — rescheduling while the abandoned tick settles`);
+      });
+      await Promise.race([run, overrun]);
     } catch (e) {
       log(`[${name}] error:`, safeError(e));
     }

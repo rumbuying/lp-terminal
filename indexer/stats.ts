@@ -68,6 +68,10 @@ async function gtJson(url: string): Promise<{ data?: GtPool[] } | null> {
   lastCall = Date.now();
   try {
     const r = await fetch(url, {
+      // A fetch without a timeout can hang the tick forever, and the loop
+      // scheduler then silently stops rescheduling — price seeds go stale
+      // (production: GT prices froze for 2 days after one hung request).
+      signal: AbortSignal.timeout(12_000),
       headers: {
         accept: 'application/json',
         'user-agent': 'up33-lp-indexer/0.1',

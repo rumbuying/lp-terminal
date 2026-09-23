@@ -396,7 +396,7 @@ async function measureBlockTime(): Promise<number> {
 // v4 set, batched into one multicall every Nth discovery sweep. This is a
 // DISPLAY cache for the observation page — the trading price gate ($300
 // credible depth) is untouched. ---
-const V4_STATEVIEW_ABI = parseAbi([
+export const V4_STATEVIEW_ABI = parseAbi([
   'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint8 protocolFee, uint8 lpFee)',
   'function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)',
 ]);
@@ -412,15 +412,27 @@ const v4UpsertQ = db.prepare(`
     liquidity = excluded.liquidity,
     updated = excluded.updated`);
 
+/**
+ * Build the StateView multicall for the v4 display-depth sweep.
+ *
+ * `abi` must be the FULL parseAbi array — viem resolves the item by
+ * functionName. Passing a single ABI item (an object) makes viem's
+ * `abi.filter` throw for the whole multicall chunk, which is how every
+ * sweep failed for two days in production (2026-09-21).
+ */
+export function v4DepthCalls(rows: Array<{ poolKey: string; poolId: string }>, stateView: `0x${string}`) {
+  return rows.flatMap((r) => [
+    { abi: V4_STATEVIEW_ABI, address: stateView, functionName: 'getSlot0' as const, args: [r.poolId as `0x${string}`] },
+    { abi: V4_STATEVIEW_ABI, address: stateView, functionName: 'getLiquidity' as const, args: [r.poolId as `0x${string}`] },
+  ]);
+}
+
 export async function runEmergingV4DepthSweep(): Promise<number> {
   const v4 = V4;
   if (!v4) return 0;
   const rows = v4DepthQ().all() as Array<{ poolKey: string; poolId: string }>;
   if (!rows.length) return 0;
-  const calls = rows.flatMap((r) => [
-    { abi: V4_STATEVIEW_ABI[0], address: v4.STATE_VIEW, functionName: 'getSlot0' as const, args: [r.poolId as `0x${string}`] },
-    { abi: V4_STATEVIEW_ABI[1], address: v4.STATE_VIEW, functionName: 'getLiquidity' as const, args: [r.poolId as `0x${string}`] },
-  ]);
+  const calls = v4DepthCalls(rows, v4.STATE_VIEW);
   let ok = 0;
   try {
     const results = await mc(calls);

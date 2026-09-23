@@ -92,6 +92,9 @@ export const TUNE = {
   hotSweepMs: envMs('HOT_SWEEP_MS', 600_000), // "might rise onto the homepage" set (≥$10k TVL / GT-active / <1h)
   fullSweepMs: envMs('ACTIVE_SWEEP_MS', 14_400_000), // ACTIVE pools (≥$100 TVL or <48h old), every 4h
   censusMs: envMs('CENSUS_MS', 86_400_000), // daily full-state longstop for small catalogs only
+  // Watchdog for every `loop()` tick: an overrun means the tick hung (never a
+  // legitimate runtime), so the loop logs and reschedules instead of dying.
+  loopTickCapMs: envMs('LOOP_TICK_CAP_MS', 1_800_000),
   statsMs: envMs('STATS_MS', 300_000), // GeckoTerminal enrichment cycle (external HTTP, off the RPC queue)
   // External observations remain visible with an explicit stale marker after
   // these windows, but may no longer seed prices, rankings or recommendations.

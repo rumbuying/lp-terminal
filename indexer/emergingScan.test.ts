@@ -195,3 +195,21 @@ test('stream status: data_gap/reorg_repair persist without touching the watermar
   assert.equal(cursor!.status, 'data_gap');
   assert.equal(cursor!.blockNumber, 90, 'the watermark itself is untouched');
 });
+
+test('v4DepthCalls: every multicall carries an ARRAY abi viem can encode', async () => {
+  // Production regression (2026-09-21): the sweep passed single ABI ITEMS
+  // (objects) as `abi`, so viem's `abi.filter` threw and every v4 depth
+  // multicall chunk was dropped for two days.
+  const { encodeFunctionData } = await import('viem');
+  const { v4DepthCalls, V4_STATEVIEW_ABI } = await import('./emergingScan');
+  assert.ok(Array.isArray(V4_STATEVIEW_ABI));
+  const stateView = '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b' as const;
+  const rows = [{ poolKey: '0x01', poolId: `0x${'ab'.repeat(32)}` }, { poolKey: '0x02', poolId: `0x${'cd'.repeat(32)}` }];
+  const calls = v4DepthCalls(rows, stateView);
+  assert.equal(calls.length, rows.length * 2);
+  for (const call of calls) {
+    assert.ok(Array.isArray(call.abi), 'abi must be the full array, never a single item');
+    // The truest check: viem must accept the call shape end to end.
+    encodeFunctionData({ abi: call.abi, functionName: call.functionName, args: call.args });
+  }
+});
