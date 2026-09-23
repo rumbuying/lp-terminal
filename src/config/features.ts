@@ -84,8 +84,16 @@ export const FEATURES = {
    * has an equivalent pipeline, not merely an indexer.
    */
   poolRank: CHAIN.key === 'robinhood',
-  // Emerging-pool observation page (read-only; PRD §8.2)
-  emergingObserve: CHAIN.key === 'robinhood',
+  /**
+   * Emerging-pool observation page (read-only; PRD §8.2).
+   *
+   * Temporarily off everywhere (2026-09-23): the observation pipeline's output
+   * did not meet expectations, so the scanning and this page are taken down
+   * together — leaving the tab visible over a stopped pipeline only showed
+   * "observation unavailable". Re-enable by restoring the chain condition
+   * (`CHAIN.key === 'robinhood'`) and INDEXER_EMERGING_OBSERVE=1 on the indexer.
+   */
+  emergingObserve: false,
   /**
    * The V4 CREATE tab — initialize a brand-new v4 pool and seed it. Pinned to
    * Robinhood Chain by product decision: the write path is chain-agnostic in
