@@ -17,6 +17,7 @@ import { useExecutorWalletAuth } from '../../hooks/useExecutorWalletAuth'
 import { usePnlUnit } from '../../hooks/usePnlUnit'
 import { tokenUsdMapOf, useTokenPrices } from '../../hooks/useTokenPrices'
 import { PoolVolumeMini } from './PoolVolumeMini'
+import { FablesStrategySection } from './FablesStrategySection'
 import { loadStrategies, removeStrategy, syncStrategyArchiveState, upsertStrategy } from '../../lib/strategyStore'
 import { snapshotFromPosition } from '../../lib/strategyPlanner'
 import { strategyDisplayValue, strategyStableValue } from '../../lib/strategyValuation'
@@ -1590,6 +1591,8 @@ export function StrategyTab() {
           })}
         </>
       )}
+
+      {CHAIN.id === 4663 && user && <FablesStrategySection owner={user} accessToken={accessToken} canManage={canManage} />}
 
       <details className="card" style={{ marginTop: 18 }}>
         <summary className="card-title" style={{ cursor: 'pointer' }}>{t('strategy.simpleAdvanced')}</summary>

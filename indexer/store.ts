@@ -251,6 +251,18 @@ CREATE TABLE IF NOT EXISTS v4_position_owners (
 CREATE INDEX IF NOT EXISTS idx_v4_position_owner
   ON v4_position_owners(owner, token_id);
 
+-- Discovery candidates only. A Fables range is an ERC-6909 share position,
+-- so historical recipients stay here; the reader checks live shares/fees.
+CREATE TABLE IF NOT EXISTS fables_position_candidates (
+  owner         TEXT NOT NULL,
+  hook          TEXT NOT NULL,
+  range_id      TEXT NOT NULL,
+  seen_block    INTEGER NOT NULL,
+  PRIMARY KEY (owner, hook, range_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fables_candidates_owner
+  ON fables_position_candidates(owner, hook, range_id);
+
 -- V4 Graph metadata is isolated from the chain-verified v2/v3 token table.
 -- It is display metadata only; transaction identity is independently proven
 -- from PoolKey + StateView in the browser before a row becomes executable.
@@ -2272,6 +2284,25 @@ export function v4PositionIdsByOwner(owner: string): string[] {
 
 export const v4PositionOwnerCount = (): number =>
   (db.prepare('SELECT COUNT(*) AS n FROM v4_position_owners').get() as { n: number }).n;
+
+const addFablesCandidateQ = db.prepare(`
+  INSERT INTO fables_position_candidates(owner, hook, range_id, seen_block)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(owner, hook, range_id) DO UPDATE SET
+    seen_block = MAX(seen_block, excluded.seen_block)`);
+
+export function addFablesCandidate(owner: string, hook: string, rangeId: string, block: number): void {
+  void addFablesCandidateQ.run(owner.toLowerCase(), hook.toLowerCase(), rangeId, block);
+}
+
+const fablesCandidatesByOwnerQ = db.prepare(`
+  SELECT hook, range_id AS rangeId, seen_block AS seenBlock
+  FROM fables_position_candidates WHERE owner = ?
+  ORDER BY seen_block DESC, hook ASC, range_id ASC`);
+
+export function fablesCandidatesByOwner(owner: string): Array<{hook: string; rangeId: string; seenBlock: number}> {
+  return fablesCandidatesByOwnerQ.all(owner.toLowerCase()) as Array<{hook: string; rangeId: string; seenBlock: number}>;
+}
 
 const recordStockTokenQ = db.prepare(`
   INSERT INTO stock_tokens (address, issuer, updated) VALUES (?, ?, ?)
