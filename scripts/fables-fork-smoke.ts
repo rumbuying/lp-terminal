@@ -15,7 +15,9 @@ const rpc = process.env.FABLES_FORK_RPC
 if (!rpc || !/^http:\/\/(?:127\.0\.0\.1|localhost):\d+$/.test(rpc))
   throw new Error('FABLES_FORK_RPC must be an explicit loopback Anvil URL')
 const client = createPublicClient({ transport: http(rpc, { timeout: 120_000 }) })
-const remote = createPublicClient({ transport: http(robinhoodConfig.publicRpc, { timeout: 30_000 }) })
+const discoveryRpc = process.env.FABLES_FORK_UPSTREAM_RPC
+  ? 'http://127.0.0.1:8546' : robinhoodConfig.publicRpc
+const remote = createPublicClient({ transport: http(discoveryRpc, { timeout: 30_000 }) })
 
 const hookKinds = [
   {
@@ -32,11 +34,13 @@ const hookKinds = [
 
 async function findFixture(kind: typeof hookKinds[number]) {
   const head = await client.getBlockNumber()
+  const remoteHead = await remote.getBlockNumber()
+  const scanHead = remoteHead < head ? remoteHead : head
   const topic = toEventSelector('Deposited(address,uint256,uint128)')
   for (const history of [20_000n, 100_000n]) {
     const logs = await remote.request({
       method: 'eth_getLogs', params: [{ address: kind.hook, topics: [topic],
-        fromBlock: toHex(head > history ? head - history : 0n), toBlock: toHex(head) }],
+        fromBlock: toHex(scanHead > history ? scanHead - history : 0n), toBlock: toHex(scanHead) }],
     }) as Array<{ topics: Hex[] }>
     const seen = new Set<string>()
     for (const log of logs.reverse()) {

@@ -14,7 +14,9 @@ const rpc = process.env.FABLES_FORK_RPC
 if (!rpc || !/^http:\/\/(?:127\.0\.0\.1|localhost):\d+$/.test(rpc))
   throw new Error('FABLES_FORK_RPC must be an explicit loopback Anvil URL')
 const fork = createPublicClient({ transport: http(rpc, { timeout: 120_000 }) })
-const remote = createPublicClient({ transport: http(robinhoodConfig.publicRpc, { timeout: 30_000 }) })
+const discoveryRpc = process.env.FABLES_FORK_UPSTREAM_RPC
+  ? 'http://127.0.0.1:8546' : robinhoodConfig.publicRpc
+const remote = createPublicClient({ transport: http(discoveryRpc, { timeout: 30_000 }) })
 const hook = '0x06a889870c8f83640d6816319f72e2aa579b6080' as const
 const poolId = '0xbac3aa3b91584a53a579b3c999a56756e954e59247e497bad1d25a4334bde551' as const
 const testKey = generatePrivateKey()
@@ -34,11 +36,13 @@ async function fixture() {
     return { owner, rangeId, quote }
   }
   const head = await fork.getBlockNumber()
+  const remoteHead = await remote.getBlockNumber()
+  const scanHead = remoteHead < head ? remoteHead : head
   const topic = toEventSelector('Deposited(address,uint256,uint128)')
   for (const history of [20_000n, 100_000n, 300_000n]) {
     process.stdout.write(`Scanning ${history} recent fork blocks for a funded out-of-range position\n`)
     const logs = await remote.request({ method: 'eth_getLogs', params: [{ address: hook,
-      topics: [topic], fromBlock: toHex(head > history ? head - history : 0n), toBlock: toHex(head) }] }) as
+      topics: [topic], fromBlock: toHex(scanHead > history ? scanHead - history : 0n), toBlock: toHex(scanHead) }] }) as
       Array<{ topics: Hex[] }>
     const seen = new Set<string>()
     for (const log of logs.reverse()) {
