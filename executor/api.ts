@@ -334,6 +334,7 @@ export function startApi() {
         return
       }
       if (req.method === 'POST' && /^\/v1\/fables\/jobs\/[^/]+\/transactions\/\d+\/rebroadcast$/.test(url.pathname)) {
+        if (!requireAdmin(auth, res)) return
         const match = /^\/v1\/fables\/jobs\/([^/]+)\/transactions\/(\d+)\/rebroadcast$/.exec(url.pathname)!
         const id = decodeURIComponent(match[1])
         const current = fablesJobById(id)
@@ -346,6 +347,7 @@ export function startApi() {
         return
       }
       if (req.method === 'POST' && /^\/v1\/fables\/jobs\/[^/]+\/resume$/.test(url.pathname)) {
+        if (!requireAdmin(auth, res)) return
         const id = decodeURIComponent(url.pathname.slice('/v1/fables/jobs/'.length, -'/resume'.length))
         const current = fablesJobById(id)
         if (!current || !ownedBy(auth, current.config.owner)) return json(res, 404, { error: 'Fables job not found' })
