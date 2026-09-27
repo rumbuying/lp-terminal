@@ -19,7 +19,7 @@ import { completedFablesCyclesSince, activeFablesJobs, appendFablesLedger, compl
   reserveFablesTurnover, setFablesJobProgress,
   type FablesCycleFact, type FablesJob, type FablesJobStage } from './fablesJobs'
 import { fablesTokenDecimals } from './fablesPlan'
-import { reconcileFablesTransactions } from './fablesRecovery'
+import { fablesRecoveryRequiresReview, reconcileFablesTransactions } from './fablesRecovery'
 import { sendFablesTracked, type FablesSafeTx } from './fablesSigner'
 import { audit, executorPaused } from './store'
 import { unlockPrivateKey } from './vault'
@@ -664,6 +664,7 @@ export async function runFablesOnce(): Promise<void> {
           setFablesJobProgress(item.id, { state: 'recovery', errorCode: 'E_FABLES_TX_REVERTED_REVIEW' })
           continue
         }
+        if (item.state === 'recovery' && fablesRecoveryRequiresReview(item.errorCode)) continue
         if (item.state !== 'running') setFablesJobProgress(item.id, { state: 'running', errorCode: null })
         const unlocked = unlockPrivateKey(item.walletId)
         for (let step = 0; step < 10; step += 1) {

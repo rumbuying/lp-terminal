@@ -15,7 +15,8 @@ const { activeFablesJobs, createFablesJob, fablesJobTransactions, quarantineInte
   markFablesTurnover, recordFablesTxIntent, reserveFablesTurnover,
   resumeFablesJob, setFablesJobProgress, updateFablesTx,
   fablesJobById } = await import('./fablesJobs')
-const { reconcileFablesTransactions, rebroadcastFablesTransaction } = await import('./fablesRecovery')
+const { fablesRecoveryRequiresReview, reconcileFablesTransactions,
+  rebroadcastFablesTransaction } = await import('./fablesRecovery')
 
 const owner = '0x0000000000000000000000000000000000000001' as const
 const token = '0x0000000000000000000000000000000000000002' as const
@@ -149,4 +150,31 @@ test('daily turnover follows the current UTC day and cannot rewrite a confirmed 
     assert.equal(final.state, 'confirmed')
     assert.equal(final.amount, '60')
   } finally { Date.now = originalNow }
+})
+
+test('recovery repairs a gas ledger write interrupted after confirmation', async () => {
+  const job = activeFablesJobs()[0]
+  const hash = `0x${'56'.repeat(32)}` as const
+  recordFablesTxIntent({ jobId: job.id, ordinal: 2, stage: 'deposit', nonce: 9n,
+    hash, to: hook, calldataHash: `0x${'78'.repeat(32)}` })
+  updateFablesTx(job.id, 2, { state: 'confirmed', blockNumber: 15n,
+    gasUsed: 123n, gasPrice: 4n })
+  const client = { getTransactionReceipt: async () => { throw new Error('final tx must not be polled') },
+    getBlockNumber: async () => 16n } as never
+  assert.equal((await reconcileFablesTransactions(job, client)).confirmed, 0)
+  const gas = db.prepare(`SELECT amount FROM fables_ledger_entries
+    WHERE job_id=? AND tx_hash=? AND kind='gas'`).get(job.id, hash) as { amount: string }
+  assert.equal(gas.amount, '492')
+  await reconcileFablesTransactions(job, client)
+  const count = db.prepare(`SELECT COUNT(*) AS count FROM fables_ledger_entries
+    WHERE job_id=? AND tx_hash=? AND kind='gas'`).get(job.id, hash) as { count: number }
+  assert.equal(count.count, 1)
+})
+
+test('asset accounting failures wait for manual review while receipt timeouts retry', () => {
+  assert.equal(fablesRecoveryRequiresReview('E_FABLES_EXIT_UNDERPAID'), true)
+  assert.equal(fablesRecoveryRequiresReview('E_FABLES_FEE_RECEIPT_MISMATCH'), true)
+  assert.equal(fablesRecoveryRequiresReview('E_FABLES_CONTEXT_BASELINE'), true)
+  assert.equal(fablesRecoveryRequiresReview('E_FABLES_RECEIPT_UNKNOWN'), false)
+  assert.equal(fablesRecoveryRequiresReview('E_FABLES_CLAIM_PAUSED'), false)
 })
