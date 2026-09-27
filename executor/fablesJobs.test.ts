@@ -12,7 +12,8 @@ process.env.LP_EXECUTOR_DATA_DIR = directory
 const { addWallet, db } = await import('./store')
 const { upsertFablesStrategy, updateFablesMonitorState } = await import('./fablesStore')
 const { activeFablesJobs, createFablesJob, fablesJobTransactions, quarantineInterruptedFablesJobs,
-  recordFablesTxIntent, resumeFablesJob, setFablesJobProgress, updateFablesTx,
+  markFablesTurnover, recordFablesTxIntent, reserveFablesTurnover,
+  resumeFablesJob, setFablesJobProgress, updateFablesTx,
   fablesJobById } = await import('./fablesJobs')
 const { reconcileFablesTransactions, rebroadcastFablesTransaction } = await import('./fablesRecovery')
 
@@ -118,4 +119,34 @@ test('manual recovery rebroadcasts only original signed bytes before resume', as
   const resumed = resumeFablesJob(job.id)
   assert.equal(resumed.state, 'running')
   assert.equal(fablesJobTransactions(job.id)[1].state, 'reviewed')
+})
+
+test('daily turnover follows the current UTC day and cannot rewrite a confirmed swap', () => {
+  const job = activeFablesJobs()[0]
+  const originalNow = Date.now
+  const day = Math.floor(originalNow() / 86_400_000)
+  try {
+    Date.now = () => (day * 86_400 + 86_390) * 1_000
+    reserveFablesTurnover({ jobId: job.id, ordinal: 0, walletId: job.walletId,
+      quoteToken: zeroAddress, amount: 30n, limit: 100n })
+    Date.now = () => ((day + 1) * 86_400 + 10) * 1_000
+    reserveFablesTurnover({ jobId: job.id, ordinal: 0, walletId: job.walletId,
+      quoteToken: zeroAddress, amount: 60n, limit: 100n })
+    const saved = db.prepare(`SELECT utc_day,amount FROM fables_turnover_reservations
+      WHERE job_id=? AND ordinal=0`).get(job.id) as { utc_day: number; amount: string }
+    assert.equal(saved.utc_day, day + 1)
+    assert.equal(saved.amount, '60')
+    assert.throws(() => reserveFablesTurnover({ jobId: job.id, ordinal: 1,
+      walletId: job.walletId, quoteToken: zeroAddress, amount: 41n, limit: 100n }), /DAILY_LIMIT/)
+    reserveFablesTurnover({ jobId: job.id, ordinal: 1,
+      walletId: job.walletId, quoteToken: zeroAddress, amount: 40n, limit: 100n })
+    assert.throws(() => markFablesTurnover(job.id, 2, 'confirmed'), /TURNOVER_MISSING/)
+    markFablesTurnover(job.id, 0, 'confirmed')
+    assert.throws(() => reserveFablesTurnover({ jobId: job.id, ordinal: 0,
+      walletId: job.walletId, quoteToken: zeroAddress, amount: 1n, limit: 100n }), /TURNOVER_FINAL/)
+    const final = db.prepare(`SELECT state,amount FROM fables_turnover_reservations
+      WHERE job_id=? AND ordinal=0`).get(job.id) as { state: string; amount: string }
+    assert.equal(final.state, 'confirmed')
+    assert.equal(final.amount, '60')
+  } finally { Date.now = originalNow }
 })

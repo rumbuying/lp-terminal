@@ -285,19 +285,24 @@ export function reserveFablesTurnover(args: {
     ) as { amount: string }[]
     const used = rows.reduce((sum, row) => sum + BigInt(row.amount), 0n)
     if (used + args.amount > args.limit) throw new Error('E_FABLES_DAILY_LIMIT')
-    db.prepare(`INSERT INTO fables_turnover_reservations
+    const saved = db.prepare(`INSERT INTO fables_turnover_reservations
       (job_id,ordinal,wallet_id,quote_token,utc_day,amount,state,updated_at)
       VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(job_id,ordinal) DO UPDATE SET
-        amount=excluded.amount,state=excluded.state,updated_at=excluded.updated_at`).run(
+        utc_day=excluded.utc_day,amount=excluded.amount,state=excluded.state,
+        updated_at=excluded.updated_at
+        WHERE fables_turnover_reservations.state='reserved'`).run(
       args.jobId, args.ordinal, args.walletId, args.quoteToken.toLowerCase(), day,
       args.amount.toString(), 'reserved', now(),
     )
+    if (saved.changes !== 1) throw new Error('E_FABLES_TURNOVER_FINAL')
     db.exec('COMMIT')
   } catch (error) { db.exec('ROLLBACK'); throw error }
 }
 
 export function markFablesTurnover(jobId: string, ordinal: number, state: 'confirmed' | 'released'): void {
-  db.prepare(`UPDATE fables_turnover_reservations SET state=?,updated_at=? WHERE job_id=? AND ordinal=?`).run(state, now(), jobId, ordinal)
+  const result = db.prepare(`UPDATE fables_turnover_reservations SET state=?,updated_at=?
+    WHERE job_id=? AND ordinal=?`).run(state, now(), jobId, ordinal)
+  if (result.changes !== 1) throw new Error('E_FABLES_TURNOVER_MISSING')
 }
 
 export function failFablesJobBeforeMutation(id: string, code: string): void {
