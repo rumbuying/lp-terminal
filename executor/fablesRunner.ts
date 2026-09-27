@@ -127,7 +127,7 @@ async function precheck(job: FablesJob): Promise<void> {
   if (latestNonce !== pendingNonce) throw new Error('E_FABLES_WALLET_PENDING_TX')
   const nativeBalance = lower(position.pool.key.currency0) === lower(zeroAddress)
     ? balance.amount0 : await publicClient.getBalance({ address: job.config.owner })
-  if (nativeBalance < BigInt(job.config.safeguards.minNativeGasReserveWei))
+  if (nativeBalance < gasCushion)
     throw new Error('E_FABLES_GAS_RESERVE')
   setFablesJobProgress(job.id, { stage: 'exit', context: nextContext(job, {
     oldShares: position.shares.toString(), baseline: serializeAmounts(balance),
@@ -184,8 +184,8 @@ async function claimOldFees(job: FablesJob, privateKey: Hex): Promise<void> {
   })
   ensureIdentity(job, position)
   if (position.shares !== 0n) throw new Error('E_FABLES_EXIT_NOT_COMPLETE')
-  if (position.claimPaused) throw new Error('E_FABLES_CLAIM_PAUSED')
   if (position.claimable0 > 0n || position.claimable1 > 0n) {
+    if (position.claimPaused) throw new Error('E_FABLES_CLAIM_PAUSED')
     if (lastConfirmed(job, 'claim')) throw new Error('E_FABLES_FEES_STILL_OWED')
     const call = await prepareFablesClaimCall(publicClient, {
       owner: job.config.owner, hook: job.config.positionRef.hook,
