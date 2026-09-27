@@ -173,6 +173,7 @@ async function run() {
   const directory = mkdtempSync(join(tmpdir(), 'fables-runner-fork-'))
   const keyPath = join(directory, 'signer.key')
   writeFileSync(keyPath, `${testKey}\n`, { mode: 0o600 })
+  process.env.CHAIN = 'robinhood'
   process.env.LP_EXECUTOR_DATA_DIR = directory
   process.env.LP_EXECUTOR_RPC = rpc
   process.env.LP_EXECUTOR_CHAIN_ID = '4663'

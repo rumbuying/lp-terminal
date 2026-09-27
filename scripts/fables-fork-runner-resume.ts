@@ -11,6 +11,7 @@ const fork = createPublicClient({ transport: http(rpc) })
 async function run() {
   if (!await fork.request({ method: 'anvil_nodeInfo', params: [] } as never) || await fork.getChainId() !== 4663)
     throw new Error('not a Robinhood Anvil fork')
+  process.env.CHAIN = 'robinhood'
   process.env.LP_EXECUTOR_DATA_DIR = directory
   process.env.LP_EXECUTOR_RPC = rpc
   process.env.LP_EXECUTOR_CHAIN_ID = '4663'
