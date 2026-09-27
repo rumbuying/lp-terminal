@@ -5,6 +5,7 @@
 ## 合约与读取
 
 - Robinhood Chain ID：`4663`。从 Fables registry `0x159a113e012593d9b3cc63ad45e30f0467e13ef3` 读取到 38 个活跃池、13 个 hook；`npm run check:fables` 对 PoolId、hook runtime hash、lens/registry runtime hash 逐项核验。
+- 上线前复核（2026-09-27）：`npm run check:fables` 在区块 `73742656` 再次通过，仍为 38 个活跃池、13 个已审阅 hook。旧 hook 的 fork 示例仓位在区块 `73743106` 仍有 `233417904528922145` 份额，已离开区间；当前退出报价本金为 `0` ETH + `114499999999` 个 USDG 原始单位，待领费用为零。此示例只用于本地 fork，真实小额验收仍须使用获授权的测试钱包。
 - `src/config/fables.ts` 固定已审阅的 PoolId 和代码哈希。未知或变化的合约只读路径报错，交易构造路径还需经过独立的 `FABLES_AUTO_POOL_IDS` 允许名单。生产允许名单目前为空。
 - Sourcify 匹配源码确认仓位是 hook ERC-6909 份额。旧 hook 调用 `withdraw` 后需再调用 `claimFees`；新 hook 可调用 `withdrawAndClaim`。不能把 shares 当成 v4 PositionManager NFT 的 liquidity。
 - 索引器从 `Deposited`、`Withdrawn`、`FeesClaimed`、`Transfer` 事件提取候选 ID，并用 hook/lens 的当前链上读数验证。全历史临时库扫描 122,345 条事件后，对示例钱包找到 44 个候选，其中 2 个有余额、42 个已空、0 个读取错误。事件索引不是可签名的仓位事实。
