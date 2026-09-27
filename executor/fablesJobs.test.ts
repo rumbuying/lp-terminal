@@ -164,6 +164,22 @@ test('daily turnover follows the current UTC day and cannot rewrite a confirmed 
   } finally { Date.now = originalNow }
 })
 
+test('a discarded LP swap quote releases its daily turnover for a no-swap plan', () => {
+  const job = activeFablesJobs()[0]
+  try {
+    reserveFablesTurnover({ jobId: job.id, ordinal: 2, walletId: job.walletId,
+      quoteToken: token, amount: 90n, limit: 100n })
+    reserveFablesTurnover({ jobId: job.id, ordinal: 2, walletId: job.walletId,
+      quoteToken: token, amount: 0n, limit: 100n })
+    reserveFablesTurnover({ jobId: job.id, ordinal: 3, walletId: job.walletId,
+      quoteToken: token, amount: 100n, limit: 100n })
+    assert.throws(() => reserveFablesTurnover({ jobId: job.id, ordinal: 2,
+      walletId: job.walletId, quoteToken: token, amount: 1n, limit: 100n }), /DAILY_LIMIT/)
+  } finally {
+    db.prepare('DELETE FROM fables_turnover_reservations WHERE job_id=? AND ordinal IN (2,3)').run(job.id)
+  }
+})
+
 test('recovery repairs a gas ledger write interrupted after confirmation', async () => {
   const job = activeFablesJobs()[0]
   const hash = `0x${'56'.repeat(32)}` as const

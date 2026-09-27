@@ -283,6 +283,12 @@ async function balanceAndPlan(job: FablesJob): Promise<void> {
       observedBlock: position.observedBlock.toString() },
   }
   if (!swap) {
+    // A prior quote may have reserved turnover before a price change sent the
+    // job back to balance planning. No LP swap will be sent for this plan.
+    const limit = job.config.execution.maxDailyTurnoverQuote
+    if (limit) reserveFablesTurnover({ jobId: job.id, ordinal: 0, walletId: job.walletId,
+      quoteToken: job.config.quoteToken, amount: 0n,
+      limit: parseUnits(limit, lower(job.config.quoteToken) === lower(key.currency0) ? dec0 : dec1) })
     setFablesJobProgress(job.id, { stage: 'deposit_approval', context: { ...context, swap: null } })
     return
   }
