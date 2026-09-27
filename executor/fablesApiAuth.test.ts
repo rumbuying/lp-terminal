@@ -27,21 +27,22 @@ test.after(async () => {
   rmSync(directory, { recursive: true, force: true })
 })
 
-test('read-only wallet login cannot resume or rebroadcast Fables transactions', async () => {
+test('read-only wallet login cannot save, resume or rebroadcast Fables work', async () => {
   const account = privateKeyToAccount(`0x${'11'.repeat(32)}`)
   const origin = 'http://localhost'
   const challenge = issueWalletChallenge(account.address, origin)
   const signature = await account.signMessage({ message: challenge.message })
   const session = await verifyWalletChallenge(challenge.id, account.address, signature, origin)
-  for (const path of [
-    '/v1/fables/jobs/unknown/resume',
-    '/v1/fables/jobs/unknown/transactions/0/rebroadcast',
+  for (const { method, path, body, adminStatus } of [
+    { method: 'PUT', path: '/v1/fables/strategies/unknown', body: '{}', adminStatus: 400 },
+    { method: 'POST', path: '/v1/fables/jobs/unknown/resume', adminStatus: 404 },
+    { method: 'POST', path: '/v1/fables/jobs/unknown/transactions/0/rebroadcast', adminStatus: 404 },
   ]) {
-    const walletResponse = await fetch(`${base}${path}`, { method: 'POST',
-      headers: { authorization: `Bearer ${session.token}` } })
+    const walletResponse = await fetch(`${base}${path}`, { method, body,
+      headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' } })
     assert.equal(walletResponse.status, 403, path)
-    const adminResponse = await fetch(`${base}${path}`, { method: 'POST',
-      headers: { authorization: `Bearer ${process.env.LP_EXECUTOR_API_TOKEN}` } })
-    assert.equal(adminResponse.status, 404, path)
+    const adminResponse = await fetch(`${base}${path}`, { method, body,
+      headers: { authorization: `Bearer ${process.env.LP_EXECUTOR_API_TOKEN}`, 'content-type': 'application/json' } })
+    assert.equal(adminResponse.status, adminStatus, path)
   }
 })
