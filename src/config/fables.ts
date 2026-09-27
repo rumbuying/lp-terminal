@@ -68,5 +68,21 @@ export const FABLES_KNOWN_POOL_IDS = new Set<string>([
   '0xa1f381b8938b5a9dfb601e692958bc5eff9898f4468ab5e398a52a0d53575093',
 ])
 
-/** Production signing stays disabled until fork and small-funds gates pass. */
-export const FABLES_AUTO_POOL_IDS = new Set<string>()
+/** An explicit deployment choice, restricted to the reviewed registry above. */
+export function parseFablesAutoPoolIds(value: string | undefined): Set<string> {
+  if (!value?.trim()) return new Set()
+  const approved = new Set<string>()
+  for (const raw of value.split(',')) {
+    const poolId = raw.trim().toLowerCase()
+    if (!/^0x[0-9a-f]{64}$/.test(poolId) || !FABLES_KNOWN_POOL_IDS.has(poolId))
+      throw new Error(`Fables auto pool is not in the reviewed registry: ${poolId}`)
+    approved.add(poolId)
+  }
+  return approved
+}
+
+const buildAutoPools = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })
+  .env?.VITE_FABLES_AUTO_POOL_IDS
+const runtimeAutoPools = typeof process !== 'undefined' ? process.env.LP_FABLES_AUTO_POOL_IDS : undefined
+/** Empty by default. Both web build and executor runtime must opt in separately. */
+export const FABLES_AUTO_POOL_IDS = parseFablesAutoPoolIds(buildAutoPools ?? runtimeAutoPools)

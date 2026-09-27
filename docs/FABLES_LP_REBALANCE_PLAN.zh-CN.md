@@ -112,6 +112,7 @@ Fables 池使用 Robinhood Chain 的 Uniswap v4 PoolManager，但官网 LP 仓�
 - 经主网 fork 和小额真实资金完整跑通至少两轮“越界—退出—领费—换币（如需）—存入—核账”；人工核对每轮交易和资产去向。
 - 在恢复演练中，executor 重启后能从链上事实继续，或者安全暂停并给出可操作的资产位置；不能出现再次发送未确认交易。
 - 自动签名仅对通过合约验证门和测试的池开启；新池默认只读，完成同样验证后再加入允许名单。
+- 生产放行具体池时，网页构建显式设置 `VITE_FABLES_AUTO_POOL_IDS`，Robinhood executor 环境显式设置 `LP_FABLES_AUTO_POOL_IDS`；两者都是逗号分隔的已审阅 PoolId，默认空值。配置未知 PoolId 必须启动失败。保留每日换币额度、滑点、价格冲击和 gas 储备等资金保护。
 
 ## 6. 实施顺序
 

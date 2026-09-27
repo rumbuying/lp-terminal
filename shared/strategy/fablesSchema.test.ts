@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { zeroAddress } from 'viem'
 import { robinhoodConfig } from '../../src/config/chains/robinhood'
-import { FABLES_AUTO_POOL_IDS } from '../../src/config/fables'
+import { FABLES_AUTO_POOL_IDS, parseFablesAutoPoolIds } from '../../src/config/fables'
 import { fablesRangeId } from '../../src/lib/fables'
 import { parseFablesStrategyConfig } from './fablesSchema'
 
@@ -42,6 +42,13 @@ test('Fables auto signing remains gated while the production allowlist is empty'
   assert.throws(() => parseFablesStrategyConfig({ ...draft(), execution: {
     mode: 'executor_auto', walletId: 'wallet', signerAddress: owner, dryRun: false,
   } }), /not approved/)
+})
+
+test('Fables deployment approval accepts only reviewed pool IDs', () => {
+  assert.deepEqual([...parseFablesAutoPoolIds(undefined)], [])
+  assert.deepEqual([...parseFablesAutoPoolIds(` ${poolId.toUpperCase()} `)], [poolId])
+  assert.throws(() => parseFablesAutoPoolIds('0x' + '0'.repeat(64)), /reviewed registry/)
+  assert.throws(() => parseFablesAutoPoolIds(`${poolId},`), /reviewed registry/)
 })
 
 test('Fables accepts fractional quote-denominated daily turnover limits', () => {
