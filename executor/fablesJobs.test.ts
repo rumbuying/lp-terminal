@@ -10,8 +10,8 @@ import { fablesRangeId } from '../src/lib/fables'
 const directory = mkdtempSync(join(tmpdir(), 'fables-jobs-'))
 process.env.LP_EXECUTOR_DATA_DIR = directory
 const { addWallet, db } = await import('./store')
-const { upsertFablesStrategy, updateFablesMonitorState } = await import('./fablesStore')
-const { activeFablesJobs, createFablesJob, fablesJobTransactions, quarantineInterruptedFablesJobs,
+const { fablesMonitorState, fablesStrategyById, upsertFablesStrategy, updateFablesMonitorState } = await import('./fablesStore')
+const { activeFablesJobs, cancelFablesJobBackInRange, createFablesJob, fablesJobTransactions, quarantineInterruptedFablesJobs,
   markFablesTurnover, recordFablesTxIntent, reserveFablesTurnover,
   resumeFablesJob, setFablesJobProgress, updateFablesTx,
   fablesJobById } = await import('./fablesJobs')
@@ -210,4 +210,27 @@ test('each mutating stage holds its durable hash through a crash and receipt rec
     assert.equal(fablesJobTransactions(job.id).find(tx => tx.ordinal === ordinal)?.state, 'confirmed')
     assert.equal(resumeFablesJob(job.id).state, 'running')
   }
+})
+
+test('a returned in-range price cancels an unsigned job and restores monitoring', () => {
+  const source = activeFablesJobs()[0].config
+  const secondOwner = '0x0000000000000000000000000000000000000003' as const
+  const at = Math.floor(Date.now() / 1000)
+  addWallet({ id: 'fables-cancel-wallet', label: 'cancel test', address: secondOwner,
+    vaultPath: 'test-fables-cancel-vault', createdAt: at, updatedAt: at })
+  const config = { ...source, id: 'fables-cancel-test', owner: secondOwner,
+    execution: { ...source.execution, walletId: 'fables-cancel-wallet', signerAddress: secondOwner },
+    createdAt: at, updatedAt: at }
+  upsertFablesStrategy(config)
+  updateFablesMonitorState(config.id, { revision: 1, outSide: 'upper', outSince: at - 300 }, 'dry_run_ready')
+  const job = createFablesJob(config)
+  setFablesJobProgress(job.id, { state: 'running' })
+  cancelFablesJobBackInRange(job.id)
+  assert.equal(fablesJobById(job.id)?.state, 'cancelled')
+  assert.equal(fablesJobById(job.id)?.errorCode, 'E_FABLES_BACK_IN_RANGE')
+  assert.equal(fablesStrategyById(config.id)?.state, 'monitoring')
+  assert.equal(fablesMonitorState(config.id)?.outSince, undefined)
+  assert.equal(fablesJobTransactions(job.id).length, 0)
+  assert.throws(() => setFablesJobProgress(job.id, { stage: 'exit' }), /JOB_CLOSED/)
+  assert.throws(() => cancelFablesJobBackInRange(job.id), /JOB_STAGE/)
 })

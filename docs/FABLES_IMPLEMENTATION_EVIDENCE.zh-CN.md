@@ -37,14 +37,15 @@ FABLES_FORK_RPC=http://127.0.0.1:8545 npx tsx scripts/fables-fork-smoke.ts
 ## 未完成的发布门
 
 - v2 份额策略配置、API 保存、只读越界监控和策略页预览已实现。D 阶段新增独立 Fables 作业表、交易哈希及已签名原始交易先落库、确认回执恢复、人工重播同一笔原始交易、手续费与本金账本、换币规划、原生 ETH 的 WETH 路由、持久化的旧区间到新区间状态机。签名前再次核对 pending nonce、池币种及仓位是否仍越界；退出后按实际钱包到账和 gas 核对最低到账。当前仅完成局部 fork 恢复演练，完整循环仍需通过。
-- 执行边界复核：预检要求钱包原生币余额覆盖整轮保守 gas 预留；退出后若待领费用已为零，即使领取功能此时暂停也直接核对并继续，避免零费用循环卡在领取阶段。`npm run typecheck` 与 Robinhood 策略测试 165 项通过；这不能替代完整 fork 与真实资金验收。
+- 执行边界复核：预检要求钱包原生币余额覆盖整轮保守 gas 预留；退出后若待领费用已为零，即使领取功能此时暂停也直接核对并继续，避免零费用循环卡在领取阶段。这不能替代完整 fork 与真实资金验收。
+- 价格在签名前回到旧区间时，预检作业现在以 `cancelled` 终结并原子恢复策略监控及越界计时；有任何交易记录的作业不得走取消路径。原有预检失败仍进入暂停或恢复。数据库行为测试覆盖取消后无交易、监控恢复、作业不可再推进。
 - 本地 fork 已证明：一次旧 hook 的退出交易成功，哈希先落库后即使等待确认超时仍可在重启后从同一哈希恢复到下一阶段；另一次约 200 USDG 的样本验证了转入份额后的退出报价。但公共 Robinhood RPC 的历史账户状态在 fork 固定块后不可稳定读取，后续一次签名交易在本地 Anvil 保持 pending，挖块请求超时。另试验了公开的 BlockReq 近期历史 RPC：固定块 `eth_getCode` 可读，但固定块 `eth_getProof` 被拒绝，同样不能用于 Anvil 挖块。按 [Robinhood Chain 连接文档](https://docs.robinhood.com/chain/connecting/) 需使用支持固定块 `eth_getProof` 的 archive RPC 完成验证；不能把当前不完整的 fork 记录视为交易闭环成功。
 - 追加验证：最新块 fork 能启动并返回区块高，但对其固定块 `0x464f084` 的 `eth_getProof` 返回 `-32000 historical state ... is not available`。完整循环脚本停在初始仓位读取，尚未发送交易；已停止本地 Anvil 和只读代理。此结果再次确认需要可固定块读取证明的 archive RPC。
 - 新增只读预检 `scripts/fables-archive-rpc-check.mjs`，在启动 Anvil 前要求链 ID 4663，并验证距当前 100,000 块的固定块 `eth_getProof`。输出仅包含块高与检查结果，不打印带凭据的 endpoint。代理和预检应使用同一个 `FABLES_FORK_UPSTREAM_RPC`。
 - 2026-09-27 另测公开端点：Alchemy 文档的 `docs-demo` 示例在 `eth_chainId` 返回 HTTP 403；SolidRPC 免密公开路由在历史 `eth_getProof` 返回 `-32014`。两者均未通过预检，不能替代经实测支持历史证明的 archive 凭据端点。
 - fork 脚本在配置 archive upstream 时，通过本地只读代理搜索示例仓位，日志扫描的最高块不超过 Anvil 的 fork 基准块，避免示例发现意外退回公共 RPC 或读取 fork 之后的事件。
 - 完整 executor 循环脚本现可通过 `FABLES_TEST_HOOK`、`FABLES_TEST_POOL_ID` 指定旧版或新版已核验的 USDG 池；按链上现价将转给一次性 fork 签名钱包的本金及待领费用限制在 200 USDG，并在转移后再次核对。恢复脚本从持久化作业读取池 ID。新版 hook 的完整执行循环仍需 archive fork 实际跑通，不能由脚本配置能力代替验收结果。
-- `npm test`：1028 项，982 通过、46 跳过、0 失败；`CHAIN=robinhood npm run test:strategy`：165 项通过；`npm run typecheck` 和使用本地测试费率接收地址的 Robinhood 构建通过。Fables 作业、回执恢复、同笔交易重播、手续费与份额解析、存入支出上限的专项测试也通过。跨 UTC 日预留正确归日；已确认换币记录不可覆盖，缺失的预留不会静默确认。恢复扫描会补齐已落库回执但尚未记账的 gas；资产或回执核对不一致时需人工恢复。新增五个资金变动阶段的广播后中断/回执恢复测试；完整 fork 与链上故障注入仍未验收。
+- `npm test`：上次全量运行 1028 项，982 通过、46 跳过、0 失败；最新 `CHAIN=robinhood npm run test:strategy`：166 项通过；`npm run typecheck` 和使用本地测试费率接收地址的 Robinhood 构建通过。Fables 作业、回执恢复、同笔交易重播、手续费与份额解析、存入支出上限的专项测试也通过。跨 UTC 日预留正确归日；已确认换币记录不可覆盖，缺失的预留不会静默确认。恢复扫描会补齐已落库回执但尚未记账的 gas；资产或回执核对不一致时需人工恢复。新增五个资金变动阶段的广播后中断/回执恢复测试；完整 fork 与链上故障注入仍未验收。
 - 钱包签名登录在登录文案中承诺只读；Fables 作业恢复与已签名交易重播现均要求管理员令牌。HTTP 集成测试验证钱包会话对这两个接口返回 403，管理员令牌可进入对应接口。
 - 需要指定真实测试钱包、Fables 池和金额上限，并在明确授权的额度内完成两轮真实小额闭环与核账。
 - 通过上述验证后才允许在生产名单中开启具体池，并按部署流程发布、健康检查和清理旧 release。

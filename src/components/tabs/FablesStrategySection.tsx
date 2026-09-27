@@ -16,6 +16,7 @@ const strategyStateLabel: Record<string, string> = {
   awaiting_manual: '越界待手动处理', executing: '执行中', recovery: '待恢复',
   paused: '暂停', read_error: '读取异常', disabled: '已停用',
 }
+const jobStateLabel: Record<string, string> = { cancelled: '已取消：价格回到区间' }
 const assetLocationLabel: Record<string, string> = {
   old_lp_or_wallet: '旧 LP 或钱包', wallet_and_possible_old_fees: '钱包及旧区间待领费用',
   new_lp_pending_verification: '新 LP 待核实',
@@ -150,8 +151,8 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
       })}
       {jobs.filter(job => job.strategyId === row.config.id).slice(0, 2).map(job =>
         <div className="mono-sm" key={job.id}>
-          作业 {job.state} · {job.stage} · 资产位置 {assetLocationLabel[job.assetLocation] ?? job.assetLocation}
-          {job.errorCode && <span className="red"> · {job.errorCode}</span>}
+          作业 {jobStateLabel[job.state] ?? job.state} · {job.stage} · 资产位置 {assetLocationLabel[job.assetLocation] ?? job.assetLocation}
+          {job.errorCode && job.state !== 'cancelled' && <span className="red"> · {job.errorCode}</span>}
           {job.transactions.map(tx => <div key={tx.hash}>
             {tx.stage} {tx.state} · {tx.hash}
             {canManage && job.state === 'recovery' && tx.canRebroadcast

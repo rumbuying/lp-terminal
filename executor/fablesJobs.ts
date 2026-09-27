@@ -73,7 +73,7 @@ if (!(db.prepare('PRAGMA table_info(fables_job_transactions)').all() as { name: 
 export type FablesJobStage = 'precheck' | 'exit' | 'claim' | 'balance'
   | 'fee_conversion_approval' | 'fee_conversion'
   | 'swap_approval' | 'swap' | 'deposit_approval' | 'deposit' | 'verify'
-export type FablesJobState = 'planned' | 'running' | 'recovery' | 'completed' | 'failed'
+export type FablesJobState = 'planned' | 'running' | 'recovery' | 'completed' | 'failed' | 'cancelled'
 export type FablesJobContext = Record<string, unknown>
 export type FablesJob = {
   id: string; strategyId: string; walletId: string; config: FablesStrategyConfig
@@ -150,7 +150,7 @@ export function setFablesJobProgress(id: string, args: {
   state?: FablesJobState; stage?: FablesJobStage; context?: FablesJobContext; errorCode?: string | null
 }): void {
   const row = fablesJobById(id)
-  if (!row || row.state === 'completed' || row.state === 'failed') throw new Error('E_FABLES_JOB_CLOSED')
+  if (!row || ['completed','failed','cancelled'].includes(row.state)) throw new Error('E_FABLES_JOB_CLOSED')
   const state = args.state ?? row.state
   const stage = args.stage ?? row.stage
   const context = args.context ?? row.context
@@ -323,6 +323,28 @@ export function failFablesJobBeforeMutation(id: string, code: string): void {
       code.slice(0, 160), at,
     )
     db.prepare(`UPDATE fables_strategies SET state='paused',updated_at=? WHERE id=?`).run(at, job.strategyId)
+    db.exec('COMMIT')
+  } catch (error) { db.exec('ROLLBACK'); throw error }
+}
+
+/** A price that returned in range cancels only an unsigned precheck job. */
+export function cancelFablesJobBackInRange(id: string): void {
+  const job = fablesJobById(id)
+  if (!job || !['planned','running','recovery'].includes(job.state) || job.stage !== 'precheck')
+    throw new Error('E_FABLES_JOB_STAGE')
+  if (fablesJobTransactions(id).length !== 0) throw new Error('E_FABLES_MUTATION_EXISTS')
+  const at = now()
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare(`UPDATE fables_jobs SET state='cancelled',error_code='E_FABLES_BACK_IN_RANGE',updated_at=?
+      WHERE id=?`).run(at, id)
+    db.prepare(`INSERT INTO fables_monitor_state(strategy_id,revision,updated_at)
+      VALUES(?,?,?) ON CONFLICT(strategy_id) DO UPDATE SET
+        revision=excluded.revision,out_side=NULL,out_since=NULL,cooldown_until=NULL,
+        last_tick=NULL,last_block=NULL,error=NULL,updated_at=excluded.updated_at`).run(
+      job.strategyId, job.config.revision, at,
+    )
+    db.prepare(`UPDATE fables_strategies SET state='monitoring',updated_at=? WHERE id=?`).run(at, job.strategyId)
     db.exec('COMMIT')
   } catch (error) { db.exec('ROLLBACK'); throw error }
 }

@@ -14,7 +14,7 @@ import { quoteKyber, gatedKyberTx } from './kyber'
 import { publicClient, readAllowance, readTokenBalances } from './chain'
 import { EXECUTOR } from './config'
 import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, fablesSwapImpactBps, freshFablesRange, mintedFablesShares, type FablesAmounts } from './fablesCycle'
-import { completedFablesCyclesSince, activeFablesJobs, appendFablesLedger, completeFablesJob,
+import { completedFablesCyclesSince, activeFablesJobs, appendFablesLedger, cancelFablesJobBackInRange, completeFablesJob,
   failFablesJobBeforeMutation, fablesJobById, fablesJobTransactions, markFablesTurnover,
   reserveFablesTurnover, setFablesJobProgress,
   type FablesCycleFact, type FablesJob, type FablesJobStage } from './fablesJobs'
@@ -686,13 +686,17 @@ export async function runFablesOnce(): Promise<void> {
       } catch (error) {
         const job = fablesJobById(item.id)
         const code = error instanceof Error ? error.message.slice(0, 160) : 'E_FABLES_RUNNER'
+        let cancelled = false
         if (job && ['planned','running','recovery'].includes(job.state)) {
           try {
-            if (job.stage === 'precheck') failFablesJobBeforeMutation(job.id, code)
+            if (job.stage === 'precheck' && code === 'E_FABLES_BACK_IN_RANGE') {
+              cancelFablesJobBackInRange(job.id)
+              cancelled = true
+            } else if (job.stage === 'precheck') failFablesJobBeforeMutation(job.id, code)
             else setFablesJobProgress(job.id, { state: 'recovery', errorCode: code })
           } catch { setFablesJobProgress(job.id, { state: 'recovery', errorCode: code }) }
         }
-        audit('fables_runner', 'job_attention', 'job', item.id, { code })
+        audit('fables_runner', cancelled ? 'job_cancelled' : 'job_attention', 'job', item.id, { code })
       }
     }
   } finally { running = false }
