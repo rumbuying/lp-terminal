@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { formatUnits, zeroAddress, type Address } from 'viem'
+import { formatUnits, parseUnits, zeroAddress, type Address } from 'viem'
 import type { FablesStrategyConfig } from '../../../shared/strategy/types'
 import { robinhoodConfig } from '../../config/chains/robinhood'
 import { FABLES_AUTO_POOL_IDS } from '../../config/fables'
@@ -21,6 +21,14 @@ const assetLocationLabel: Record<string, string> = {
   old_lp_or_wallet: '旧 LP 或钱包', wallet_and_possible_old_fees: '钱包及旧区间待领费用',
   new_lp_pending_verification: '新 LP 待核实',
 }
+const preferredQuoteToken = (currency0: Address, currency1: Address): Address => {
+  const stable = robinhoodConfig.addr.STABLE.toLowerCase()
+  if (currency0.toLowerCase() === stable || currency1.toLowerCase() === stable)
+    return robinhoodConfig.addr.STABLE
+  if (currency0.toLowerCase() === zeroAddress || currency1.toLowerCase() === zeroAddress)
+    return zeroAddress
+  return currency1
+}
 
 export function FablesStrategySection({ owner, accessToken, canManage }: {
   owner: Address; accessToken: string; canManage: boolean
@@ -39,7 +47,7 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
   const [feeHandling, setFeeHandling] = useState<FablesStrategyConfig['fees']['handling']>('reinvest')
   const [executionMode, setExecutionMode] = useState<'notify_only' | 'executor_auto'>('notify_only')
   const [walletId, setWalletId] = useState('')
-  const [dailyTurnover, setDailyTurnover] = useState('1000')
+  const [dailyTurnover, setDailyTurnover] = useState<Record<string, string>>({})
   const [legacyConsent, setLegacyConsent] = useState(false)
   const [quoteToken, setQuoteToken] = useState<Record<string, Address>>({})
   const [plan, setPlan] = useState<ExecutorFablesPlan | null>(null)
@@ -75,13 +83,23 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
         throw new Error('请检查区间宽度、确认时间和领取费率上限')
       const currency0 = position.pool.key.currency0
       const currency1 = position.pool.key.currency1
-      const selectedQuote = quoteToken[position.rangeId.toString()] ?? currency1
+      const positionKey = position.rangeId.toString()
+      const selectedQuote = quoteToken[positionKey] ?? preferredQuoteToken(currency0, currency1)
       const riskToken = selectedQuote.toLowerCase() === currency0.toLowerCase() ? currency1 : currency0
       const auto = executionMode === 'executor_auto'
       const selectedWallet = wallets.find(wallet => wallet.id === walletId && wallet.address.toLowerCase() === owner.toLowerCase())
-      if (auto && (!FABLES_AUTO_POOL_IDS.has(position.pool.id.toLowerCase()) || !selectedWallet
-        || !/^\d+$/.test(dailyTurnover) || BigInt(dailyTurnover) <= 0n))
-        throw new Error('自动执行需要已批准的池、当前所有者的钱包和正数每日换币上限')
+      const turnoverLimit = dailyTurnover[positionKey]?.trim() ?? ''
+      if (auto) {
+        if (!FABLES_AUTO_POOL_IDS.has(position.pool.id.toLowerCase()) || !selectedWallet)
+          throw new Error('自动执行需要已批准的池和当前所有者的钱包')
+        const decimals = selectedQuote.toLowerCase() === zeroAddress
+          ? 18 : positions.data?.tokens[selectedQuote.toLowerCase()]?.decimals
+        if (decimals == null || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(turnoverLimit))
+          throw new Error('请填写此仓位计价币的正数每日换币上限')
+        try {
+          if (parseUnits(turnoverLimit, decimals) <= 0n) throw new Error('zero turnover')
+        } catch { throw new Error('每日换币上限必须为正数，且小数位不能超过计价币精度') }
+      }
       const now = Math.floor(Date.now() / 1000)
       const config: FablesStrategyConfig = {
         version: 2, protocol: 'fables', chainId: 4663,
@@ -102,7 +120,7 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
         execution: auto
           ? { mode: 'executor_auto', walletId: selectedWallet!.id,
               signerAddress: selectedWallet!.address, dryRun: false,
-              maxDailyTurnoverQuote: dailyTurnover }
+              maxDailyTurnoverQuote: turnoverLimit }
           : { mode: 'notify_only', dryRun: false },
         revision: 1, createdAt: now, updatedAt: now,
       }
@@ -193,7 +211,6 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
             {wallets.filter(wallet => wallet.address.toLowerCase() === owner.toLowerCase()).map(wallet =>
               <option value={wallet.id} key={wallet.id}>{wallet.label}</option>)}
           </select></label>
-          <label>每日换币上限（计价币） <input value={dailyTurnover} onChange={event => setDailyTurnover(event.target.value)} /></label>
         </>}
       </div>
       <div className="row gap-sm">
@@ -212,14 +229,22 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
         const key = position.rangeId.toString()
         const currency0 = position.pool.key.currency0
         const currency1 = position.pool.key.currency1
+        const selectedQuote = quoteToken[key] ?? preferredQuoteToken(currency0, currency1)
         const existing = strategies.some(row => row.config.enabled && row.config.positionRef.rangeId === key
           && row.config.positionRef.poolId.toLowerCase() === position.pool.id.toLowerCase())
         return <div className="card inset-card" key={`${position.pool.id}:${key}`}>
           <div className="mono-sm">{shortAddr(position.pool.id)} · ticks {position.tickLower}–{position.tickUpper}</div>
-          <label>计价币 <select value={quoteToken[key] ?? currency1} onChange={event => setQuoteToken(values => ({ ...values, [key]: event.target.value as Address }))}>
-            <option value={currency0}>{positions.data?.tokens[currency0.toLowerCase()]?.symbol ?? shortAddr(currency0)}</option>
-            <option value={currency1}>{positions.data?.tokens[currency1.toLowerCase()]?.symbol ?? shortAddr(currency1)}</option>
+          <label>计价币 <select value={selectedQuote} onChange={event => {
+            setQuoteToken(values => ({ ...values, [key]: event.target.value as Address }))
+            setDailyTurnover(values => { const next = { ...values }; delete next[key]; return next })
+          }}>
+            <option value={currency0}>{tokenLabel(currency0)}</option>
+            <option value={currency1}>{tokenLabel(currency1)}</option>
           </select></label>
+          {executionMode === 'executor_auto' && <label>每日换币上限（{tokenLabel(selectedQuote)}）
+            <input value={dailyTurnover[key] ?? ''} placeholder="请输入正数，可含小数"
+              onChange={event => setDailyTurnover(values => ({ ...values, [key]: event.target.value }))} />
+          </label>}
           <button disabled={busy || existing || (executionMode === 'executor_auto' && !FABLES_AUTO_POOL_IDS.has(position.pool.id.toLowerCase()))}
             onClick={() => void save(position)}>{existing ? '已有策略' : executionMode === 'executor_auto' ? '创建自动策略' : '创建监控策略'}</button>
         </div>
