@@ -44,6 +44,7 @@ FABLES_FORK_RPC=http://127.0.0.1:8545 npx tsx scripts/fables-fork-smoke.ts
 - 追加验证：最新块 fork 能启动并返回区块高，但对其固定块 `0x464f084` 的 `eth_getProof` 返回 `-32000 historical state ... is not available`。完整循环脚本停在初始仓位读取，尚未发送交易；已停止本地 Anvil 和只读代理。此结果再次确认需要可固定块读取证明的 archive RPC。
 - 新增只读预检 `scripts/fables-archive-rpc-check.mjs`，在启动 Anvil 前要求链 ID 4663，并验证距当前 100,000 块的固定块 `eth_getProof`。输出仅包含块高与检查结果，不打印带凭据的 endpoint。代理和预检应使用同一个 `FABLES_FORK_UPSTREAM_RPC`。
 - 2026-09-27 另测公开端点：Alchemy 文档的 `docs-demo` 示例在 `eth_chainId` 返回 HTTP 403；SolidRPC 免密公开路由在历史 `eth_getProof` 返回 `-32014`。两者均未通过预检，不能替代经实测支持历史证明的 archive 凭据端点。
+- 同日另测 PublicNode、dRPC 与 bloXroute Robinhood 公开路由：前两者的历史证明分别返回 HTTP 403、400；bloXroute 对单次 hook 账户证明曾通过，但同一固定历史块随后对零地址、hook 与 registry 返回 `-32000`。Anvil fork 虽能启动，完整执行脚本在首次仓位 `balanceOf` 即因历史账户状态不可用失败，未发送任何测试交易。预检现要求在同一历史块重复核验多个账户及 hook 存储证明；单次成功不足以判定 archive 稳定可用。测试代理与 Anvil 已停止。
 - fork 脚本在配置 archive upstream 时，通过本地只读代理搜索示例仓位，日志扫描的最高块不超过 Anvil 的 fork 基准块，避免示例发现意外退回公共 RPC 或读取 fork 之后的事件。
 - 完整 executor 循环脚本现可通过 `FABLES_TEST_HOOK`、`FABLES_TEST_POOL_ID` 指定旧版或新版已核验的 USDG 池；按链上现价将转给一次性 fork 签名钱包的本金及待领费用限制在 200 USDG，并在转移后再次核对。恢复脚本从持久化作业读取池 ID。新版 hook 的完整执行循环仍需 archive fork 实际跑通，不能由脚本配置能力代替验收结果。
 - `npm test`：上次全量运行 1028 项，982 通过、46 跳过、0 失败；最新 `CHAIN=robinhood npm run test:strategy`：167 项通过；`npm run typecheck` 和使用本地测试费率接收地址的 Robinhood 构建通过。Fables 作业、回执恢复、同笔交易重播、手续费与份额解析、存入支出上限的专项测试也通过。跨 UTC 日预留正确归日；已确认换币记录不可覆盖，缺失的预留不会静默确认。恢复扫描会补齐已落库回执但尚未记账的 gas；资产或回执核对不一致时需人工恢复。新增五个资金变动阶段的广播后中断/回执恢复测试；完整 fork 与链上故障注入仍未验收。

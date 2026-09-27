@@ -27,13 +27,21 @@ try {
   const head = BigInt(await rpc('eth_blockNumber', []))
   if (head < 100_001n) throw new Error('RPC head is too early for the historical proof check')
   const fixedBlock = `0x${(head - 100_000n).toString(16)}`
-  const proof = await rpc('eth_getProof', [
-    '0x06a889870c8f83640d6816319f72e2aa579b6080', [], fixedBlock,
-  ])
-  if (!proof || !Array.isArray(proof.accountProof) || proof.accountProof.length === 0)
-    throw new Error('historical eth_getProof returned no account proof')
+  const hook = '0x06a889870c8f83640d6816319f72e2aa579b6080'
+  const accounts = [
+    ['0x0000000000000000000000000000000000000000', []],
+    [hook, [`0x${'0'.repeat(64)}`]],
+    ['0x159a113e012593d9b3cc63ad45e30f0467e13ef3', []],
+    [hook, [`0x${'0'.repeat(64)}`]],
+  ]
+  for (const [address, slots] of accounts) {
+    const proof = await rpc('eth_getProof', [address, slots, fixedBlock])
+    if (!proof || !Array.isArray(proof.accountProof) || proof.accountProof.length === 0
+      || !Array.isArray(proof.storageProof) || proof.storageProof.length !== slots.length)
+      throw new Error('historical eth_getProof returned incomplete account or storage proof')
+  }
   process.stdout.write(JSON.stringify({ chainId: 4663, head: head.toString(),
-    proofBlock: (head - 100_000n).toString(), fixedBlockProof: 'ok' }) + '\n')
+    proofBlock: (head - 100_000n).toString(), fixedBlockProof: 'ok', proofChecks: accounts.length }) + '\n')
 } catch (error) {
   process.stderr.write(`Fables fork RPC preflight failed: ${error instanceof Error ? error.message : 'unknown error'}\n`)
   process.exitCode = 1
