@@ -17,10 +17,13 @@ async function run() {
   process.env.LP_EXECUTOR_PRIVATE_KEY_FILE = `${directory}/signer.key`
   process.env.LP_EXECUTOR_PRIVATE_KEY_WALLET_ID = 'fables-fork-signer'
   process.env.LP_EXECUTOR_CONFIRMATIONS = '1'
-  FABLES_AUTO_POOL_IDS.add('0xbac3aa3b91584a53a579b3c999a56756e954e59247e497bad1d25a4334bde551')
-  const [jobs, runner, store] = await Promise.all([
-    import('../executor/fablesJobs'), import('../executor/fablesRunner'), import('../executor/fablesStore'),
+  const [jobs, store] = await Promise.all([
+    import('../executor/fablesJobs'), import('../executor/fablesStore'),
   ])
+  const persisted = jobs.activeFablesJobs()[0]
+  if (!persisted) throw new Error('no active Fables fork job to resume')
+  FABLES_AUTO_POOL_IDS.add(persisted.config.positionRef.poolId.toLowerCase())
+  const runner = await import('../executor/fablesRunner')
   let previous = ''
   let unchanged = 0
   for (let i = 0; i < 30; i += 1) {

@@ -3,10 +3,10 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPublicClient, encodeFunctionData, getAddress, http, toEventSelector, toHex,
-  zeroAddress, type Address, type Hex } from 'viem'
+  type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { fablesHookAbi } from '../src/abi/fables'
-import { FABLES_AUTO_POOL_IDS } from '../src/config/fables'
+import { FABLES_AUTO_POOL_IDS, fablesHook } from '../src/config/fables'
 import { robinhoodConfig } from '../src/config/chains/robinhood'
 import { quoteFablesExit } from '../src/lib/fablesExitQuote'
 
@@ -17,8 +17,12 @@ const fork = createPublicClient({ transport: http(rpc, { timeout: 120_000 }) })
 const discoveryRpc = process.env.FABLES_FORK_UPSTREAM_RPC
   ? 'http://127.0.0.1:8546' : robinhoodConfig.publicRpc
 const remote = createPublicClient({ transport: http(discoveryRpc, { timeout: 30_000 }) })
-const hook = '0x06a889870c8f83640d6816319f72e2aa579b6080' as const
-const poolId = '0xbac3aa3b91584a53a579b3c999a56756e954e59247e497bad1d25a4334bde551' as const
+const hook = getAddress(process.env.FABLES_TEST_HOOK
+  || '0x06a889870c8f83640d6816319f72e2aa579b6080')
+const poolId = (process.env.FABLES_TEST_POOL_ID
+  || '0xbac3aa3b91584a53a579b3c999a56756e954e59247e497bad1d25a4334bde551').toLowerCase() as Hex
+if (!/^0x[0-9a-f]{64}$/.test(poolId) || !fablesHook(hook))
+  throw new Error('fork fixture must name a reviewed Fables hook and PoolId')
 const testKey = generatePrivateKey()
 const testAccount = privateKeyToAccount(testKey)
 
@@ -32,7 +36,7 @@ async function fixture() {
     const rangeId = BigInt(process.env.FABLES_TEST_RANGE_ID)
     const quote = await quoteFablesExit(fork, { owner, hook, rangeId, slippageBps: 100 })
     if (quote.position.pool.id.toLowerCase() !== poolId || quote.position.inRange)
-      throw new Error('explicit fork fixture is not an out-of-range ETH/USDG position')
+      throw new Error('explicit fork fixture is not an out-of-range position in the selected pool')
     return { owner, rangeId, quote }
   }
   const head = await fork.getBlockNumber()
@@ -61,7 +65,7 @@ async function fixture() {
             inRange: quote.position.inRange, shares: shares.toString(),
             principal: [quote.principal0.toString(), quote.principal1.toString()] }) + '\n')
         if (quote.position.pool.id.toLowerCase() === poolId && !quote.position.inRange
-          && (quote.principal0 >= 20_000_000_000_000_000n || quote.principal1 >= 50_000_000n))
+          && (quote.principal0 > 0n || quote.principal1 > 0n))
           return { owner, rangeId, quote }
       } catch (error) {
         if (error instanceof Error && ['E_FABLES_POSITION_EMPTY','E_FABLES_STAKED_UNSUPPORTED',
@@ -70,7 +74,15 @@ async function fixture() {
       }
     }
   }
-  throw new Error('no live out-of-range ETH/USDG Fables position in recent events')
+  throw new Error('no live out-of-range Fables position in the selected pool in recent events')
+}
+
+function quoteValueInUsdg(principal0: bigint, principal1: bigint, sqrtPriceX96: bigint,
+  usdIs0: boolean): bigint {
+  const ratioX192 = sqrtPriceX96 * sqrtPriceX96
+  const q192 = 1n << 192n
+  return usdIs0 ? principal0 + principal1 * q192 / ratioX192
+    : principal1 + principal0 * ratioX192 / q192
 }
 
 async function run() {
@@ -78,12 +90,15 @@ async function run() {
     throw new Error('not a Robinhood Anvil fork')
   const found = await fixture()
   const key = found.quote.position.pool.key
-  if (key.currency0 !== zeroAddress || key.currency1.toLowerCase() !== robinhoodConfig.addr.STABLE.toLowerCase())
-    throw new Error('test fixture is not native ETH/USDG')
-  const target0 = 50_000_000_000_000_000n
-  const target1 = 200_000_000n
-  const quoted = found.quote.principal1 > 0n ? found.quote.principal1 : found.quote.principal0
-  const target = found.quote.principal1 > 0n ? target1 : target0
+  const usdIs0 = key.currency0.toLowerCase() === robinhoodConfig.addr.STABLE.toLowerCase()
+  const usdIs1 = key.currency1.toLowerCase() === robinhoodConfig.addr.STABLE.toLowerCase()
+  if (usdIs0 === usdIs1) throw new Error('test fixture must contain exactly one USDG leg')
+  const quoted = quoteValueInUsdg(
+    found.quote.principal0 + found.quote.claimable0,
+    found.quote.principal1 + found.quote.claimable1,
+    found.quote.position.sqrtPriceX96, usdIs0)
+  if (quoted <= 0n) throw new Error('fixture has no USDG spot value')
+  const target = 200_000_000n
   const transferredShares = quoted > target
     ? found.quote.position.shares * target / quoted : found.quote.position.shares
   if (transferredShares <= 0n) throw new Error('fixture shares too small for bounded test')
@@ -100,6 +115,9 @@ async function run() {
   const moved = await quoteFablesExit(fork, { owner: testAccount.address, hook, rangeId: found.rangeId, slippageBps: 100 })
   if (moved.position.shares !== transferredShares || moved.position.inRange)
     throw new Error('test share transfer changed the expected position')
+  if (quoteValueInUsdg(moved.principal0 + moved.claimable0,
+    moved.principal1 + moved.claimable1, moved.position.sqrtPriceX96, usdIs0) > target)
+    throw new Error('transferred fork position exceeds 200 USDG spot-value cap')
   process.stdout.write(JSON.stringify({ fixtureOwner: found.owner, rangeId: found.rangeId.toString(),
     originalQuote: [found.quote.principal0.toString(), found.quote.principal1.toString()],
     transferredQuote: [moved.principal0.toString(), moved.principal1.toString()] }) + '\n')
@@ -129,7 +147,8 @@ async function run() {
     owner: testAccount.address, poolManager: robinhoodConfig.uniV4!.POOL_MANAGER,
     positionRef: { kind: 'fables_range', poolId, hook, rangeId: found.rangeId.toString(),
       tickLower: moved.position.tickLower, tickUpper: moved.position.tickUpper },
-    riskToken: zeroAddress, quoteToken: key.currency1,
+    riskToken: usdIs0 ? key.currency1 : key.currency0,
+    quoteToken: robinhoodConfig.addr.STABLE,
     range: { lowerPct: 5, upperPct: 5 },
     trigger: { pollSeconds: 4, confirmationSeconds: 0, cooldownMinutes: 0 },
     fees: { handling: 'reinvest' },
