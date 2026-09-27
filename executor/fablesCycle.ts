@@ -42,6 +42,25 @@ export function cycleOwnedAmounts(args: {
   return { amount0: delta0 < 0n ? 0n : delta0, amount1: delta1 < 0n ? 0n : delta1 }
 }
 
+/** Spend only this cycle's proceeds while leaving the wallet's absolute gas reserve intact. */
+export function cycleSpendableAmounts(args: {
+  currency0: Address; currency1: Address
+  baseline: FablesAmounts; current: FablesAmounts; nativeGasReserve: bigint
+}): FablesAmounts {
+  if (args.nativeGasReserve < 0n) throw new Error('E_FABLES_GAS_RESERVE')
+  const funds = cycleOwnedAmounts(args)
+  const spendable = (fund: bigint, current: bigint) => {
+    const aboveReserve = current > args.nativeGasReserve ? current - args.nativeGasReserve : 0n
+    return fund < aboveReserve ? fund : aboveReserve
+  }
+  return {
+    amount0: args.currency0.toLowerCase() === zeroAddress
+      ? spendable(funds.amount0, args.current.amount0) : funds.amount0,
+    amount1: args.currency1.toLowerCase() === zeroAddress
+      ? spendable(funds.amount1, args.current.amount1) : funds.amount1,
+  }
+}
+
 /** Fee event amounts are net tokens paid to the wallet, never a future swap-fee prediction. */
 export function claimedFablesFees(receipt: TransactionReceipt, hook: Address, owner: Address, rangeId: bigint): FablesAmounts {
   let amount0 = 0n

@@ -13,7 +13,7 @@ import { fablesRangeId } from '../src/lib/fables'
 import { quoteKyber, gatedKyberTx } from './kyber'
 import { publicClient, readAllowance, readTokenBalances } from './chain'
 import { EXECUTOR } from './config'
-import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, fablesSwapImpactBps, freshFablesRange, mintedFablesShares, type FablesAmounts } from './fablesCycle'
+import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, cycleSpendableAmounts, fablesSwapImpactBps, freshFablesRange, mintedFablesShares, type FablesAmounts } from './fablesCycle'
 import { completedFablesCyclesSince, activeFablesJobs, appendFablesLedger, cancelFablesJobBackInRange, completeFablesJob,
   failFablesJobBeforeMutation, fablesJobById, fablesJobTransactions, markFablesTurnover,
   reserveFablesTurnover, setFablesJobProgress,
@@ -46,10 +46,10 @@ const savedAmounts = (value: unknown, name: string): FablesAmounts => {
   return { amount0: BigInt(row.amount0), amount1: BigInt(row.amount1) }
 }
 const serializeAmounts = (value: FablesAmounts): StoredAmounts => ({ amount0: value.amount0.toString(), amount1: value.amount1.toString() })
-const nativeCycleCushion = async (job: FablesJob) => {
-  const gas = await publicClient.getGasPrice() * 5_000_000n
+const nativeCycleGasBudget = async (job: FablesJob) => {
+  const estimatedGas = await publicClient.getGasPrice() * 5_000_000n
   const reserve = BigInt(job.config.safeguards.minNativeGasReserveWei)
-  return gas > reserve ? gas : reserve
+  return { estimatedGas, reserve: estimatedGas > reserve ? estimatedGas : reserve }
 }
 
 async function walletAmounts(owner: Address, currency0: Address, currency1: Address): Promise<FablesAmounts> {
@@ -59,18 +59,8 @@ async function walletAmounts(owner: Address, currency0: Address, currency1: Addr
 
 async function spendableCycleAmounts(job: FablesJob, currencies: { currency0: Address; currency1: Address },
   baseline: FablesAmounts, current: FablesAmounts): Promise<FablesAmounts> {
-  const funds = cycleOwnedAmounts({ ...currencies, baseline, current })
-  if (lower(currencies.currency0) !== lower(zeroAddress)
-    && lower(currencies.currency1) !== lower(zeroAddress)) return funds
-  // Keep a conservative gas cushion inside this cycle's proceeds. The wallet's
-  // preexisting balance remains excluded from strategy capital.
-  const gasCushion = await nativeCycleCushion(job)
-  return {
-    amount0: lower(currencies.currency0) === lower(zeroAddress)
-      ? funds.amount0 > gasCushion ? funds.amount0 - gasCushion : 0n : funds.amount0,
-    amount1: lower(currencies.currency1) === lower(zeroAddress)
-      ? funds.amount1 > gasCushion ? funds.amount1 - gasCushion : 0n : funds.amount1,
-  }
+  const { reserve } = await nativeCycleGasBudget(job)
+  return cycleSpendableAmounts({ ...currencies, baseline, current, nativeGasReserve: reserve })
 }
 
 async function receiptFor(job: FablesJob, stage: FablesJobStage): Promise<TransactionReceipt | undefined> {
@@ -105,21 +95,7 @@ async function precheck(job: FablesJob): Promise<void> {
     slippageBps: job.config.safeguards.maxSlippageBps })
   if (exitQuote.principal0 === 0n && exitQuote.principal1 === 0n)
     throw new Error('E_FABLES_EMPTY_PRINCIPAL')
-  const gasCushion = await nativeCycleCushion(job)
-  const native0 = lower(position.pool.key.currency0) === lower(zeroAddress)
-  const native1 = lower(position.pool.key.currency1) === lower(zeroAddress)
-  const spendable0 = native0 && exitQuote.principal0 > gasCushion
-    ? exitQuote.principal0 - gasCushion : native0 ? 0n : exitQuote.principal0
-  const spendable1 = native1 && exitQuote.principal1 > gasCushion
-    ? exitQuote.principal1 - gasCushion : native1 ? 0n : exitQuote.principal1
-  if (spendable0 === 0n && spendable1 === 0n) throw new Error('E_FABLES_TOO_SMALL')
-  if (spendable0 === 0n || spendable1 === 0n) {
-    const tokenIn = spendable0 > 0n ? position.pool.key.currency0 : position.pool.key.currency1
-    const tokenOut = spendable0 > 0n ? position.pool.key.currency1 : position.pool.key.currency0
-    await quoteFablesRoute(tokenIn, tokenOut, (spendable0 > 0n ? spendable0 : spendable1) / 4n || 1n)
-  }
-  if (completedFablesCyclesSince(job.strategyId, Math.floor(Date.now() / 1000) - 86_400)
-    >= job.config.safeguards.maxRebalancesPerDay) throw new Error('E_FABLES_DAILY_COUNT')
+  const { estimatedGas, reserve } = await nativeCycleGasBudget(job)
   const [latestNonce, pendingNonce, balance] = await Promise.all([
     publicClient.getTransactionCount({ address: job.config.owner, blockTag: 'latest' }),
     publicClient.getTransactionCount({ address: job.config.owner, blockTag: 'pending' }),
@@ -128,8 +104,19 @@ async function precheck(job: FablesJob): Promise<void> {
   if (latestNonce !== pendingNonce) throw new Error('E_FABLES_WALLET_PENDING_TX')
   const nativeBalance = lower(position.pool.key.currency0) === lower(zeroAddress)
     ? balance.amount0 : await publicClient.getBalance({ address: job.config.owner })
-  if (nativeBalance < gasCushion)
-    throw new Error('E_FABLES_GAS_RESERVE')
+  // The wallet must already cover an estimated cycle of gas plus its final
+  // reserve; then principal from this LP can be used without taking unrelated
+  // wallet capital. Post-receipt spending still checks the live balance.
+  if (nativeBalance < reserve + estimatedGas) throw new Error('E_FABLES_GAS_RESERVE')
+  const spendable0 = exitQuote.principal0
+  const spendable1 = exitQuote.principal1
+  if (spendable0 === 0n || spendable1 === 0n) {
+    const tokenIn = spendable0 > 0n ? position.pool.key.currency0 : position.pool.key.currency1
+    const tokenOut = spendable0 > 0n ? position.pool.key.currency1 : position.pool.key.currency0
+    await quoteFablesRoute(tokenIn, tokenOut, (spendable0 > 0n ? spendable0 : spendable1) / 4n || 1n)
+  }
+  if (completedFablesCyclesSince(job.strategyId, Math.floor(Date.now() / 1000) - 86_400)
+    >= job.config.safeguards.maxRebalancesPerDay) throw new Error('E_FABLES_DAILY_COUNT')
   setFablesJobProgress(job.id, { stage: 'exit', context: nextContext(job, {
     oldShares: position.shares.toString(), baseline: serializeAmounts(balance),
     currency0: position.pool.key.currency0, currency1: position.pool.key.currency1,

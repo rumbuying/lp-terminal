@@ -5,7 +5,7 @@ import { fablesHookAbi } from '../src/abi/fables'
 import { getSqrtRatioAtTick } from '../src/lib/clmath'
 import { fablesRangeId, type FablesPosition } from '../src/lib/fables'
 import type { FablesStrategyConfig } from '../shared/strategy/types'
-import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, fablesSwapImpactBps, fablesTargetValueBps,
+import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, cycleSpendableAmounts, fablesSwapImpactBps, fablesTargetValueBps,
   freshFablesRange, mintedFablesShares } from './fablesCycle'
 
 const hook = '0x06a889870c8f83640d6816319f72e2aa579b6080' as const
@@ -19,6 +19,22 @@ test('cycle spending excludes preexisting wallet assets and native gas loss', ()
   assert.throws(() => cycleOwnedAmounts({ currency0: zeroAddress, currency1: token,
     baseline: { amount0: 1_000n, amount1: 9_000n },
     current: { amount0: 900n, amount1: 8_900n } }), /BALANCE_FELL/)
+})
+
+test('native cycle proceeds are usable when existing wallet ETH already covers gas', () => {
+  const currencies = { currency0: zeroAddress, currency1: token }
+  assert.deepEqual(cycleSpendableAmounts({ ...currencies,
+    baseline: { amount0: 229n, amount1: 200n },
+    current: { amount0: 244n, amount1: 240n }, nativeGasReserve: 10n,
+  }), { amount0: 15n, amount1: 40n })
+  assert.deepEqual(cycleSpendableAmounts({ ...currencies,
+    baseline: { amount0: 8n, amount1: 200n },
+    current: { amount0: 15n, amount1: 240n }, nativeGasReserve: 10n,
+  }), { amount0: 5n, amount1: 40n })
+  assert.deepEqual(cycleSpendableAmounts({ ...currencies,
+    baseline: { amount0: 8n, amount1: 200n },
+    current: { amount0: 9n, amount1: 240n }, nativeGasReserve: 10n,
+  }), { amount0: 0n, amount1: 40n })
 })
 
 test('fee handling allocates only actual cycle-owned balances', () => {
