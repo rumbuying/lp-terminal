@@ -34,6 +34,7 @@ FABLES_FORK_RPC=http://127.0.0.1:8545 npx tsx scripts/fables-fork-smoke.ts
 
 - v2 份额策略配置、API 保存、只读越界监控和策略页预览已实现。D 阶段新增独立 Fables 作业表、交易哈希及已签名原始交易先落库、确认回执恢复、人工重播同一笔原始交易、手续费与本金账本、换币规划、原生 ETH 的 WETH 路由、持久化的旧区间到新区间状态机。签名前再次核对 pending nonce、池币种及仓位是否仍越界；退出后按实际钱包到账和 gas 核对最低到账。当前仅完成局部 fork 恢复演练，完整循环仍需通过。
 - 本地 fork 已证明：一次旧 hook 的退出交易成功，哈希先落库后即使等待确认超时仍可在重启后从同一哈希恢复到下一阶段；另一次约 200 USDG 的样本验证了转入份额后的退出报价。但公共 Robinhood RPC 的历史账户状态在 fork 固定块后不可稳定读取，后续一次签名交易在本地 Anvil 保持 pending，挖块请求超时。另试验了公开的 BlockReq 近期历史 RPC：固定块 `eth_getCode` 可读，但固定块 `eth_getProof` 被拒绝，同样不能用于 Anvil 挖块。按 [Robinhood Chain 连接文档](https://docs.robinhood.com/chain/connecting/) 需使用支持固定块 `eth_getProof` 的 archive RPC 完成验证；不能把当前不完整的 fork 记录视为交易闭环成功。
+- 追加验证：最新块 fork 能启动并返回区块高，但对其固定块 `0x464f084` 的 `eth_getProof` 返回 `-32000 historical state ... is not available`。完整循环脚本停在初始仓位读取，尚未发送交易；已停止本地 Anvil 和只读代理。此结果再次确认需要可固定块读取证明的 archive RPC。
 - `npm test`：1028 项，982 通过、46 跳过、0 失败；`CHAIN=robinhood npm run test:strategy`：160 项通过；`npm run typecheck` 和使用本地测试费率接收地址的 Robinhood 构建通过。Fables 作业、回执恢复、同笔交易重播、手续费与份额解析、存入支出上限的专项测试也通过。最新 D 改动后的完整 fork 与链上故障注入仍未验收。
 - 需要指定真实测试钱包、Fables 池和金额上限，并在明确授权的额度内完成两轮真实小额闭环与核账。
 - 通过上述验证后才允许在生产名单中开启具体池，并按部署流程发布、健康检查和清理旧 release。
