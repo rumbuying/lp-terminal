@@ -54,7 +54,8 @@ export type ExecutorFablesJob = {
   id: string; strategyId: string; state: string; stage: string
   errorCode?: string; createdAt: number; updatedAt: number; assetLocation: string
   oldRangeId: string; newRangeId?: string
-  transactions: { stage: string; state: string; hash: `0x${string}`; nonce: string; blockNumber?: string; errorCode?: string }[]
+  transactions: { ordinal: number; stage: string; state: string; hash: `0x${string}`; nonce: string;
+    canRebroadcast: boolean; blockNumber?: string; errorCode?: string }[]
 }
 export type ExecutorFablesPlan = {
   strategyId: string; observedBlock: string
@@ -271,6 +272,9 @@ export const executorFablesStrategies = (token: string) => request<{ strategies:
 export const executorFablesJobs = (token: string) => request<{ jobs: ExecutorFablesJob[] }>('/v1/fables/jobs', token)
 export const resumeExecutorFablesJob = (token: string, id: string) =>
   request<{ id: string; state: string; stage: string }>(`/v1/fables/jobs/${encodeURIComponent(id)}/resume`, token, { method: 'POST' })
+export const rebroadcastExecutorFablesTx = (token: string, id: string, ordinal: number) =>
+  request<{ id: string; ordinal: number; hash: `0x${string}` }>(
+    `/v1/fables/jobs/${encodeURIComponent(id)}/transactions/${ordinal}/rebroadcast`, token, { method: 'POST' })
 export const saveExecutorFablesStrategy = (token: string, config: FablesStrategyConfig) =>
   request<{ strategy: { id: string; revision: number } }>(`/v1/fables/strategies/${encodeURIComponent(config.id)}`,
     token, { method: 'PUT', body: JSON.stringify(config) })

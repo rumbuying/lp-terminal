@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { encodeAbiParameters, encodeEventTopics, zeroAddress } from 'viem'
 import { fablesHookAbi } from '../src/abi/fables'
-import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, fablesSwapImpactBps, mintedFablesShares } from './fablesCycle'
+import { getSqrtRatioAtTick } from '../src/lib/clmath'
+import { fablesRangeId, type FablesPosition } from '../src/lib/fables'
+import type { FablesStrategyConfig } from '../shared/strategy/types'
+import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, fablesSwapImpactBps,
+  freshFablesRange, mintedFablesShares } from './fablesCycle'
 
 const hook = '0x06a889870c8f83640d6816319f72e2aa579b6080' as const
 const owner = '0x0000000000000000000000000000000000000001' as const
@@ -49,4 +53,18 @@ test('new range shares come only from the deposit receipt mint', () => {
     data: encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [owner, 42n]) }] } as never
   assert.equal(mintedFablesShares(receipt, hook, owner, 7n), 42n)
   assert.equal(mintedFablesShares(receipt, hook, owner, 8n), 0n)
+})
+
+test('recenter uses the newest pool tick to choose a distinct share range', () => {
+  const config = { riskToken: zeroAddress, range: { lowerPct: 5, upperPct: 5 } } as unknown as FablesStrategyConfig
+  const base = { pool: { id: `0x${'11'.repeat(32)}`,
+    key: { currency0: zeroAddress, currency1: token, tickSpacing: 10 } } } as unknown as FablesPosition
+  const first = freshFablesRange(config, { ...base, tick: -197_000,
+    sqrtPriceX96: getSqrtRatioAtTick(-197_000) }, 18, 6)
+  const moved = freshFablesRange(config, { ...base, tick: -196_000,
+    sqrtPriceX96: getSqrtRatioAtTick(-196_000) }, 18, 6)
+  assert.notEqual(fablesRangeId(base.pool.id, first.tickLower, first.tickUpper),
+    fablesRangeId(base.pool.id, moved.tickLower, moved.tickUpper))
+  assert.ok(first.tickLower < -197_000 && first.tickUpper > -197_000)
+  assert.ok(moved.tickLower < -196_000 && moved.tickUpper > -196_000)
 })

@@ -8,7 +8,7 @@ import { FABLES_AUTO_POOL_IDS } from '../src/config/fables'
 import { readFablesPosition } from '../src/lib/fables'
 import { quoteFablesExit } from '../src/lib/fablesExitQuote'
 import { prepareFablesClaimCall, prepareFablesDepositCall, prepareFablesExitCall } from '../src/lib/fablesWrite'
-import { planBalanceSwap, targetUnits } from '../shared/strategy/rebalance'
+import { planBalanceSwap } from '../shared/strategy/rebalance'
 import { fablesRangeId } from '../src/lib/fables'
 import { quoteKyber, gatedKyberTx } from './kyber'
 import { publicClient, readAllowance, readTokenBalances } from './chain'
@@ -45,6 +45,11 @@ const savedAmounts = (value: unknown, name: string): FablesAmounts => {
   return { amount0: BigInt(row.amount0), amount1: BigInt(row.amount1) }
 }
 const serializeAmounts = (value: FablesAmounts): StoredAmounts => ({ amount0: value.amount0.toString(), amount1: value.amount1.toString() })
+const nativeCycleCushion = async (job: FablesJob) => {
+  const gas = await publicClient.getGasPrice() * 5_000_000n
+  const reserve = BigInt(job.config.safeguards.minNativeGasReserveWei)
+  return gas > reserve ? gas : reserve
+}
 
 async function walletAmounts(owner: Address, currency0: Address, currency1: Address): Promise<FablesAmounts> {
   const balances = await readTokenBalances(owner, [currency0, currency1])
@@ -58,7 +63,7 @@ async function spendableCycleAmounts(job: FablesJob, currencies: { currency0: Ad
     && lower(currencies.currency1) !== lower(zeroAddress)) return funds
   // Keep a conservative gas cushion inside this cycle's proceeds. The wallet's
   // preexisting balance remains excluded from strategy capital.
-  const gasCushion = await publicClient.getGasPrice() * 5_000_000n
+  const gasCushion = await nativeCycleCushion(job)
   return {
     amount0: lower(currencies.currency0) === lower(zeroAddress)
       ? funds.amount0 > gasCushion ? funds.amount0 - gasCushion : 0n : funds.amount0,
@@ -89,13 +94,17 @@ async function precheck(job: FablesJob): Promise<void> {
   ensureIdentity(job, position)
   if (position.shares <= 0n || position.staked !== 0n || position.claimPaused)
     throw new Error('E_FABLES_PRECHECK_POSITION')
+  const currencies = [position.pool.key.currency0, position.pool.key.currency1].map(lower)
+  if (!currencies.includes(lower(job.config.riskToken))
+    || !currencies.includes(lower(job.config.quoteToken)))
+    throw new Error('E_FABLES_TOKENS')
   if (position.inRange) throw new Error('E_FABLES_BACK_IN_RANGE')
   const exitQuote = await quoteFablesExit(publicClient, { owner: job.config.owner,
     hook: job.config.positionRef.hook, rangeId: BigInt(job.config.positionRef.rangeId),
     slippageBps: job.config.safeguards.maxSlippageBps })
   if (exitQuote.principal0 === 0n && exitQuote.principal1 === 0n)
     throw new Error('E_FABLES_EMPTY_PRINCIPAL')
-  const gasCushion = await publicClient.getGasPrice() * 5_000_000n
+  const gasCushion = await nativeCycleCushion(job)
   const native0 = lower(position.pool.key.currency0) === lower(zeroAddress)
   const native1 = lower(position.pool.key.currency1) === lower(zeroAddress)
   const spendable0 = native0 && exitQuote.principal0 > gasCushion
@@ -116,7 +125,9 @@ async function precheck(job: FablesJob): Promise<void> {
     walletAmounts(job.config.owner, position.pool.key.currency0, position.pool.key.currency1),
   ])
   if (latestNonce !== pendingNonce) throw new Error('E_FABLES_WALLET_PENDING_TX')
-  if (position.pool.key.currency0 === zeroAddress && balance.amount0 < BigInt(job.config.safeguards.minNativeGasReserveWei))
+  const nativeBalance = lower(position.pool.key.currency0) === lower(zeroAddress)
+    ? balance.amount0 : await publicClient.getBalance({ address: job.config.owner })
+  if (nativeBalance < BigInt(job.config.safeguards.minNativeGasReserveWei))
     throw new Error('E_FABLES_GAS_RESERVE')
   setFablesJobProgress(job.id, { stage: 'exit', context: nextContext(job, {
     oldShares: position.shares.toString(), baseline: serializeAmounts(balance),
@@ -132,11 +143,15 @@ async function exitOldRange(job: FablesJob, privateKey: Hex): Promise<void> {
       owner: job.config.owner, hook: job.config.positionRef.hook,
       rangeId: BigInt(job.config.positionRef.rangeId),
       expectedShares: BigInt(String(job.context.oldShares)),
+      requireOutOfRange: true,
       slippageBps: job.config.safeguards.maxSlippageBps,
       maxClaimFeeBps: job.config.safeguards.maxClaimFeeBps,
       lifetimeSeconds: job.config.safeguards.maxPlanAgeSeconds,
       allowLegacyUnboundedFeeExit: job.config.safeguards.allowLegacyUnboundedFeeExit,
     })
+    setFablesJobProgress(job.id, { context: nextContext(job, { exitMinimum: serializeAmounts({
+      amount0: call.amount0Min, amount1: call.amount1Min,
+    }) }) })
     await sendFablesTracked({ job, stage: 'exit', ordinal: nextOrdinal(job), privateKey,
       tx: { to: call.to, data: call.data, value: call.value } })
   }
@@ -146,6 +161,19 @@ async function exitOldRange(job: FablesJob, privateKey: Hex): Promise<void> {
   })
   ensureIdentity(job, position)
   if (position.shares !== 0n) throw new Error('E_FABLES_EXIT_NOT_COMPLETE')
+  const minimum = savedAmounts(fablesJobById(job.id)!.context.exitMinimum, 'EXIT_MINIMUM')
+  const baseline = savedAmounts(job.context.baseline, 'BASELINE')
+  const current = await walletAmounts(job.config.owner,
+    position.pool.key.currency0, position.pool.key.currency1)
+  const exitReceipt = await receiptFor(job, 'exit')
+  if (!exitReceipt) throw new Error('E_FABLES_EXIT_RECEIPT_MISSING')
+  const gas = exitReceipt.gasUsed * exitReceipt.effectiveGasPrice
+  const paid0 = current.amount0 - baseline.amount0
+    + (lower(position.pool.key.currency0) === lower(zeroAddress) ? gas : 0n)
+  const paid1 = current.amount1 - baseline.amount1
+    + (lower(position.pool.key.currency1) === lower(zeroAddress) ? gas : 0n)
+  if (paid0 < minimum.amount0 || paid1 < minimum.amount1)
+    throw new Error('E_FABLES_EXIT_UNDERPAID')
   setFablesJobProgress(job.id, { stage: 'claim' })
 }
 

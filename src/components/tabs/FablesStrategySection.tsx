@@ -5,7 +5,7 @@ import { robinhoodConfig } from '../../config/chains/robinhood'
 import { FABLES_AUTO_POOL_IDS } from '../../config/fables'
 import { useFablesPositions } from '../../hooks/useFablesPositions'
 import { executorFablesJobs, executorFablesStrategies, executorWallets,
-  planExecutorFablesStrategy, resumeExecutorFablesJob, saveExecutorFablesStrategy,
+  planExecutorFablesStrategy, rebroadcastExecutorFablesTx, resumeExecutorFablesJob, saveExecutorFablesStrategy,
   type ExecutorFablesJob, type ExecutorFablesPlan, type ExecutorFablesStrategy,
   type ExecutorWallet } from '../../lib/executorClient'
 import { shortAddr } from '../../lib/format'
@@ -120,6 +120,12 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setBusy(false) }
   }
+  const rebroadcast = async (id: string, ordinal: number) => {
+    setBusy(true); setError(null)
+    try { await rebroadcastExecutorFablesTx(accessToken, id, ordinal); await refresh() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setBusy(false) }
+  }
 
   return <section className="card" style={{ marginTop: 18 }}>
     <div className="section-title">Fables LP 策略</div>
@@ -146,6 +152,8 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
           {job.errorCode && <span className="red"> · {job.errorCode}</span>}
           {job.transactions.map(tx => <div key={tx.hash}>
             {tx.stage} {tx.state} · {tx.hash}
+            {canManage && job.state === 'recovery' && tx.canRebroadcast
+              && <button disabled={busy} onClick={() => void rebroadcast(job.id, tx.ordinal)}>重播同一笔已签名交易</button>}
           </div>)}
           {canManage && job.state === 'recovery'
             && job.transactions.every(tx => tx.state !== 'sending' && tx.state !== 'sent')

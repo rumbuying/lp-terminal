@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { Address, Hex } from 'viem'
+import { keccak256, type Address, type Hex } from 'viem'
 import type { FablesPositionRef, FablesStrategyConfig } from '../shared/strategy/types'
 import { parseFablesStrategyConfig } from '../shared/strategy/fablesSchema'
 import { db, walletById } from './store'
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS fables_job_transactions (
   tx_hash TEXT NOT NULL UNIQUE,
   tx_to TEXT NOT NULL,
   calldata_hash TEXT NOT NULL,
+  signed_tx TEXT,
   block_number TEXT,
   gas_used TEXT,
   gas_price TEXT,
@@ -65,6 +66,9 @@ CREATE TABLE IF NOT EXISTS fables_turnover_reservations (
   PRIMARY KEY(job_id,ordinal)
 );
 `)
+if (!(db.prepare('PRAGMA table_info(fables_job_transactions)').all() as { name: string }[])
+  .some(column => column.name === 'signed_tx'))
+  db.exec('ALTER TABLE fables_job_transactions ADD COLUMN signed_tx TEXT')
 
 export type FablesJobStage = 'precheck' | 'exit' | 'claim' | 'balance'
   | 'fee_conversion_approval' | 'fee_conversion'
@@ -78,7 +82,7 @@ export type FablesJob = {
 }
 export type FablesJobTx = {
   jobId: string; ordinal: number; stage: FablesJobStage; state: 'sending' | 'sent' | 'confirmed' | 'failed' | 'reviewed'
-  nonce: bigint; hash: Hex; to: Address; calldataHash: Hex
+  nonce: bigint; hash: Hex; to: Address; calldataHash: Hex; signedTx?: Hex
   blockNumber?: bigint; gasUsed?: bigint; gasPrice?: bigint; errorCode?: string
 }
 const now = () => Math.floor(Date.now() / 1000)
@@ -178,6 +182,7 @@ export function fablesJobTransactions(id: string): FablesJobTx[] {
     state: row.state as FablesJobTx['state'], nonce: BigInt(String(row.nonce)),
     hash: String(row.tx_hash) as Hex, to: String(row.tx_to) as Address,
     calldataHash: String(row.calldata_hash) as Hex,
+    signedTx: row.signed_tx == null ? undefined : String(row.signed_tx) as Hex,
     blockNumber: row.block_number === null ? undefined : BigInt(String(row.block_number)),
     gasUsed: row.gas_used === null ? undefined : BigInt(String(row.gas_used)),
     gasPrice: row.gas_price === null ? undefined : BigInt(String(row.gas_price)),
@@ -189,14 +194,16 @@ export function fablesJobTransactions(id: string): FablesJobTx[] {
 export function recordFablesTxIntent(tx: Omit<FablesJobTx, 'state' | 'blockNumber' | 'gasUsed' | 'gasPrice' | 'errorCode'>): void {
   const job = fablesJobById(tx.jobId)
   if (!job || !['running','recovery'].includes(job.state)) throw new Error('E_FABLES_JOB_NOT_RUNNING')
+  if (tx.signedTx && keccak256(tx.signedTx).toLowerCase() !== tx.hash.toLowerCase())
+    throw new Error('E_FABLES_SIGNED_HASH_MISMATCH')
   const existing = fablesJobTransactions(tx.jobId)
   if (existing.some(row => row.ordinal === tx.ordinal || (row.stage === tx.stage && ['sending','sent'].includes(row.state))))
     throw new Error('E_FABLES_TX_ALREADY_SENT')
   db.prepare(`INSERT INTO fables_job_transactions
-    (job_id,ordinal,stage,state,nonce,tx_hash,tx_to,calldata_hash,created_at,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(
+    (job_id,ordinal,stage,state,nonce,tx_hash,tx_to,calldata_hash,signed_tx,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
     tx.jobId, tx.ordinal, tx.stage, 'sending', tx.nonce.toString(), tx.hash,
-    tx.to, tx.calldataHash, now(), now(),
+    tx.to, tx.calldataHash, tx.signedTx ?? null, now(), now(),
   )
 }
 

@@ -76,11 +76,13 @@ export async function prepareFablesExitCall(client: PublicClient, args: {
   maxClaimFeeBps: number
   lifetimeSeconds: number
   expectedShares?: bigint
+  requireOutOfRange?: boolean
   /** Legacy hooks have no on-chain fee bound on withdraw; require explicit consent. */
   allowLegacyUnboundedFeeExit?: boolean
-}): Promise<FablesCall> {
+}): Promise<FablesCall & { amount0Min: bigint; amount1Min: bigint }> {
   const quote = await quoteFablesExit(client, args)
   const position = quote.position
+  if (args.requireOutOfRange && position.inRange) throw new Error('E_FABLES_BACK_IN_RANGE')
   if (args.expectedShares !== undefined && position.shares !== args.expectedShares)
     throw new Error('E_FABLES_SHARES_CHANGED')
   autoPool(position.pool)
@@ -102,6 +104,7 @@ export async function prepareFablesExitCall(client: PublicClient, args: {
   return {
     to: position.pool.key.hooks, data, value: 0n, method: quote.exitMethod,
     poolId: position.pool.id, rangeId: position.rangeId, observedBlock: position.observedBlock,
+    amount0Min: quote.amount0Min, amount1Min: quote.amount1Min,
   }
 }
 

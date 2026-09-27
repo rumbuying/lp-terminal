@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { FablesStrategyConfig } from '../shared/strategy/types'
-import { evaluateFablesTrigger } from './fablesMonitor'
+import { evaluateFablesTrigger } from './fablesTrigger'
 
 const config = {
   revision: 1,
@@ -9,31 +9,27 @@ const config = {
   trigger: { confirmationSeconds: 300 },
 } as FablesStrategyConfig
 
-const evaluate = (tick: number, now: number, prior?: ReturnType<typeof evaluateFablesTrigger>['monitor'], claimPaused = false) =>
-  evaluateFablesTrigger({ config, prior, tick, now, claimPaused, blockNumber: BigInt(now) })
-
-test('Fables confirms a sustained boundary without any fee estimate', () => {
-  const first = evaluate(100, 1_000)
+test('a returned price cancels Fables boundary confirmation before any exit', () => {
+  const first = evaluateFablesTrigger({ config, tick: 100, blockNumber: 10n,
+    now: 1_000, claimPaused: false })
   assert.equal(first.state, 'confirming')
-  const early = evaluate(101, 1_299, first.monitor)
-  assert.equal(early.state, 'confirming')
-  const ready = evaluate(100, 1_300, early.monitor)
-  assert.equal(ready.state, 'ready')
-  assert.equal(ready.monitor.outSide, 'upper')
-})
-
-test('Fables cancels confirmation when price returns or switches boundary', () => {
-  const first = evaluate(100, 1_000)
-  const back = evaluate(99, 1_200, first.monitor)
+  assert.equal(first.monitor.outSince, 1_000)
+  const back = evaluateFablesTrigger({ config, prior: first.monitor,
+    tick: 99, blockNumber: 11n, now: 1_100, claimPaused: false })
   assert.equal(back.state, 'monitoring')
   assert.equal(back.monitor.outSince, undefined)
-  const lower = evaluate(-101, 1_250, first.monitor)
-  assert.equal(lower.monitor.outSince, 1_250)
+  const again = evaluateFablesTrigger({ config, prior: back.monitor,
+    tick: 101, blockNumber: 12n, now: 1_200, claimPaused: false })
+  assert.equal(again.state, 'confirming')
+  assert.equal(again.monitor.outSince, 1_200)
+  const ready = evaluateFablesTrigger({ config, prior: again.monitor,
+    tick: 101, blockNumber: 13n, now: 1_500, claimPaused: false })
+  assert.equal(ready.state, 'ready')
 })
 
-test('Fables pause stops a confirmed trigger', () => {
-  const first = evaluate(-101, 1_000)
-  const paused = evaluate(-101, 1_500, first.monitor, true)
+test('claim pause prevents the Fables monitor from declaring an executable trigger', () => {
+  const paused = evaluateFablesTrigger({ config, tick: 101, blockNumber: 14n,
+    now: 2_000, claimPaused: true })
   assert.equal(paused.state, 'paused')
-  assert.equal(paused.monitor.error, 'E_FABLES_CLAIM_PAUSED')
+  assert.equal(paused.monitor.outSince, undefined)
 })

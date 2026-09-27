@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { zeroAddress } from 'viem'
+import { keccak256, zeroAddress, type Hex } from 'viem'
 import { FABLES_AUTO_POOL_IDS } from '../src/config/fables'
 import { fablesRangeId } from '../src/lib/fables'
 
@@ -14,7 +14,7 @@ const { upsertFablesStrategy, updateFablesMonitorState } = await import('./fable
 const { activeFablesJobs, createFablesJob, fablesJobTransactions, quarantineInterruptedFablesJobs,
   recordFablesTxIntent, resumeFablesJob, setFablesJobProgress, updateFablesTx,
   fablesJobById } = await import('./fablesJobs')
-const { reconcileFablesTransactions } = await import('./fablesRecovery')
+const { reconcileFablesTransactions, rebroadcastFablesTransaction } = await import('./fablesRecovery')
 
 const owner = '0x0000000000000000000000000000000000000001' as const
 const token = '0x0000000000000000000000000000000000000002' as const
@@ -81,14 +81,40 @@ test('Fables recovery resolves the stored hash once without resending', async ()
     getBlockNumber: async () => 13n } as never)).confirmed, 0)
 })
 
-test('manual resume refuses unknown broadcasts and records a reviewed reverted receipt', () => {
+test('manual recovery rebroadcasts only original signed bytes before resume', async () => {
   const job = activeFablesJobs()[0]
-  const hash = `0x${'12'.repeat(32)}` as const
+  const signedTx = '0x1234' as const
+  const hash = keccak256(signedTx)
+  assert.throws(() => recordFablesTxIntent({ jobId: job.id, ordinal: 1, stage: 'claim', nonce: 8n,
+    hash: `0x${'12'.repeat(32)}`, to: hook, calldataHash: `0x${'34'.repeat(32)}`,
+    signedTx }), /SIGNED_HASH_MISMATCH/)
   recordFablesTxIntent({ jobId: job.id, ordinal: 1, stage: 'claim', nonce: 8n,
-    hash, to: hook, calldataHash: `0x${'34'.repeat(32)}` })
+    hash, to: hook, calldataHash: `0x${'34'.repeat(32)}`, signedTx })
+  assert.equal(fablesJobTransactions(job.id)[1].signedTx, signedTx)
+  await assert.rejects(rebroadcastFablesTransaction(job.id, 1, {
+    getChainId: async () => 4663,
+    sendRawTransaction: async () => { throw new Error('temporary network failure') },
+  } as never), /temporary network failure/)
+  assert.equal(fablesJobTransactions(job.id)[1].state, 'sending')
+  let broadcasts = 0
+  const returned = await rebroadcastFablesTransaction(job.id, 1, {
+    getChainId: async () => 4663,
+    sendRawTransaction: async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
+      assert.equal(serializedTransaction, signedTx)
+      broadcasts += 1
+      return hash
+    },
+  } as never)
+  assert.equal(returned, hash)
+  assert.equal(broadcasts, 1)
+  assert.equal(fablesJobTransactions(job.id)[1].state, 'sent')
   assert.throws(() => resumeFablesJob(job.id), /TX_UNRESOLVED/)
   updateFablesTx(job.id, 1, { state: 'failed', blockNumber: 14n,
     gasUsed: 100n, gasPrice: 2n, errorCode: 'E_FABLES_TX_REVERTED' })
+  await assert.rejects(rebroadcastFablesTransaction(job.id, 1, {
+    getChainId: async () => 4663,
+    sendRawTransaction: async () => { throw new Error('must not broadcast') },
+  } as never), /TX_NOT_UNRESOLVED/)
   const resumed = resumeFablesJob(job.id)
   assert.equal(resumed.state, 'running')
   assert.equal(fablesJobTransactions(job.id)[1].state, 'reviewed')

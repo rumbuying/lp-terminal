@@ -29,7 +29,11 @@ export async function sendFablesTracked(args: {
     throw new Error('E_FABLES_OWNER')
   if (await publicClient.getChainId() !== 4663 || EXECUTOR.chainId !== 4663)
     throw new Error('E_FABLES_CHAIN')
-  const nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' })
+  const [nonce, pendingNonce] = await Promise.all([
+    publicClient.getTransactionCount({ address: account.address, blockTag: 'latest' }),
+    publicClient.getTransactionCount({ address: account.address, blockTag: 'pending' }),
+  ])
+  if (nonce !== pendingNonce) throw new Error('E_FABLES_WALLET_PENDING_TX')
   const estimatedGas = await publicClient.estimateGas({
     account: account.address, to: tx.to, data: tx.data, value: tx.value ?? 0n,
   })
@@ -49,14 +53,14 @@ export async function sendFablesTracked(args: {
   })
   const hash = keccak256(serialized)
   recordFablesTxIntent({ jobId: job.id, ordinal, stage, nonce: BigInt(nonce),
-    hash, to: tx.to, calldataHash: keccak256(tx.data) })
+    hash, to: tx.to, calldataHash: keccak256(tx.data), signedTx: serialized })
   try {
     const returned = await broadcastClient.sendRawTransaction({ serializedTransaction: serialized })
     if (returned.toLowerCase() !== hash.toLowerCase()) throw new Error('E_FABLES_BROADCAST_HASH')
     updateFablesTx(job.id, ordinal, { state: 'sent' })
   } catch (error) {
     // The network may have accepted the exact signed payload before its HTTP
-    // response was lost. Recovery checks this durable hash and never resends.
+    // response was lost. Recovery permits only a manual rebroadcast of these exact bytes.
     setFablesJobProgress(job.id, { state: 'recovery', errorCode: 'E_FABLES_BROADCAST_UNKNOWN' })
     throw error
   }

@@ -27,6 +27,7 @@ import { fablesMonitorState, fablesStrategyById, fablesWalletInUse, listFablesSt
 import { readFablesPosition } from '../src/lib/fables'
 import { planFablesRebalance } from './fablesPlan'
 import { fablesJobById, fablesJobTransactions, recentFablesJobs, recentFablesLedger, resumeFablesJob } from './fablesJobs'
+import { rebroadcastFablesTransaction } from './fablesRecovery'
 
 const JSONH = {
   'content-type': 'application/json; charset=utf-8',
@@ -326,9 +327,22 @@ export function startApi() {
           oldRangeId: job.config.positionRef.rangeId,
           newRangeId: (job.context.newRef as { rangeId?: string } | undefined)?.rangeId,
           transactions: fablesJobTransactions(job.id).map(tx => ({ stage: tx.stage,
-            state: tx.state, hash: tx.hash, nonce: tx.nonce.toString(),
+            ordinal: tx.ordinal, state: tx.state, hash: tx.hash, nonce: tx.nonce.toString(),
+            canRebroadcast: Boolean(tx.signedTx) && (tx.state === 'sending' || tx.state === 'sent'),
             blockNumber: tx.blockNumber?.toString(), errorCode: tx.errorCode })),
         })) })
+        return
+      }
+      if (req.method === 'POST' && /^\/v1\/fables\/jobs\/[^/]+\/transactions\/\d+\/rebroadcast$/.test(url.pathname)) {
+        const match = /^\/v1\/fables\/jobs\/([^/]+)\/transactions\/(\d+)\/rebroadcast$/.exec(url.pathname)!
+        const id = decodeURIComponent(match[1])
+        const current = fablesJobById(id)
+        if (!current || !ownedBy(auth, current.config.owner)) return json(res, 404, { error: 'Fables job not found' })
+        const ordinal = Number(match[2])
+        if (!Number.isSafeInteger(ordinal)) throw new Error('E_FABLES_TX_ORDINAL')
+        const hash = await rebroadcastFablesTransaction(id, ordinal)
+        audit('api', 'fables_tx_rebroadcast', 'job', id, { ordinal, hash })
+        json(res, 200, { id, ordinal, hash })
         return
       }
       if (req.method === 'POST' && /^\/v1\/fables\/jobs\/[^/]+\/resume$/.test(url.pathname)) {
