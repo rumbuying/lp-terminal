@@ -10,6 +10,7 @@
 - 生产 `newlp.coinfetcher.xyz` 已发布网页及两链 indexer（release `20260927T121419Z`），以及两链 executor（release `20260927T122800Z`）。执行器发布前确认 Robinhood/BSC 无运行中或待恢复旧作业，数据库 `quick_check=ok`，并作在线数据库备份。发布后两个 executor 的 `ok/vaultReady/signerReady/apiAuthReady` 均为 true，均未暂停；Robinhood 钱包列表已有上述仓位所有者地址。两个 indexer 和五项公网健康检查通过。
 - Robinhood Fables 事件索引已从创世回填至最新块，生产 API 对上述钱包返回 `ready=true`、3 个候选，并包含目标 `rangeId=539370627915511154826653668589983232122555185378305681796357519476144749006`。网页可从索引发现并再读链上状态；执行器具备 Fables 只读策略接口。`FABLES_AUTO_POOL_IDS` 仍为空，未创建 Fables 自动策略，未向主网发送 Fables 资金交易。
 - 两次发布均先完成健康检查再运行 `deploy/prune-releases.sh` 的 dry-run 和 `--apply`；三个 release 根目录最终各留最新 3 个版本。三个活动软链、五个服务、`df -h /` 与 `df -i /` 已复核。
+- 真实生产钱包同时管理 3 条已启用的 UP33/Uniswap 自动策略。原 Fables 作业创建器会因为同钱包存在任一启用策略而拒绝该钱包，即使没有运行中的作业，无法服务这笔现有仓位。现改为仅在该钱包存在任一协议的未完成作业时互斥；普通作业创建器对 Fables 作业返回“忙”并稍后重试，Fables runner 与普通 runner 共用进程内钱包签名锁。Fables 越界确认在等待旧作业完成时保留确认结果，不误标为链上读取失败。测试覆盖共享钱包无作业、两种方向的作业互斥与原有恢复行为；完整 fork 和实盘并发验收仍未完成。
 
 ## 合约与读取
 

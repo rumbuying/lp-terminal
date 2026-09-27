@@ -23,6 +23,7 @@ import { fablesRecoveryRequiresReview, reconcileFablesTransactions } from './fab
 import { sendFablesTracked, type FablesSafeTx } from './fablesSigner'
 import { audit, executorPaused } from './store'
 import { unlockPrivateKey } from './vault'
+import { walletBusy, withWalletLock } from './wallet-lock'
 
 const lower = (address: string) => address.toLowerCase()
 const routeCurrency = (address: Address) => lower(address) === lower(zeroAddress) ? ADDR.WNATIVE : address
@@ -657,47 +658,53 @@ export async function runFablesOnce(): Promise<void> {
   running = true
   try {
     for (const item of activeFablesJobs()) {
-      try {
-        const recovery = await reconcileFablesTransactions(item)
-        if (recovery.unresolved) continue
-        if (fablesJobTransactions(item.id).some(tx => tx.state === 'failed')) {
-          setFablesJobProgress(item.id, { state: 'recovery', errorCode: 'E_FABLES_TX_REVERTED_REVIEW' })
-          continue
-        }
-        if (item.state === 'recovery' && fablesRecoveryRequiresReview(item.errorCode)) continue
-        if (item.state !== 'running') setFablesJobProgress(item.id, { state: 'running', errorCode: null })
-        const unlocked = unlockPrivateKey(item.walletId)
-        for (let step = 0; step < 10; step += 1) {
+      // Share the same signer lock as ordinary LP jobs. The database prevents
+      // a new ordinary job while this Fables job is open; the process lock
+      // also covers the tail of an already completing ordinary job.
+      if (walletBusy(item.walletId)) continue
+      await withWalletLock(item.walletId, async () => {
+        try {
+          const recovery = await reconcileFablesTransactions(item)
+          if (recovery.unresolved) return
+          if (fablesJobTransactions(item.id).some(tx => tx.state === 'failed')) {
+            setFablesJobProgress(item.id, { state: 'recovery', errorCode: 'E_FABLES_TX_REVERTED_REVIEW' })
+            return
+          }
+          if (item.state === 'recovery' && fablesRecoveryRequiresReview(item.errorCode)) return
+          if (item.state !== 'running') setFablesJobProgress(item.id, { state: 'running', errorCode: null })
+          const unlocked = unlockPrivateKey(item.walletId)
+          for (let step = 0; step < 10; step += 1) {
+            const job = fablesJobById(item.id)
+            if (!job || job.state !== 'running') break
+            if (job.stage === 'precheck') await precheck(job)
+            else if (job.stage === 'exit') await exitOldRange(job, unlocked.privateKey)
+            else if (job.stage === 'claim') await claimOldFees(job, unlocked.privateKey)
+            else if (job.stage === 'balance') await balanceAndPlan(job)
+            else if (job.stage === 'fee_conversion_approval') await approveSwap(job, unlocked.privateKey, 'fee')
+            else if (job.stage === 'fee_conversion') await executeSwap(job, unlocked.privateKey, 'fee')
+            else if (job.stage === 'swap_approval') await approveSwap(job, unlocked.privateKey, 'lp')
+            else if (job.stage === 'swap') await executeSwap(job, unlocked.privateKey, 'lp')
+            else if (job.stage === 'deposit_approval') await approveDeposit(job, unlocked.privateKey)
+            else if (job.stage === 'deposit') await executeDeposit(job, unlocked.privateKey)
+            else if (job.stage === 'verify') { await verifyAndComplete(job); break }
+            else break
+          }
+        } catch (error) {
           const job = fablesJobById(item.id)
-          if (!job || job.state !== 'running') break
-          if (job.stage === 'precheck') await precheck(job)
-          else if (job.stage === 'exit') await exitOldRange(job, unlocked.privateKey)
-          else if (job.stage === 'claim') await claimOldFees(job, unlocked.privateKey)
-          else if (job.stage === 'balance') await balanceAndPlan(job)
-          else if (job.stage === 'fee_conversion_approval') await approveSwap(job, unlocked.privateKey, 'fee')
-          else if (job.stage === 'fee_conversion') await executeSwap(job, unlocked.privateKey, 'fee')
-          else if (job.stage === 'swap_approval') await approveSwap(job, unlocked.privateKey, 'lp')
-          else if (job.stage === 'swap') await executeSwap(job, unlocked.privateKey, 'lp')
-          else if (job.stage === 'deposit_approval') await approveDeposit(job, unlocked.privateKey)
-          else if (job.stage === 'deposit') await executeDeposit(job, unlocked.privateKey)
-          else if (job.stage === 'verify') { await verifyAndComplete(job); break }
-          else break
+          const code = error instanceof Error ? error.message.slice(0, 160) : 'E_FABLES_RUNNER'
+          let cancelled = false
+          if (job && ['planned','running','recovery'].includes(job.state)) {
+            try {
+              if (job.stage === 'precheck' && code === 'E_FABLES_BACK_IN_RANGE') {
+                cancelFablesJobBackInRange(job.id)
+                cancelled = true
+              } else if (job.stage === 'precheck') failFablesJobBeforeMutation(job.id, code)
+              else setFablesJobProgress(job.id, { state: 'recovery', errorCode: code })
+            } catch { setFablesJobProgress(job.id, { state: 'recovery', errorCode: code }) }
+          }
+          audit('fables_runner', cancelled ? 'job_cancelled' : 'job_attention', 'job', item.id, { code })
         }
-      } catch (error) {
-        const job = fablesJobById(item.id)
-        const code = error instanceof Error ? error.message.slice(0, 160) : 'E_FABLES_RUNNER'
-        let cancelled = false
-        if (job && ['planned','running','recovery'].includes(job.state)) {
-          try {
-            if (job.stage === 'precheck' && code === 'E_FABLES_BACK_IN_RANGE') {
-              cancelFablesJobBackInRange(job.id)
-              cancelled = true
-            } else if (job.stage === 'precheck') failFablesJobBeforeMutation(job.id, code)
-            else setFablesJobProgress(job.id, { state: 'recovery', errorCode: code })
-          } catch { setFablesJobProgress(job.id, { state: 'recovery', errorCode: code }) }
-        }
-        audit('fables_runner', cancelled ? 'job_cancelled' : 'job_attention', 'job', item.id, { code })
-      }
+      })
     }
   } finally { running = false }
 }

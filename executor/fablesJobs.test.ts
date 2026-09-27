@@ -9,7 +9,7 @@ import { fablesRangeId } from '../src/lib/fables'
 
 const directory = mkdtempSync(join(tmpdir(), 'fables-jobs-'))
 process.env.LP_EXECUTOR_DATA_DIR = directory
-const { addWallet, db } = await import('./store')
+const { addWallet, createPlannedJob, createProfitWithdrawalJob, db } = await import('./store')
 const { fablesMonitorState, fablesStrategyById, upsertFablesStrategy, updateFablesMonitorState } = await import('./fablesStore')
 const { activeFablesJobs, cancelFablesJobBackInRange, createFablesJob, fablesJobTransactions, quarantineInterruptedFablesJobs,
   markFablesTurnover, recordFablesTxIntent, reserveFablesTurnover,
@@ -47,7 +47,19 @@ test('Fables job persists a signed hash before broadcast and quarantines interru
   upsertFablesStrategy(config)
   updateFablesMonitorState(config.id, { revision: 1, outSide: 'upper', outSince: at - 300,
     lastTick: 101, lastBlock: '1' }, 'dry_run_ready')
+  // The production wallet can host other enabled strategies. Only an open
+  // signer job, in either protocol, must prevent this Fables cycle.
+  db.prepare(`INSERT INTO strategies(id,wallet_id,config_json,state,updated_at)
+    VALUES(?,?,?,?,?)`).run('legacy-same-wallet', 'fables-wallet', '{}', 'monitoring', at)
+  const oldPlan = { id: 'legacy-open', strategyId: 'legacy-same-wallet', steps: [] }
+  assert.equal(createPlannedJob(oldPlan as never), true)
+  assert.throws(() => createFablesJob(config), /E_FABLES_WALLET_BUSY/)
+  db.prepare('DELETE FROM jobs WHERE id=?').run(oldPlan.id)
   const job = createFablesJob(config)
+  assert.equal(createPlannedJob({ ...oldPlan, id: 'legacy-blocked' } as never), false)
+  assert.equal(createProfitWithdrawalJob({ id: 'legacy-withdrawal-blocked',
+    strategyId: oldPlan.strategyId, target: 'ETH', steps: [] }), false)
+  db.prepare('DELETE FROM strategies WHERE id=?').run(oldPlan.strategyId)
   setFablesJobProgress(job.id, { state: 'running', stage: 'exit' })
   const hash = `0x${'ab'.repeat(32)}` as const
   recordFablesTxIntent({ jobId: job.id, ordinal: 0, stage: 'exit', nonce: 7n,

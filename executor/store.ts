@@ -676,7 +676,8 @@ export function createPlannedJob(plan: StrategyExecutionPlan): boolean {
     return true
   } catch (error: any) {
     const message = String(error?.message)
-    if (message.includes('UNIQUE constraint failed') || message.includes('E_WALLET_RECOVERY')) return false
+    if (message.includes('UNIQUE constraint failed') || message.includes('E_WALLET_RECOVERY')
+      || message.includes('E_WALLET_FABLES_JOB')) return false
     throw error
   }
 }
@@ -718,7 +719,8 @@ export function createProfitWithdrawalJob(args: {
     return true
   } catch (error: any) {
     const message = String(error?.message)
-    if (message.includes('UNIQUE constraint failed') || message.includes('E_WALLET_RECOVERY')) return false
+    if (message.includes('UNIQUE constraint failed') || message.includes('E_WALLET_RECOVERY')
+      || message.includes('E_WALLET_FABLES_JOB')) return false
     throw error
   }
 }

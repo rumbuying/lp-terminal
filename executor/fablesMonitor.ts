@@ -38,8 +38,18 @@ export async function monitorFablesOnce(options: { ignoreSchedule?: boolean } = 
         if (decision.state === 'ready' && previousState !== strategyState) audit('fables_monitor', 'boundary_confirmed', 'strategy', config.id, {
           side: decision.monitor.outSide, tick: position.tick, blockNumber: position.observedBlock.toString(),
         })
-        if (decision.state === 'ready' && config.execution.mode === 'executor_auto' && !config.execution.dryRun)
-          createFablesJob(config)
+        if (decision.state === 'ready' && config.execution.mode === 'executor_auto' && !config.execution.dryRun) {
+          try { createFablesJob(config) }
+          catch (error) {
+            if (error instanceof Error && error.message === 'E_FABLES_WALLET_BUSY') {
+              updateFablesMonitorState(config.id, {
+                ...decision.monitor, error: 'E_FABLES_WALLET_BUSY',
+              }, 'dry_run_ready')
+              continue
+            }
+            throw error
+          }
+        }
       } catch (error) {
         const code = error instanceof Error ? error.message.slice(0, 160) : 'E_FABLES_READ'
         // A failed read breaks the consecutive confirmation interval.
