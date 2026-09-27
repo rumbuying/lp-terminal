@@ -5,6 +5,7 @@ import { publicClient } from './chain'
 import { EXECUTOR } from './config'
 import { fablesMonitorState, listFablesStrategies, updateFablesMonitorState, type FablesMonitorState } from './fablesStore'
 import { audit, executorPaused } from './store'
+import { createFablesJob } from './fablesJobs'
 
 export type FablesTriggerEvaluation = {
   state: 'monitoring' | 'confirming' | 'ready' | 'paused'
@@ -45,7 +46,8 @@ export async function monitorFablesOnce(options: { ignoreSchedule?: boolean } = 
   running = true
   try {
     const nowMs = Date.now()
-    for (const { config, state: previousState } of listFablesStrategies().filter(row => row.config.enabled)) {
+    for (const { config, state: previousState } of listFablesStrategies().filter(row =>
+      row.config.enabled && ['monitoring','confirming','paused','read_error','awaiting_manual','dry_run_ready'].includes(row.state))) {
       if (!options.ignoreSchedule && nowMs < (nextAt.get(config.id) ?? 0)) continue
       nextAt.set(config.id, nowMs + Math.max(config.trigger.pollSeconds, EXECUTOR.monitorMinSeconds) * 1000)
       try {
@@ -67,6 +69,8 @@ export async function monitorFablesOnce(options: { ignoreSchedule?: boolean } = 
         if (decision.state === 'ready' && previousState !== strategyState) audit('fables_monitor', 'boundary_confirmed', 'strategy', config.id, {
           side: decision.monitor.outSide, tick: position.tick, blockNumber: position.observedBlock.toString(),
         })
+        if (decision.state === 'ready' && config.execution.mode === 'executor_auto' && !config.execution.dryRun)
+          createFablesJob(config)
       } catch (error) {
         const code = error instanceof Error ? error.message.slice(0, 160) : 'E_FABLES_READ'
         // A failed read breaks the consecutive confirmation interval.

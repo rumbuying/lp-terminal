@@ -7,7 +7,7 @@ import { targetUnits } from '../shared/strategy/rebalance'
 import type { FablesStrategyConfig } from '../shared/strategy/types'
 import { publicClient } from './chain'
 
-const decimalsAt = (token: Address, blockNumber: bigint) => token.toLowerCase() === zeroAddress
+export const fablesTokenDecimals = (token: Address, blockNumber: bigint) => token.toLowerCase() === zeroAddress
   ? Promise.resolve(18)
   : publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'decimals', blockNumber }).then(Number)
 
@@ -47,7 +47,7 @@ export async function planFablesRebalance(config: FablesStrategyConfig): Promise
     throw new Error('E_FABLES_LEGACY_FEE_CONSENT')
   const key = position.pool.key
   const [dec0, dec1] = await Promise.all([
-    decimalsAt(key.currency0, position.observedBlock), decimalsAt(key.currency1, position.observedBlock),
+    fablesTokenDecimals(key.currency0, position.observedBlock), fablesTokenDecimals(key.currency1, position.observedBlock),
   ])
   const token0IsRisk = key.currency0.toLowerCase() === config.riskToken.toLowerCase()
   if (!(token0IsRisk || key.currency1.toLowerCase() === config.riskToken.toLowerCase()))

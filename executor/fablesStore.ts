@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS fables_strategies (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_enabled_fables_strategy_per_range
   ON fables_strategies(owner,pool_id,hook,range_id) WHERE enabled=1;
+CREATE UNIQUE INDEX IF NOT EXISTS one_enabled_fables_strategy_per_wallet
+  ON fables_strategies(wallet_id) WHERE enabled=1 AND wallet_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS fables_monitor_state (
   strategy_id TEXT PRIMARY KEY REFERENCES fables_strategies(id),
   revision INTEGER NOT NULL,
@@ -44,6 +46,10 @@ export function listFablesStrategies(owner?: string): StoredFablesStrategy[] {
     : db.prepare('SELECT config_json,state,updated_at FROM fables_strategies ORDER BY updated_at DESC').all()) as
     { config_json: string; state: string; updated_at: number }[]
   return rows.map(row => ({ config: parseFablesStrategyConfig(JSON.parse(row.config_json), { requireAutoApproval: false }), state: row.state, updatedAt: row.updated_at }))
+}
+
+export function fablesWalletInUse(walletId: string): boolean {
+  return !!db.prepare(`SELECT 1 FROM fables_strategies WHERE wallet_id=? AND enabled=1 LIMIT 1`).get(walletId)
 }
 
 export function upsertFablesStrategy(config: FablesStrategyConfig): void {

@@ -57,7 +57,8 @@ export function parseFablesStrategyConfig(value: unknown, options: { requireAuto
   if (lowerPct >= 100) fail('range.lowerPct must be below 100')
   const trigger = record(x.trigger, 'trigger')
   const fees = record(x.fees, 'fees')
-  if (fees.handling !== 'reinvest') fail('only fee reinvestment is supported by this Fables config version')
+  if (!['reinvest', 'hold_tokens', 'convert_to_quote'].includes(fees.handling))
+    fail('invalid Fables fee handling')
   if ('timing' in fees || 'thresholdQuote' in fees || 'intervalMinutes' in fees)
     fail('Fables fee timing and fee thresholds are unsupported')
   const safeguards = record(x.safeguards, 'safeguards')
@@ -83,7 +84,7 @@ export function parseFablesStrategyConfig(value: unknown, options: { requireAuto
       confirmationSeconds: int(trigger.confirmationSeconds, 'trigger.confirmationSeconds', 0, 3600),
       cooldownMinutes: int(trigger.cooldownMinutes, 'trigger.cooldownMinutes', 0, 1440),
     },
-    fees: { handling: 'reinvest' },
+    fees: { handling: fees.handling },
     safeguards: {
       maxSlippageBps: int(safeguards.maxSlippageBps, 'safeguards.maxSlippageBps', 0, 10_000),
       maxSwapImpactBps: int(safeguards.maxSwapImpactBps, 'safeguards.maxSwapImpactBps', 0, 10_000),

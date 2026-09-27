@@ -15,6 +15,18 @@ import { quoteFablesExit } from './fablesExitQuote'
 import { v4StateViewAbi } from './uniV4'
 
 const MAX_UINT128 = (1n << 128n) - 1n
+export function fablesDepositCaps(expected0: bigint, expected1: bigint,
+  budget0: bigint, budget1: bigint, slippageBps: number) {
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 10_000)
+    throw new Error('E_FABLES_SLIPPAGE')
+  if (expected0 < 0n || expected1 < 0n || budget0 < expected0 || budget1 < expected1)
+    throw new Error('E_FABLES_DEPOSIT_AMOUNTS')
+  const cap = (amount: bigint, budget: bigint) => {
+    const allowance = amount + (amount * BigInt(slippageBps) + 9_999n) / 10_000n + 2n
+    return allowance < budget ? allowance : budget
+  }
+  return { max0: cap(expected0, budget0), max1: cap(expected1, budget1) }
+}
 export type FablesCall = {
   to: Address
   data: Hex
@@ -63,11 +75,14 @@ export async function prepareFablesExitCall(client: PublicClient, args: {
   slippageBps: number
   maxClaimFeeBps: number
   lifetimeSeconds: number
+  expectedShares?: bigint
   /** Legacy hooks have no on-chain fee bound on withdraw; require explicit consent. */
   allowLegacyUnboundedFeeExit?: boolean
 }): Promise<FablesCall> {
   const quote = await quoteFablesExit(client, args)
   const position = quote.position
+  if (args.expectedShares !== undefined && position.shares !== args.expectedShares)
+    throw new Error('E_FABLES_SHARES_CHANGED')
   autoPool(position.pool)
   if (!Number.isInteger(args.maxClaimFeeBps) || args.maxClaimFeeBps < 0 || args.maxClaimFeeBps > 10_000
     || quote.maxFeeBpsToPass > args.maxClaimFeeBps)
@@ -94,7 +109,7 @@ export async function prepareFablesExitCall(client: PublicClient, args: {
 export async function prepareFablesClaimCall(client: PublicClient, args: {
   owner: Address; hook: Address; rangeId: bigint; maxClaimFeeBps: number
 }): Promise<FablesCall> {
-  const position = await readFablesPosition(client, args)
+  const position = await readFablesPosition(client, { ...args, allowEmpty: true })
   autoPool(position.pool)
   if (position.claimPaused) throw new Error('E_FABLES_CLAIM_PAUSED')
   const [claim] = await client.readContract({
@@ -126,11 +141,13 @@ export async function prepareFablesDepositCall(client: PublicClient, args: {
   poolId: Hex
   tickLower: number
   tickUpper: number
+  expectedTick?: number
   budget0: bigint
   budget1: bigint
+  slippageBps: number
   nativeGasReserve: bigint
   lifetimeSeconds: number
-}): Promise<FablesCall & { liquidity: bigint; expected0: bigint; expected1: bigint }> {
+}): Promise<FablesCall & { liquidity: bigint; expected0: bigint; expected1: bigint; max0: bigint; max1: bigint }> {
   const observedBlock = await client.getBlockNumber()
   const pools = await readFablesPools(client, observedBlock)
   const pool = pools.find(row => row.id.toLowerCase() === args.poolId.toLowerCase())
@@ -158,23 +175,25 @@ export async function prepareFablesDepositCall(client: PublicClient, args: {
   if (slot0[0] <= 0n || args.budget0 + (pool.key.currency0 === zeroAddress ? args.nativeGasReserve : 0n) > wallet0
     || args.budget1 > wallet1)
     throw new Error('E_FABLES_WALLET_BUDGET')
+  if (args.expectedTick !== undefined && Number(slot0[1]) !== args.expectedTick)
+    throw new Error('E_FABLES_PRICE_MOVED')
   const sqrtA = getSqrtRatioAtTick(args.tickLower)
   const sqrtB = getSqrtRatioAtTick(args.tickUpper)
   const liquidity = getLiquidityForAmounts(slot0[0], sqrtA, sqrtB, args.budget0, args.budget1)
   if (liquidity <= 0n || liquidity > MAX_UINT128) throw new Error('E_FABLES_DEPOSIT_LIQUIDITY')
   const expected = getAmountsForLiquidity(slot0[0], sqrtA, sqrtB, liquidity)
-  if (expected.amount0 > args.budget0 || expected.amount1 > args.budget1)
-    throw new Error('E_FABLES_DEPOSIT_AMOUNTS')
+  const { max0, max1 } = fablesDepositCaps(expected.amount0, expected.amount1,
+    args.budget0, args.budget1, args.slippageBps)
   await verifyDeployment(client, pool.key.hooks)
   const deadline = await deadlineAt(client, observedBlock, args.lifetimeSeconds)
   return {
     to: pool.key.hooks,
     data: encodeFunctionData({ abi: fablesHookAbi, functionName: 'deposit',
       args: [pool.key, args.tickLower, args.tickUpper, liquidity,
-        args.budget0, args.budget1, deadline] }),
-    value: pool.key.currency0 === zeroAddress ? args.budget0 : 0n,
+        max0, max1, deadline] }),
+    value: pool.key.currency0 === zeroAddress ? max0 : 0n,
     method: 'deposit', poolId: pool.id,
     rangeId: fablesRangeId(pool.id, args.tickLower, args.tickUpper), observedBlock,
-    liquidity, expected0: expected.amount0, expected1: expected.amount1,
+    liquidity, expected0: expected.amount0, expected1: expected.amount1, max0, max1,
   }
 }

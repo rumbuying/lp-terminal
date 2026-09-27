@@ -23,9 +23,10 @@ import { isTransientRecoveryFailure } from './recovery-policy'
 import { withdrawRetainedProfit } from './profit-withdrawal'
 import { getAddress } from 'viem'
 import { publicStatusRange, publicStrategyStatus } from './public-status'
-import { fablesMonitorState, fablesStrategyById, listFablesStrategies, upsertFablesStrategy } from './fablesStore'
+import { fablesMonitorState, fablesStrategyById, fablesWalletInUse, listFablesStrategies, upsertFablesStrategy } from './fablesStore'
 import { readFablesPosition } from '../src/lib/fables'
 import { planFablesRebalance } from './fablesPlan'
+import { fablesJobById, fablesJobTransactions, recentFablesJobs, recentFablesLedger, resumeFablesJob } from './fablesJobs'
 
 const JSONH = {
   'content-type': 'application/json; charset=utf-8',
@@ -310,8 +311,33 @@ export function startApi() {
       if (req.method === 'GET' && url.pathname === '/v1/fables/strategies') {
         json(res, 200, { strategies: EXECUTOR.chainId === 4663
           ? listFablesStrategies(auth.role === 'wallet' ? auth.address : undefined)
-            .map(row => ({ ...row, monitor: fablesMonitorState(row.config.id) }))
+            .map(row => ({ ...row, monitor: fablesMonitorState(row.config.id),
+              recentLedger: recentFablesLedger(row.config.id) }))
           : [] })
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/fables/jobs') {
+        const jobs = recentFablesJobs(auth.role === 'wallet' ? getAddress(auth.address) : undefined)
+        json(res, 200, { jobs: jobs.map(job => ({
+          id: job.id, strategyId: job.strategyId, state: job.state, stage: job.stage,
+          errorCode: job.errorCode, createdAt: job.createdAt, updatedAt: job.updatedAt,
+          assetLocation: job.stage === 'precheck' || job.stage === 'exit' ? 'old_lp_or_wallet'
+            : job.stage === 'verify' ? 'new_lp_pending_verification' : 'wallet_and_possible_old_fees',
+          oldRangeId: job.config.positionRef.rangeId,
+          newRangeId: (job.context.newRef as { rangeId?: string } | undefined)?.rangeId,
+          transactions: fablesJobTransactions(job.id).map(tx => ({ stage: tx.stage,
+            state: tx.state, hash: tx.hash, nonce: tx.nonce.toString(),
+            blockNumber: tx.blockNumber?.toString(), errorCode: tx.errorCode })),
+        })) })
+        return
+      }
+      if (req.method === 'POST' && /^\/v1\/fables\/jobs\/[^/]+\/resume$/.test(url.pathname)) {
+        const id = decodeURIComponent(url.pathname.slice('/v1/fables/jobs/'.length, -'/resume'.length))
+        const current = fablesJobById(id)
+        if (!current || !ownedBy(auth, current.config.owner)) return json(res, 404, { error: 'Fables job not found' })
+        const job = resumeFablesJob(id)
+        audit('api', 'fables_job_resumed', 'job', id, { strategyId: job.strategyId, stage: job.stage })
+        json(res, 200, { id: job.id, state: job.state, stage: job.stage })
         return
       }
       if (req.method === 'GET' && /^\/v1\/fables\/strategies\/[^/]+$/.test(url.pathname)) {
@@ -343,6 +369,9 @@ export function startApi() {
             return json(res, 400, { error: 'wallet and share owner mismatch' })
         }
         if (config.enabled) {
+          if (config.execution.mode === 'executor_auto' && listStrategies().some(row =>
+            row.config.enabled && row.config.execution.walletId === config.execution.walletId))
+            return json(res, 409, { error: 'wallet already runs another LP strategy' })
           const position = await readFablesPosition(publicClient, {
             owner: config.owner, hook: config.positionRef.hook, rangeId: BigInt(config.positionRef.rangeId),
           })
@@ -571,6 +600,8 @@ export function startApi() {
             return json(res, 400, { error: 'wallet, signer and owner mismatch' })
         }
         if (config.enabled && config.execution.mode === 'executor_auto') {
+          if (config.execution.walletId && fablesWalletInUse(config.execution.walletId))
+            return json(res, 409, { error: 'wallet already runs a Fables strategy' })
           const unlocked = unlockPrivateKey(config.execution.walletId!)
           if (unlocked.address.toLowerCase() !== config.owner.toLowerCase()) return json(res, 400, { error: 'vault signer and owner mismatch' })
           await readStrategySnapshot(config)

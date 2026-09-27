@@ -4,7 +4,8 @@
 // forwards transaction methods to the upstream network.
 import { createServer } from 'node:http'
 
-const upstream = 'https://rpc.mainnet.chain.robinhood.com'
+const upstream = process.env.FABLES_FORK_UPSTREAM_RPC || 'https://rpc.mainnet.chain.robinhood.com'
+if (!/^https?:\/\//.test(upstream)) throw new Error('FABLES_FORK_UPSTREAM_RPC must be an HTTP(S) RPC URL')
 const emptyRoot = `0x${'0'.repeat(64)}`
 const methods = new Set([
   'eth_chainId', 'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getBlockByHash',
@@ -52,6 +53,6 @@ createServer(async (req, res) => {
     res.end(JSON.stringify(patched))
   } catch (error) {
     res.writeHead(502, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ error: String(error) }))
+    res.end(JSON.stringify({ error: 'upstream read-only RPC unavailable' }))
   }
 }).listen(8546, '0.0.0.0')

@@ -47,6 +47,14 @@ export type ExecutorFablesStrategy = {
   state: string
   updatedAt: number
   monitor?: { revision: number; outSide?: 'lower' | 'upper'; outSince?: number; lastTick?: number; lastBlock?: string; error?: string }
+  recentLedger?: { jobId: string; ts: number; blockNumber?: string; txHash?: `0x${string}`;
+    kind: string; token?: `0x${string}`; amount?: string }[]
+}
+export type ExecutorFablesJob = {
+  id: string; strategyId: string; state: string; stage: string
+  errorCode?: string; createdAt: number; updatedAt: number; assetLocation: string
+  oldRangeId: string; newRangeId?: string
+  transactions: { stage: string; state: string; hash: `0x${string}`; nonce: string; blockNumber?: string; errorCode?: string }[]
 }
 export type ExecutorFablesPlan = {
   strategyId: string; observedBlock: string
@@ -260,6 +268,9 @@ export const executorHealth = () => request<{ ok: boolean; service: string; vaul
 export const executorWallets = (token: string) => request<{ wallets: ExecutorWallet[] }>('/v1/wallets', token)
 export const executorStrategies = (token: string) => request<{ strategies: ExecutorStrategy[]; archivedStrategyIds?: string[] }>('/v1/strategies', token)
 export const executorFablesStrategies = (token: string) => request<{ strategies: ExecutorFablesStrategy[] }>('/v1/fables/strategies', token)
+export const executorFablesJobs = (token: string) => request<{ jobs: ExecutorFablesJob[] }>('/v1/fables/jobs', token)
+export const resumeExecutorFablesJob = (token: string, id: string) =>
+  request<{ id: string; state: string; stage: string }>(`/v1/fables/jobs/${encodeURIComponent(id)}/resume`, token, { method: 'POST' })
 export const saveExecutorFablesStrategy = (token: string, config: FablesStrategyConfig) =>
   request<{ strategy: { id: string; revision: number } }>(`/v1/fables/strategies/${encodeURIComponent(config.id)}`,
     token, { method: 'PUT', body: JSON.stringify(config) })

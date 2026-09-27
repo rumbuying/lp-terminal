@@ -95,6 +95,8 @@ Fables 池使用 Robinhood Chain 的 Uniswap v4 PoolManager，但官网 LP 仓�
 
 ## 5. 测试与验收
 
+主网 fork 的写入闭环需要可读取固定块历史状态的 Robinhood Chain archive RPC；官方公共 RPC 仅供限流的当前状态读取，不能作为 D/E 阶段 fork 验收环境。测试 RPC 只供本地 Anvil fork 读取，交易仅广播到本地 loopback 节点。
+
 ### 5.1 必须通过的测试
 
 1. **接口与身份：**在 Robinhood 主网 fork 上用首期每类 hook 验证 PoolKey、rangeId、份额、费用与余额；未登记池、错误 hook、错误 owner、错误 ticks 全部拒绝。

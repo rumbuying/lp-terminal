@@ -161,7 +161,7 @@ export type FablesStrategyConfig = {
   quoteToken: Address
   range: { lowerPct: number; upperPct: number }
   trigger: { pollSeconds: number; confirmationSeconds: number; cooldownMinutes: number }
-  fees: { handling: 'reinvest' }
+  fees: { handling: FeeHandling }
   safeguards: {
     maxSlippageBps: number
     maxSwapImpactBps: number

@@ -8,6 +8,7 @@ import { fablesHookAbi, fablesLensAbi } from '../src/abi/fables'
 import { FABLES_AUTO_POOL_IDS, FABLES_LENS } from '../src/config/fables'
 import { robinhoodConfig } from '../src/config/chains/robinhood'
 import { quoteFablesExit } from '../src/lib/fablesExitQuote'
+import { readFablesPosition } from '../src/lib/fables'
 import { prepareFablesClaimCall, prepareFablesDepositCall, prepareFablesExitCall } from '../src/lib/fablesWrite'
 
 const rpc = process.env.FABLES_FORK_RPC
@@ -178,6 +179,11 @@ async function run() {
     })
     if (!after[0] || after[0].shares !== 0n || after[0].claimable0 !== 0n || after[0].claimable1 !== 0n)
       throw new Error(`${fixture.name}: principal or fees remain after settlement`)
+    const emptyPosition = await readFablesPosition(client, {
+      owner: fixture.owner, hook: fixture.hook, rangeId: fixture.rangeId, allowEmpty: true,
+    })
+    if (emptyPosition.shares !== 0n || emptyPosition.claimable0 !== 0n || emptyPosition.claimable1 !== 0n)
+      throw new Error(`${fixture.name}: empty-range recovery read disagrees with lens`)
     results.push({ name: fixture.name, poolId: quote.position.pool.id,
       exitHash, claimHash, sharesBefore: quote.position.shares.toString(),
       sharesAfter: '0', claimableAfter: ['0', '0'], partialShares: partialShares.toString() })
@@ -190,7 +196,8 @@ async function run() {
       const deposit = await prepareFablesDepositCall(client, {
         owner: fixture.owner, poolId: quote.position.pool.id,
         tickLower, tickUpper, budget0: 10_000_000_000_000_000n,
-        budget1: 0n, nativeGasReserve: 10_000_000_000_000_000n,
+        budget1: 0n, slippageBps: 100,
+        nativeGasReserve: 10_000_000_000_000_000n,
         lifetimeSeconds: 300,
       })
       const depositHash = await send(fixture.owner, deposit.to, deposit.data, deposit.value)

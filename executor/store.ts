@@ -654,6 +654,10 @@ export function createPlannedJob(plan: StrategyExecutionPlan): boolean {
           AND EXISTS (SELECT 1 FROM job_transactions t WHERE t.job_id=j.id AND t.state IN ('sending','sent'))
         LIMIT 1`).get(strategy.wallet_id)
       if (recovery) throw new Error('E_WALLET_RECOVERY')
+      if (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='fables_jobs'`).get()) {
+        const fables = db.prepare(`SELECT 1 FROM fables_jobs WHERE wallet_id=? AND state IN ('planned','running','recovery') LIMIT 1`).get(strategy.wallet_id)
+        if (fables) throw new Error('E_WALLET_FABLES_JOB')
+      }
       db.prepare('INSERT INTO jobs(id,strategy_id,plan_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(
       plan.id,
       plan.strategyId,
@@ -697,6 +701,10 @@ export function createProfitWithdrawalJob(args: {
           AND EXISTS (SELECT 1 FROM job_transactions t WHERE t.job_id=j.id AND t.state IN ('sending','sent'))
         LIMIT 1`).get(strategy.wallet_id)
       if (recovery) throw new Error('E_WALLET_RECOVERY')
+      if (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='fables_jobs'`).get()) {
+        const fables = db.prepare(`SELECT 1 FROM fables_jobs WHERE wallet_id=? AND state IN ('planned','running','recovery') LIMIT 1`).get(strategy.wallet_id)
+        if (fables) throw new Error('E_WALLET_FABLES_JOB')
+      }
       db.prepare('INSERT INTO jobs(id,strategy_id,plan_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(
         args.id, args.strategyId, JSON.stringify({ kind: 'profit_withdrawal', strategyId: args.strategyId, target: args.target }), 'running', now, now,
       )

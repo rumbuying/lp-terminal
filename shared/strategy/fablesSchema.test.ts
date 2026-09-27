@@ -47,3 +47,8 @@ test('Fables config rejects fee prediction and NFT fields', () => {
   assert.throws(() => parseFablesStrategyConfig({ ...draft(), fees: { handling: 'reinvest', timing: 'threshold' } }), /fee timing/)
   assert.throws(() => parseFablesStrategyConfig({ ...draft(), activeTokenId: '1' }), /NFT/)
 })
+
+test('Fables fee handling can retain or convert realized fees without a forecast trigger', () => {
+  for (const handling of ['hold_tokens', 'convert_to_quote'] as const)
+    assert.equal(parseFablesStrategyConfig({ ...draft(), fees: { handling } }).fees.handling, handling)
+})
