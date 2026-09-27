@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { getAddress, zeroAddress, type Address, type Hex } from 'viem'
+import { getAddress, zeroAddress, type Address } from 'viem'
 import { erc20Abi } from '../abi'
 import { ACTIVE_IS_BUILD, CHAIN } from '../config/chains'
 import { indexerApiPath } from '../config/chains/routes'
@@ -7,9 +7,10 @@ import { ENV } from '../config/env'
 import { fablesHook } from '../config/fables'
 import { fablesRangeId, readFablesPools, readFablesPosition, type FablesPosition } from '../lib/fables'
 import { publicRpcClient } from '../lib/publicRpcClient'
+import type { FablesManualRef } from './useFablesManualRefs'
 
 type Candidate = { hook: string; rangeId: string; seenBlock: number }
-export type FablesManualRef = { poolId: Hex; tickLower: number; tickUpper: number }
+export type { FablesManualRef } from './useFablesManualRefs'
 export type FablesToken = { address: Address; symbol: string; decimals: number | null }
 
 export async function fetchFablesPositions(owner: Address, manualRefs: readonly FablesManualRef[] = []): Promise<{

@@ -4,6 +4,7 @@ import type { FablesStrategyConfig } from '../../../shared/strategy/types'
 import { robinhoodConfig } from '../../config/chains/robinhood'
 import { FABLES_AUTO_POOL_IDS } from '../../config/fables'
 import { useFablesPositions } from '../../hooks/useFablesPositions'
+import { useFablesManualRefs } from '../../hooks/useFablesManualRefs'
 import { executorFablesJobs, executorFablesStrategies, executorWallets,
   planExecutorFablesStrategy, rebroadcastExecutorFablesTx, resumeExecutorFablesJob, saveExecutorFablesStrategy,
   type ExecutorFablesJob, type ExecutorFablesPlan, type ExecutorFablesStrategy,
@@ -23,7 +24,8 @@ const assetLocationLabel: Record<string, string> = {
 export function FablesStrategySection({ owner, accessToken, canManage }: {
   owner: Address; accessToken: string; canManage: boolean
 }) {
-  const positions = useFablesPositions(owner, [])
+  const { manualRefs } = useFablesManualRefs(owner)
+  const positions = useFablesPositions(owner, manualRefs)
   const [strategies, setStrategies] = useState<ExecutorFablesStrategy[]>([])
   const [jobs, setJobs] = useState<ExecutorFablesJob[]>([])
   const [wallets, setWallets] = useState<ExecutorWallet[]>([])

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { Address, Hex } from 'viem'
 import { CHAIN } from '../../config/chains'
 import { useFablesPositions, type FablesManualRef, type FablesToken } from '../../hooks/useFablesPositions'
+import { useFablesManualRefs } from '../../hooks/useFablesManualRefs'
 import { fablesRangeId, readFablesPools, readFablesPosition } from '../../lib/fables'
 import { fmtAmount, shortAddr } from '../../lib/format'
 import { publicRpcClient } from '../../lib/publicRpcClient'
@@ -20,18 +21,7 @@ function priceAtTick(tick: number, token0: FablesToken | undefined, token1: Fabl
 }
 
 export function FablesPositionsSection({ owner }: { owner: Address }) {
-  const storageKey = `fables-imports:4663:${owner.toLowerCase()}`
-  const [manualRefs, setManualRefs] = useState<FablesManualRef[]>(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem(storageKey) ?? '[]') as unknown
-      if (!Array.isArray(raw)) return []
-      return raw.filter((row): row is FablesManualRef => {
-        const ref = row as FablesManualRef
-        return !!ref && typeof ref.poolId === 'string' && /^0x[0-9a-fA-F]{64}$/.test(ref.poolId)
-          && Number.isInteger(ref.tickLower) && Number.isInteger(ref.tickUpper)
-      })
-    } catch { return [] }
-  })
+  const { manualRefs, saveManualRefs } = useFablesManualRefs(owner)
   const [poolId, setPoolId] = useState('')
   const [lower, setLower] = useState('')
   const [upper, setUpper] = useState('')
@@ -60,8 +50,7 @@ export function FablesPositionsSection({ owner }: { owner: Address }) {
       const next = [...manualRefs.filter(item =>
         item.poolId.toLowerCase() !== ref.poolId.toLowerCase()
         || item.tickLower !== ref.tickLower || item.tickUpper !== ref.tickUpper), ref]
-      localStorage.setItem(storageKey, JSON.stringify(next))
-      setManualRefs(next)
+      saveManualRefs(next)
       setPoolId(''); setLower(''); setUpper('')
     } catch (error) { setImportError(String(error)) }
     finally { setImportBusy(false) }
