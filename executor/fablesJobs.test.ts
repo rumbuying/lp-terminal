@@ -178,3 +178,36 @@ test('asset accounting failures wait for manual review while receipt timeouts re
   assert.equal(fablesRecoveryRequiresReview('E_FABLES_RECEIPT_UNKNOWN'), false)
   assert.equal(fablesRecoveryRequiresReview('E_FABLES_CLAIM_PAUSED'), false)
 })
+
+test('each mutating stage holds its durable hash through a crash and receipt recovery', async () => {
+  const stages = ['exit', 'claim', 'fee_conversion', 'swap', 'deposit'] as const
+  for (const [index, stage] of stages.entries()) {
+    const job = activeFablesJobs()[0]
+    const ordinal = index + 3
+    const hash = `0x${(90 + index).toString(16).padStart(2, '0').repeat(32)}` as Hex
+    setFablesJobProgress(job.id, { state: 'recovery', stage })
+    recordFablesTxIntent({ jobId: job.id, ordinal, stage, nonce: BigInt(10 + index),
+      hash, to: hook, calldataHash: `0x${'ab'.repeat(32)}` })
+    const pending = await reconcileFablesTransactions(job, {
+      getTransactionReceipt: async () => { throw new Error('receipt not visible') },
+      getBlockNumber: async () => 100n,
+    } as never)
+    assert.equal(pending.unresolved, 1, stage)
+    assert.throws(() => resumeFablesJob(job.id), /TX_UNRESOLVED/, stage)
+    assert.throws(() => recordFablesTxIntent({ jobId: job.id, ordinal: ordinal + 100,
+      stage, nonce: BigInt(100 + index), hash: `0x${'cd'.repeat(32)}`,
+      to: hook, calldataHash: `0x${'ef'.repeat(32)}` }), /ALREADY_SENT/, stage)
+    const blockNumber = BigInt(30 + index)
+    const recovered = await reconcileFablesTransactions(job, {
+      getTransactionReceipt: async ({ hash: requested }: { hash: Hex }) => {
+        assert.equal(requested, hash)
+        return { transactionHash: hash, status: 'success', blockNumber,
+          gasUsed: 100n, effectiveGasPrice: 2n }
+      },
+      getBlockNumber: async () => blockNumber + 2n,
+    } as never)
+    assert.equal(recovered.confirmed, 1, stage)
+    assert.equal(fablesJobTransactions(job.id).find(tx => tx.ordinal === ordinal)?.state, 'confirmed')
+    assert.equal(resumeFablesJob(job.id).state, 'running')
+  }
+})
