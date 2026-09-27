@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { zeroAddress } from 'viem'
 import { robinhoodConfig } from '../../src/config/chains/robinhood'
+import { FABLES_AUTO_POOL_IDS } from '../../src/config/fables'
 import { fablesRangeId } from '../../src/lib/fables'
 import { parseFablesStrategyConfig } from './fablesSchema'
 
@@ -41,6 +42,22 @@ test('Fables auto signing remains gated while the production allowlist is empty'
   assert.throws(() => parseFablesStrategyConfig({ ...draft(), execution: {
     mode: 'executor_auto', walletId: 'wallet', signerAddress: owner, dryRun: false,
   } }), /not approved/)
+})
+
+test('Fables accepts fractional quote-denominated daily turnover limits', () => {
+  FABLES_AUTO_POOL_IDS.add(poolId)
+  try {
+    const config = parseFablesStrategyConfig({ ...draft(), execution: {
+      mode: 'executor_auto', walletId: 'wallet', signerAddress: owner, dryRun: false,
+      maxDailyTurnoverQuote: '0.05',
+    } })
+    assert.equal(config.execution.maxDailyTurnoverQuote, '0.05')
+  } finally { FABLES_AUTO_POOL_IDS.delete(poolId) }
+  for (const invalid of ['0', '0.000', '-0.05', '1e-2', '0.']) {
+    assert.throws(() => parseFablesStrategyConfig({ ...draft(), execution: {
+      ...draft().execution, maxDailyTurnoverQuote: invalid,
+    } }), /maxDailyTurnoverQuote/)
+  }
 })
 
 test('Fables config rejects fee prediction and NFT fields', () => {

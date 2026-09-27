@@ -21,6 +21,12 @@ const uint = (value: unknown, name: string, optional = false): string | undefine
   if (typeof value !== 'string' || !/^\d+$/.test(value)) fail(`${name} must be a nonnegative integer string`)
   return BigInt(value as string).toString()
 }
+const positiveDecimal = (value: unknown, name: string, optional = false): string | undefined => {
+  if (optional && (value === undefined || value === null)) return undefined
+  if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)
+    || !/[1-9]/.test(value)) fail(`${name} must be a positive decimal string`)
+  return value as string
+}
 
 /** Separate v2 parser so a Fables share position never enters the v1 NFT runner. */
 export function parseFablesStrategyConfig(value: unknown, options: { requireAutoApproval?: boolean } = {}): FablesStrategyConfig {
@@ -98,7 +104,7 @@ export function parseFablesStrategyConfig(value: unknown, options: { requireAuto
       mode: execution.mode, walletId: execution.walletId,
       signerAddress, dryRun: execution.dryRun,
       maxGasPriceWei: uint(execution.maxGasPriceWei, 'execution.maxGasPriceWei', true),
-      maxDailyTurnoverQuote: uint(execution.maxDailyTurnoverQuote, 'execution.maxDailyTurnoverQuote', true),
+      maxDailyTurnoverQuote: positiveDecimal(execution.maxDailyTurnoverQuote, 'execution.maxDailyTurnoverQuote', true),
     },
     revision: int(x.revision, 'revision', 1, Number.MAX_SAFE_INTEGER),
     createdAt: int(x.createdAt, 'createdAt', 1, Number.MAX_SAFE_INTEGER),
