@@ -5,7 +5,7 @@ import { fablesHookAbi } from '../src/abi/fables'
 import { getSqrtRatioAtTick } from '../src/lib/clmath'
 import { fablesRangeId, type FablesPosition } from '../src/lib/fables'
 import type { FablesStrategyConfig } from '../shared/strategy/types'
-import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, fablesSwapImpactBps,
+import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, fablesSwapImpactBps, fablesTargetValueBps,
   freshFablesRange, mintedFablesShares } from './fablesCycle'
 
 const hook = '0x06a889870c8f83640d6816319f72e2aa579b6080' as const
@@ -44,6 +44,13 @@ test('swap price protection rejects a route with excessive executable shortfall'
   const sqrt = 1n << 96n
   assert.equal(fablesSwapImpactBps({ amountIn: 1000n, quotedOut: 990n,
     tokenIn: zeroAddress, currency0: zeroAddress, sqrtPriceX96: sqrt }), 100n)
+})
+
+test('preview value split uses the pool spot price and raw token units', () => {
+  const units = { amount0: 1n, amount1: 3n }
+  assert.deepEqual(fablesTargetValueBps(units, 1n << 96n), { token0: 2_500, token1: 7_500 })
+  assert.deepEqual(fablesTargetValueBps(units, 2n << 96n), { token0: 5_714, token1: 4_286 })
+  assert.throws(() => fablesTargetValueBps({ amount0: 0n, amount1: 3n }, 1n << 96n), /TARGET_RATIO/)
 })
 
 test('new range shares come only from the deposit receipt mint', () => {

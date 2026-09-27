@@ -129,6 +129,8 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setBusy(false) }
   }
+  const tokenLabel = (address: Address) => address.toLowerCase() === zeroAddress
+    ? 'ETH' : positions.data?.tokens[address.toLowerCase()]?.symbol ?? shortAddr(address)
 
   return <section className="card" style={{ marginTop: 18 }}>
     <div className="section-title">Fables LP 策略</div>
@@ -168,9 +170,15 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
       <b>执行预览 · 区块 {plan.observedBlock}</b>
       <div>旧区间 {plan.old.tickLower}–{plan.old.tickUpper} · {plan.old.shares} 份额</div>
       <div>退出：{plan.exit.method} · 本金 {plan.exit.principal0}/{plan.exit.principal1}（最少到账 {plan.exit.amount0Min}/{plan.exit.amount1Min}）</div>
-      <div>当前待领费用 {plan.exit.claimable0}/{plan.exit.claimable1} · 领取费率上限 {plan.exit.claimFeeBps} bps</div>
+      <div>当前待领费用 {plan.exit.claimable0}/{plan.exit.claimable1} · 需允许的领取费率 {plan.exit.claimFeeBps} bps（策略上限 {plan.constraints.maxClaimFeeBps} bps）</div>
       <div>按当前价格的参考新区间 {plan.indicativeRecenter.tickLower}–{plan.indicativeRecenter.tickUpper}</div>
-      <div className="dim">实际新区间和换币数量将在退出到账后重新计算。</div>
+      <div>参考目标价值占比：{tokenLabel(plan.indicativeRecenter.currency0)} {(plan.indicativeRecenter.targetValueBps0 / 100).toFixed(2)}% · {tokenLabel(plan.indicativeRecenter.currency1)} {(plan.indicativeRecenter.targetValueBps1 / 100).toFixed(2)}%</div>
+      <div>交易约束：最大滑点 {plan.constraints.maxSlippageBps} bps · 最大换币价格冲击 {plan.constraints.maxSwapImpactBps} bps · 计划有效期 {plan.constraints.maxPlanAgeSeconds} 秒</div>
+      <div>原生币 gas 预留至少 {formatUnits(BigInt(plan.constraints.minNativeGasReserveWei), 18)} ETH
+        {plan.constraints.maxGasPriceWei && ` · gas 单价上限 ${formatUnits(BigInt(plan.constraints.maxGasPriceWei), 9)} gwei`}</div>
+      {plan.constraints.maxDailyTurnoverQuote && <div>每日换币上限 {plan.constraints.maxDailyTurnoverQuote} {tokenLabel(plan.constraints.quoteToken)}</div>}
+      {plan.exit.method === 'withdraw' && <div>旧版池无领取费率上限退出：{plan.constraints.allowLegacyUnboundedFeeExit ? '已授权' : '未授权'}</div>}
+      <div className="dim">价值占比按当前池价估算；实际新区间、资产比例和换币数量将在退出到账后重新计算。</div>
     </div>}
     {canManage && <>
       <div className="dim">选择已有份额区间创建监控策略。</div>

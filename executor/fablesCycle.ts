@@ -8,6 +8,16 @@ import type { FablesPosition } from '../src/lib/fables'
 
 export type FablesAmounts = { amount0: bigint; amount1: bigint }
 
+/** Current pool spot value split for the proposed range, in basis points. */
+export function fablesTargetValueBps(units: FablesAmounts, sqrtPriceX96: bigint): { token0: number; token1: number } {
+  if (units.amount0 <= 0n || units.amount1 <= 0n || sqrtPriceX96 <= 0n)
+    throw new Error('E_FABLES_TARGET_RATIO')
+  const value0 = units.amount0 * sqrtPriceX96 * sqrtPriceX96
+  const value1 = units.amount1 * (1n << 192n)
+  const token0 = Number(value0 * 10_000n / (value0 + value1))
+  return { token0, token1: 10_000 - token0 }
+}
+
 export function allocateFablesFees(funds: FablesAmounts, fees: FablesAmounts,
   handling: FablesStrategyConfig['fees']['handling']): { lp: FablesAmounts; held: FablesAmounts } {
   if (handling === 'reinvest') return { lp: funds, held: { amount0: 0n, amount1: 0n } }

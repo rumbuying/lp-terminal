@@ -6,6 +6,7 @@ import { quoteRangeToTicks } from '../shared/strategy/range'
 import { targetUnits } from '../shared/strategy/rebalance'
 import type { FablesStrategyConfig } from '../shared/strategy/types'
 import { publicClient } from './chain'
+import { fablesTargetValueBps } from './fablesCycle'
 
 export const fablesTokenDecimals = (token: Address, blockNumber: bigint) => token.toLowerCase() === zeroAddress
   ? Promise.resolve(18)
@@ -24,7 +25,15 @@ export type FablesDryRunPlan = {
   }
   indicativeRecenter: {
     currentTick: number; tickLower: number; tickUpper: number
-    unit0: string; unit1: string
+    currency0: Address; currency1: Address
+    unit0: string; unit1: string; targetValueBps0: number; targetValueBps1: number
+  }
+  constraints: {
+    quoteToken: Address
+    maxSlippageBps: number; maxSwapImpactBps: number; maxClaimFeeBps: number
+    maxPlanAgeSeconds: number; minNativeGasReserveWei: string
+    maxDailyTurnoverQuote?: string; maxGasPriceWei?: string
+    allowLegacyUnboundedFeeExit: boolean
   }
   note: 'recalculate_after_exit_and_swap'
 }
@@ -63,6 +72,7 @@ export async function planFablesRebalance(config: FablesStrategyConfig): Promise
     token0IsRisk, token0Decimals: dec0, token1Decimals: dec1,
   })
   const units = targetUnits(position.sqrtPriceX96, range.tickLower, range.tickUpper)
+  const split = fablesTargetValueBps(units, position.sqrtPriceX96)
   return {
     strategyId: config.id,
     observedBlock: position.observedBlock.toString(),
@@ -79,7 +89,20 @@ export async function planFablesRebalance(config: FablesStrategyConfig): Promise
     },
     indicativeRecenter: {
       currentTick: position.tick, tickLower: range.tickLower, tickUpper: range.tickUpper,
+      currency0: key.currency0, currency1: key.currency1,
       unit0: units.amount0.toString(), unit1: units.amount1.toString(),
+      targetValueBps0: split.token0, targetValueBps1: split.token1,
+    },
+    constraints: {
+      quoteToken: config.quoteToken,
+      maxSlippageBps: config.safeguards.maxSlippageBps,
+      maxSwapImpactBps: config.safeguards.maxSwapImpactBps,
+      maxClaimFeeBps: config.safeguards.maxClaimFeeBps,
+      maxPlanAgeSeconds: config.safeguards.maxPlanAgeSeconds,
+      minNativeGasReserveWei: config.safeguards.minNativeGasReserveWei,
+      maxDailyTurnoverQuote: config.execution.maxDailyTurnoverQuote,
+      maxGasPriceWei: config.execution.maxGasPriceWei,
+      allowLegacyUnboundedFeeExit: config.safeguards.allowLegacyUnboundedFeeExit,
     },
     note: 'recalculate_after_exit_and_swap',
   }

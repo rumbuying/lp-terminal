@@ -61,7 +61,12 @@ export type ExecutorFablesPlan = {
   strategyId: string; observedBlock: string
   old: { poolId: string; hook: string; rangeId: string; tickLower: number; tickUpper: number; shares: string }
   exit: { method: 'withdraw' | 'withdrawAndClaim'; principal0: string; principal1: string; amount0Min: string; amount1Min: string; claimable0: string; claimable1: string; claimFeeBps: number }
-  indicativeRecenter: { currentTick: number; tickLower: number; tickUpper: number; unit0: string; unit1: string }
+  indicativeRecenter: { currentTick: number; tickLower: number; tickUpper: number;
+    currency0: `0x${string}`; currency1: `0x${string}`;
+    unit0: string; unit1: string; targetValueBps0: number; targetValueBps1: number }
+  constraints: { quoteToken: `0x${string}`; maxSlippageBps: number; maxSwapImpactBps: number; maxClaimFeeBps: number;
+    maxPlanAgeSeconds: number; minNativeGasReserveWei: string;
+    maxDailyTurnoverQuote?: string; maxGasPriceWei?: string; allowLegacyUnboundedFeeExit: boolean }
   note: 'recalculate_after_exit_and_swap'
 }
 export type RecoveryJob = {
