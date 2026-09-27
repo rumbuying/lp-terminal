@@ -133,6 +133,9 @@ export function createFablesJob(config: FablesStrategyConfig): FablesJob {
     const oldJob = db.prepare(`SELECT 1 FROM jobs j JOIN strategies s ON s.id=j.strategy_id
       WHERE s.wallet_id=? AND j.state IN ('planned','running','recovery') LIMIT 1`).get(clean.execution.walletId)
     if (oldJob) throw new Error('E_FABLES_WALLET_BUSY')
+    const otherFablesJob = db.prepare(`SELECT 1 FROM fables_jobs
+      WHERE wallet_id=? AND state IN ('planned','running','recovery') LIMIT 1`).get(clean.execution.walletId)
+    if (otherFablesJob) throw new Error('E_FABLES_WALLET_BUSY')
     // Other enabled strategies may share this wallet. Their open jobs above
     // prevent overlapping mutations; the ordinary job creators check for an
     // open Fables job in the other direction.

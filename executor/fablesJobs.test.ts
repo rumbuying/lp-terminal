@@ -95,6 +95,20 @@ test('Fables recovery resolves the stored hash once without resending', async ()
     getBlockNumber: async () => 13n } as never)).confirmed, 0)
 })
 
+test('separate Fables ranges can share a wallet while open jobs stay serialized', () => {
+  const first = fablesStrategyById('fables-test')!.config
+  const tickLower = -200, tickUpper = 200
+  const second = { ...first, id: 'fables-second-range',
+    positionRef: { ...first.positionRef, tickLower, tickUpper,
+      rangeId: fablesRangeId(poolId, tickLower, tickUpper).toString() },
+    revision: 1 }
+  upsertFablesStrategy(second)
+  updateFablesMonitorState(second.id, { revision: 1, outSide: 'upper',
+    outSince: Math.floor(Date.now() / 1000) - 300, lastTick: 201, lastBlock: '1' }, 'dry_run_ready')
+  assert.equal(fablesStrategyById(second.id)?.config.positionRef.rangeId, second.positionRef.rangeId)
+  assert.throws(() => createFablesJob(second), /E_FABLES_WALLET_BUSY/)
+})
+
 test('manual recovery rebroadcasts only original signed bytes before resume', async () => {
   const job = activeFablesJobs()[0]
   const signedTx = '0x1234' as const

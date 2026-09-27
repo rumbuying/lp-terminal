@@ -23,9 +23,10 @@ import { isTransientRecoveryFailure } from './recovery-policy'
 import { withdrawRetainedProfit } from './profit-withdrawal'
 import { getAddress } from 'viem'
 import { publicStatusRange, publicStrategyStatus } from './public-status'
-import { fablesMonitorState, fablesStrategyById, fablesWalletInUse, listFablesStrategies, upsertFablesStrategy } from './fablesStore'
+import { fablesMonitorState, fablesStrategyById, listFablesStrategies, upsertFablesStrategy } from './fablesStore'
 import { readFablesPosition } from '../src/lib/fables'
-import { planFablesRebalance } from './fablesPlan'
+import { fablesTokenDecimals, planFablesRebalance } from './fablesPlan'
+import { validateFablesDailyTurnover } from './fablesLimits'
 import { fablesJobById, fablesJobTransactions, recentFablesJobs, recentFablesLedger, resumeFablesJob } from './fablesJobs'
 import { rebroadcastFablesTransaction } from './fablesRecovery'
 
@@ -385,9 +386,6 @@ export function startApi() {
             return json(res, 400, { error: 'wallet and share owner mismatch' })
         }
         if (config.enabled) {
-          if (config.execution.mode === 'executor_auto' && listStrategies().some(row =>
-            row.config.enabled && row.config.execution.walletId === config.execution.walletId))
-            return json(res, 409, { error: 'wallet already runs another LP strategy' })
           const position = await readFablesPosition(publicClient, {
             owner: config.owner, hook: config.positionRef.hook, rangeId: BigInt(config.positionRef.rangeId),
           })
@@ -405,6 +403,11 @@ export function startApi() {
               return json(res, 400, { error: 'vault signer and share owner mismatch' })
             if (!config.execution.dryRun && !config.execution.maxDailyTurnoverQuote)
               return json(res, 400, { error: 'live automation requires maxDailyTurnoverQuote' })
+            if (config.execution.maxDailyTurnoverQuote) {
+              const decimals = await fablesTokenDecimals(config.quoteToken, position.observedBlock)
+              try { validateFablesDailyTurnover(config.execution.maxDailyTurnoverQuote, decimals) }
+              catch { return json(res, 400, { error: 'Fables daily turnover exceeds quote-token precision' }) }
+            }
           }
         }
         upsertFablesStrategy(config)
@@ -616,8 +619,6 @@ export function startApi() {
             return json(res, 400, { error: 'wallet, signer and owner mismatch' })
         }
         if (config.enabled && config.execution.mode === 'executor_auto') {
-          if (config.execution.walletId && fablesWalletInUse(config.execution.walletId))
-            return json(res, 409, { error: 'wallet already runs a Fables strategy' })
           const unlocked = unlockPrivateKey(config.execution.walletId!)
           if (unlocked.address.toLowerCase() !== config.owner.toLowerCase()) return json(res, 400, { error: 'vault signer and owner mismatch' })
           await readStrategySnapshot(config)
