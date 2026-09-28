@@ -10,17 +10,10 @@ import { executorFablesJobs, executorFablesStrategies, executorWallets,
   type ExecutorFablesJob, type ExecutorFablesPlan, type ExecutorFablesStrategy,
   type ExecutorWallet } from '../../lib/executorClient'
 import { shortAddr } from '../../lib/format'
+import { Badge, Btn } from '../ui'
+import { assetLocationLabel, feeHandlingLabel, fablesStrategyState, jobStateLabel,
+  PCell, TxLink, shortRangeId } from './fablesUi'
 
-const strategyStateLabel: Record<string, string> = {
-  monitoring: '区间内监控', confirming: '越界确认中', dry_run_ready: '越界待执行',
-  awaiting_manual: '越界待手动处理', executing: '执行中', recovery: '待恢复',
-  paused: '暂停', read_error: '读取异常', disabled: '已停用',
-}
-const jobStateLabel: Record<string, string> = { cancelled: '已取消：价格回到区间' }
-const assetLocationLabel: Record<string, string> = {
-  old_lp_or_wallet: '旧 LP 或钱包', wallet_and_possible_old_fees: '钱包及旧区间待领费用',
-  new_lp_pending_verification: '新 LP 待核实',
-}
 const preferredQuoteToken = (currency0: Address, currency1: Address): Address => {
   const stable = robinhoodConfig.addr.STABLE.toLowerCase()
   if (currency0.toLowerCase() === stable || currency1.toLowerCase() === stable)
@@ -130,7 +123,7 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
     finally { setBusy(false) }
   }
   const preview = async (id: string) => {
-    setBusy(true); setError(null); setPlan(null)
+    setBusy(true); setError(null)
     try { setPlan((await planExecutorFablesStrategy(accessToken, id)).plan) }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setBusy(false) }
@@ -150,56 +143,102 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
   const tokenLabel = (address: Address) => address.toLowerCase() === zeroAddress
     ? 'ETH' : positions.data?.tokens[address.toLowerCase()]?.symbol ?? shortAddr(address)
 
-  return <section className="card" style={{ marginTop: 18 }}>
+  return <section>
     <div className="section-title">Fables LP 策略</div>
     {!accessToken && <div className="dim">连接策略执行器后可查看 Fables 策略。</div>}
     {error && <div className="red mono-sm">{error}</div>}
-    {strategies.map(row => <div className="card inset-card" key={row.config.id}>
-      <b>{row.config.name}</b> · {strategyStateLabel[row.state] ?? row.state}
-      <div className="mono-sm dim">池 {shortAddr(row.config.positionRef.poolId)} · 区间 {row.config.positionRef.tickLower}–{row.config.positionRef.tickUpper} · 份额区间 ID {row.config.positionRef.rangeId}</div>
-      {row.monitor?.lastTick !== undefined && <div className="mono-sm">当前 tick {row.monitor.lastTick}{row.monitor.outSide ? ` · ${row.monitor.outSide === 'lower' ? '低于' : '高于'}区间` : ''}</div>}
-      {row.monitor?.error && <div className="red mono-sm">{row.monitor.error}</div>}
-      {row.recentLedger?.filter(entry => entry.kind === 'fees_claimed').slice(0, 4).map((entry, index) => {
-        const token = entry.token?.toLowerCase()
-        const meta = token ? positions.data?.tokens[token] : undefined
-        const decimals = token === zeroAddress ? 18 : meta?.decimals
-        return <div className="mono-sm" key={`${entry.jobId}:${entry.txHash}:${token}:${index}`}>
-          已领取手续费 {entry.amount && decimals != null ? formatUnits(BigInt(entry.amount), decimals) : entry.amount}
-          {' '}{token === zeroAddress ? 'ETH' : meta?.symbol ?? (token ? shortAddr(token) : '')}
-          {entry.txHash && ` · ${shortAddr(entry.txHash)}`}
+    {strategies.map(row => {
+      const state = fablesStrategyState(row.state)
+      const ref = row.config.positionRef
+      const jobRows = jobs.filter(job => job.strategyId === row.config.id)
+      const feeClaims = row.recentLedger?.filter(entry => entry.kind === 'fees_claimed').slice(0, 4) ?? []
+      const quote = row.config.quoteToken
+      return <div className="card" key={row.config.id}>
+        <div className="card-head">
+          <span className="card-title">{row.config.name}</span>
+          <Badge tone={state.tone}>{state.label}</Badge>
+          {row.config.execution.dryRun && <Badge tone="amber">dry run</Badge>}
+          <Badge tone="dim">{row.config.execution.mode === 'executor_auto' ? '自动退出并重开' : '仅监控'}</Badge>
+          <Badge tone="dim">±{row.config.range.lowerPct}/{row.config.range.upperPct}%</Badge>
+          <div className="card-actions">
+            <Btn busy={busy} disabled={!accessToken} onClick={() => void preview(row.config.id)}>只读执行预览</Btn>
+          </div>
         </div>
-      })}
-      {jobs.filter(job => job.strategyId === row.config.id).slice(0, 2).map(job =>
-        <div className="mono-sm" key={job.id}>
-          作业 {jobStateLabel[job.state] ?? job.state} · {job.stage} · 资产位置 {assetLocationLabel[job.assetLocation] ?? job.assetLocation}
-          {job.errorCode && job.state !== 'cancelled' && <span className="red"> · {job.errorCode}</span>}
-          {job.transactions.map(tx => <div key={tx.hash}>
-            {tx.stage} {tx.state} · {tx.hash}
-            {canManage && job.state === 'recovery' && tx.canRebroadcast
-              && <button disabled={busy} onClick={() => void rebroadcast(job.id, tx.ordinal)}>重播同一笔已签名交易</button>}
+        <div className="kv mono-sm">
+          <span>池 {shortAddr(ref.poolId)}</span>
+          <span>Hook {shortAddr(ref.hook)}</span>
+          <span>区间 {ref.tickLower}–{ref.tickUpper} ticks</span>
+          <span title={ref.rangeId}>份额区间 ID {shortRangeId(BigInt(ref.rangeId))}</span>
+          {row.monitor?.lastTick !== undefined && (
+            <span>当前 tick {row.monitor.lastTick}
+              {row.monitor.outSide ? `（${row.monitor.outSide === 'lower' ? '低于' : '高于'}区间）` : '（区间内）'}
+            </span>
+          )}
+          <span>越界确认 {row.config.trigger.confirmationSeconds}s · 冷却 {row.config.trigger.cooldownMinutes}min · 轮询 {row.config.trigger.pollSeconds}s</span>
+          {row.config.execution.maxDailyTurnoverQuote
+            && <span>日换币上限 {row.config.execution.maxDailyTurnoverQuote} {tokenLabel(quote)}</span>}
+          <span>已领手续费 {feeHandlingLabel[row.config.fees.handling] ?? row.config.fees.handling}</span>
+        </div>
+        <div className={row.monitor?.error ? 'red mono-sm' : 'green mono-sm'}>
+          {row.monitor?.error
+            ?? `监控正常${row.monitor?.lastBlock ? ` · 区块 ${row.monitor.lastBlock}` : ''}`}
+        </div>
+        {feeClaims.length > 0 && (() => {
+          const claimText = (entry: NonNullable<ExecutorFablesStrategy['recentLedger']>[number]) => {
+            const token = entry.token?.toLowerCase()
+            const decimals = token === zeroAddress ? 18 : positions.data?.tokens[token ?? '']?.decimals
+            return `${entry.amount && decimals != null ? formatUnits(BigInt(entry.amount), decimals) : entry.amount} ${token === zeroAddress ? 'ETH' : token ? positions.data?.tokens[token]?.symbol ?? shortAddr(token) : ''}`
+          }
+          return <div className="pmetrics compact mono-sm">
+            <PCell k="已领取手续费" v={claimText(feeClaims[0])}
+              subs={feeClaims.slice(1).map((entry, index) => <span key={`${entry.jobId}:${index}`}>
+                {claimText(entry)}{entry.txHash ? ' · ' : ''}
+                {entry.txHash && <TxLink hash={entry.txHash} />}
+              </span>)} />
+            <div className="pcell">
+              <span className="k">最近领取</span>
+              {feeClaims.map((entry, index) => <span key={`${entry.jobId}:${entry.txHash}:${index}`} className="sub">
+                {entry.txHash ? <TxLink hash={entry.txHash} /> : '—'}
+                {entry.blockNumber ? ` · 区块 ${entry.blockNumber}` : ''}
+              </span>)}
+            </div>
+          </div>
+        })()}
+        {jobRows.slice(0, 2).map(job =>
+          <div className="mono-sm" key={job.id} style={{ marginTop: 8 }}>
+            <div>
+              作业 {jobStateLabel[job.state] ?? job.state} · {job.stage} · 资产位置 {assetLocationLabel[job.assetLocation] ?? job.assetLocation}
+              {job.errorCode && job.state !== 'cancelled' && <span className="red"> · {job.errorCode}</span>}
+            </div>
+            {job.transactions.map(tx => <div className="dim mono-sm" key={tx.hash}>
+              {tx.stage} {tx.state} · <TxLink hash={tx.hash} />
+              {tx.blockNumber ? ` · 区块 ${tx.blockNumber}` : ''}
+              {canManage && job.state === 'recovery' && tx.canRebroadcast
+                && <button disabled={busy} onClick={() => void rebroadcast(job.id, tx.ordinal)}> · 重播同一笔已签名交易</button>}
+            </div>)}
+            {canManage && job.state === 'recovery'
+              && job.transactions.every(tx => tx.state !== 'sending' && tx.state !== 'sent')
+              && <button disabled={busy} onClick={() => void resume(job.id)}>核对链上状态后重试</button>}
           </div>)}
-          {canManage && job.state === 'recovery'
-            && job.transactions.every(tx => tx.state !== 'sending' && tx.state !== 'sent')
-            && <button disabled={busy} onClick={() => void resume(job.id)}>核对链上状态后重试</button>}
-        </div>)}
-      <button disabled={!accessToken || busy} onClick={() => void preview(row.config.id)}>查看只读执行预览</button>
-    </div>)}
-    {plan && <div className="card inset-card mono-sm">
-      <b>执行预览 · 区块 {plan.observedBlock}</b>
-      <div>旧区间 {plan.old.tickLower}–{plan.old.tickUpper} · {plan.old.shares} 份额</div>
-      <div>退出：{plan.exit.method} · 本金 {plan.exit.principal0}/{plan.exit.principal1}（最少到账 {plan.exit.amount0Min}/{plan.exit.amount1Min}）</div>
-      <div>当前待领费用 {plan.exit.claimable0}/{plan.exit.claimable1} · 需允许的领取费率 {plan.exit.claimFeeBps} bps（策略上限 {plan.constraints.maxClaimFeeBps} bps）</div>
-      <div>按当前价格的参考新区间 {plan.indicativeRecenter.tickLower}–{plan.indicativeRecenter.tickUpper}</div>
-      <div>参考目标价值占比：{tokenLabel(plan.indicativeRecenter.currency0)} {(plan.indicativeRecenter.targetValueBps0 / 100).toFixed(2)}% · {tokenLabel(plan.indicativeRecenter.currency1)} {(plan.indicativeRecenter.targetValueBps1 / 100).toFixed(2)}%</div>
-      <div>交易约束：最大滑点 {plan.constraints.maxSlippageBps} bps · 最大换币价格冲击 {plan.constraints.maxSwapImpactBps} bps · 计划有效期 {plan.constraints.maxPlanAgeSeconds} 秒</div>
-      <div>原生币 gas 预留至少 {formatUnits(BigInt(plan.constraints.minNativeGasReserveWei), 18)} ETH
-        {plan.constraints.maxGasPriceWei && ` · gas 单价上限 ${formatUnits(BigInt(plan.constraints.maxGasPriceWei), 9)} gwei`}</div>
-      {plan.constraints.maxDailyTurnoverQuote && <div>每日换币上限 {plan.constraints.maxDailyTurnoverQuote} {tokenLabel(plan.constraints.quoteToken)}</div>}
-      {plan.exit.method === 'withdraw' && <div>旧版池无领取费率上限退出：{plan.constraints.allowLegacyUnboundedFeeExit ? '已授权' : '未授权'}</div>}
-      <div className="dim">价值占比按当前池价估算；实际新区间、资产比例和换币数量将在退出到账后重新计算。</div>
-    </div>}
-    {canManage && <>
-      <div className="dim">选择已有份额区间创建监控策略。</div>
+        {plan && plan.strategyId === row.config.id && <div className="card inset-card mono-sm">
+          <b>执行预览 · 区块 {plan.observedBlock}</b>
+          <div>旧区间 {plan.old.tickLower}–{plan.old.tickUpper} · {plan.old.shares} 份额</div>
+          <div>退出：{plan.exit.method} · 本金 {plan.exit.principal0}/{plan.exit.principal1}（最少到账 {plan.exit.amount0Min}/{plan.exit.amount1Min}）</div>
+          <div>当前待领费用 {plan.exit.claimable0}/{plan.exit.claimable1} · 需允许的领取费率 {plan.exit.claimFeeBps} bps（策略上限 {plan.constraints.maxClaimFeeBps} bps）</div>
+          <div>按当前价格的参考新区间 {plan.indicativeRecenter.tickLower}–{plan.indicativeRecenter.tickUpper}</div>
+          <div>参考目标价值占比：{tokenLabel(plan.indicativeRecenter.currency0)} {(plan.indicativeRecenter.targetValueBps0 / 100).toFixed(2)}% · {tokenLabel(plan.indicativeRecenter.currency1)} {(plan.indicativeRecenter.targetValueBps1 / 100).toFixed(2)}%</div>
+          <div>交易约束：最大滑点 {plan.constraints.maxSlippageBps} bps · 最大换币价格冲击 {plan.constraints.maxSwapImpactBps} bps · 计划有效期 {plan.constraints.maxPlanAgeSeconds} 秒</div>
+          <div>原生币 gas 预留至少 {formatUnits(BigInt(plan.constraints.minNativeGasReserveWei), 18)} ETH
+            {plan.constraints.maxGasPriceWei && ` · gas 单价上限 ${formatUnits(BigInt(plan.constraints.maxGasPriceWei), 9)} gwei`}</div>
+          {plan.constraints.maxDailyTurnoverQuote && <div>每日换币上限 {plan.constraints.maxDailyTurnoverQuote} {tokenLabel(plan.constraints.quoteToken)}</div>}
+          {plan.exit.method === 'withdraw' && <div>旧版池无领取费率上限退出：{plan.constraints.allowLegacyUnboundedFeeExit ? '已授权' : '未授权'}</div>}
+          <div className="dim">价值占比按当前池价估算；实际新区间、资产比例和换币数量将在退出到账后重新计算。</div>
+        </div>}
+      </div>
+    })}
+    {canManage && <details className="card" style={{ marginTop: 12 }} open={strategies.length === 0}>
+      <summary className="card-title" style={{ cursor: 'pointer' }}>从已有份额区间创建策略</summary>
+      <div className="dim" style={{ marginTop: 10 }}>选择已有份额区间创建监控策略。</div>
       <div className="row gap-sm">
         <label>执行方式 <select value={executionMode} onChange={event => setExecutionMode(event.target.value as 'notify_only' | 'executor_auto')}>
           <option value="notify_only">仅监控通知</option>
@@ -249,6 +288,6 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
             onClick={() => void save(position)}>{existing ? '已有策略' : executionMode === 'executor_auto' ? '创建自动策略' : '创建监控策略'}</button>
         </div>
       })}
-    </>}
+    </details>}
   </section>
 }

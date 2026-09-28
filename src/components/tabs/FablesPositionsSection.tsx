@@ -1,24 +1,17 @@
 import { useState } from 'react'
 import type { Address, Hex } from 'viem'
+import { EXPLORER } from '../../config/addresses'
 import { CHAIN } from '../../config/chains'
-import { useFablesPositions, type FablesManualRef, type FablesToken } from '../../hooks/useFablesPositions'
+import { robinhoodConfig } from '../../config/chains/robinhood'
+import { PairAddrs } from '../PairAddrs'
+import { RangeBar } from '../RangeBar'
+import { Badge } from '../ui'
+import { useFablesPositions, type FablesManualRef } from '../../hooks/useFablesPositions'
 import { useFablesManualRefs } from '../../hooks/useFablesManualRefs'
 import { fablesRangeId, readFablesPools, readFablesPosition } from '../../lib/fables'
 import { fmtAmount, shortAddr } from '../../lib/format'
 import { publicRpcClient } from '../../lib/publicRpcClient'
-
-function quantity(raw: bigint, token: FablesToken | undefined): string {
-  return token?.decimals === null || token?.decimals === undefined
-    ? `${raw} raw units`
-    : fmtAmount(raw, token.decimals)
-}
-
-function priceAtTick(tick: number, token0: FablesToken | undefined, token1: FablesToken | undefined): string {
-  if (token0?.decimals === null || token0?.decimals === undefined
-    || token1?.decimals === null || token1?.decimals === undefined) return `tick ${tick}`
-  const price = Math.pow(1.0001, tick) * Math.pow(10, token0.decimals - token1.decimals)
-  return Number.isFinite(price) && price > 0 ? price.toPrecision(6) : `tick ${tick}`
-}
+import { PCell, priceAtTick, quantity, shortRangeId } from './fablesUi'
 
 export function FablesPositionsSection({ owner }: { owner: Address }) {
   const { manualRefs, saveManualRefs } = useFablesManualRefs(owner)
@@ -66,29 +59,54 @@ export function FablesPositionsSection({ owner }: { owner: Address }) {
       const token1 = query.data.tokens[position.pool.key.currency1.toLowerCase()]
       const label0 = token0?.symbol ?? shortAddr(position.pool.key.currency0)
       const label1 = token1?.symbol ?? shortAddr(position.pool.key.currency1)
+      const dec0 = token0?.decimals ?? 18
+      const dec1 = token1?.decimals ?? 18
+      const hasClaimable = position.claimable0 > 0n || position.claimable1 > 0n
       return <div className="card" key={`${position.pool.id}:${position.rangeId}`}>
-        <div className="mono-sm"><b>{label0}/{label1}</b> · Fables · 池 {shortAddr(position.pool.id)}</div>
-        <div className="mono-sm dim">Hook {shortAddr(position.pool.key.hooks)} · 区间 ID {position.rangeId.toString()}</div>
-        <div className="mono-sm">
-          当前价格 {priceAtTick(position.tick, token0, token1)} {label1}/{label0} · 区间
-          {' '}{priceAtTick(position.tickLower, token0, token1)}–{priceAtTick(position.tickUpper, token0, token1)}
-          {' '}({position.tickLower}–{position.tickUpper} ticks)
+        <div className="card-head">
+          <PairAddrs className="card-title" sym0={label0} sym1={label1}
+            token0={position.pool.key.currency0} token1={position.pool.key.currency1}
+            pool={robinhoodConfig.uniV4!.POOL_MANAGER}
+            poolId={position.pool.id} hooks={position.pool.key.hooks} />
+          <Badge tone="cyan">Fables 份额</Badge>
+          <Badge tone={position.inRange ? 'green' : 'red'}>{position.inRange ? '区间内' : '已离开区间'}</Badge>
+          {position.staked > 0n && <Badge tone="amber">已质押</Badge>}
+          {position.claimPaused && <Badge tone="amber">领取暂停</Badge>}
+          <a className="dim mono-sm" href={`${EXPLORER}/address/${position.pool.key.hooks}`}
+            target="_blank" rel="noreferrer" title={position.pool.key.hooks}>
+            Hook {shortAddr(position.pool.key.hooks)}↗
+          </a>
         </div>
-        <div className={position.inRange ? 'green' : 'red'}>{position.inRange ? '区间内' : '已离开区间'}</div>
-        <div className="mono-sm">份额 {position.shares.toString()} · 本金 {quantity(position.amount0, token0)} {label0} + {quantity(position.amount1, token1)} {label1}</div>
-        <div className="mono-sm">待领净费用 {quantity(position.claimable0, token0)} {label0} + {quantity(position.claimable1, token1)} {label1}</div>
-        {position.staked > 0n && <div className="amber">此仓位已质押，自动再平衡暂不支持。</div>}
-        {position.claimPaused && <div className="amber">费用领取已暂停。</div>}
-        <div className="dim mono-sm">链上区块 {position.observedBlock.toString()}</div>
+        <div className="pmetrics mono-sm">
+          <PCell k="份额" v={fmtAmount(position.shares, 18)} subs={[
+            `本金 ${quantity(position.amount0, token0)} ${label0} + ${quantity(position.amount1, token1)} ${label1}`,
+            `区间全部份额 ${position.totalShares.toString()}`,
+          ]} />
+          <PCell k="待领净费用"
+            v={hasClaimable
+              ? <span className="amber">{quantity(position.claimable0, token0)} {label0} + {quantity(position.claimable1, token1)} {label1}</span>
+              : <span className="dim">—</span>}
+            subs={position.claimFeeBps > 0 ? [`领取费率上限 ${position.claimFeeBps} bps`] : undefined} />
+          <PCell k="区间"
+            v={`${priceAtTick(position.tickLower, token0, token1)} – ${priceAtTick(position.tickUpper, token0, token1)} ${label1}/${label0}`}
+            subs={[`当前 ${priceAtTick(position.tick, token0, token1)} ${label1}/${label0} · tick ${position.tick}`]} />
+        </div>
+        <RangeBar tickLower={position.tickLower} tickUpper={position.tickUpper} tick={position.tick}
+          sqrtPriceX96={position.sqrtPriceX96} dec0={dec0} dec1={dec1} sym0={label0} sym1={label1} />
+        <div className="dim mono-sm">
+          链上区块 {position.observedBlock.toString()} · 池 {shortAddr(position.pool.id)} · 区间 ID {shortRangeId(position.rangeId)}
+        </div>
       </div>
     })}
-    <div className="mono-sm" style={{ marginTop: 10 }}>手动导入 Fables 区间（池 ID、下 tick、上 tick）</div>
-    <div className="row gap-sm">
-      <input aria-label="Fables 池 ID" placeholder="0x… PoolId" value={poolId} onChange={event => setPoolId(event.target.value.trim())} />
-      <input aria-label="下 tick" placeholder="下 tick" value={lower} onChange={event => setLower(event.target.value)} />
-      <input aria-label="上 tick" placeholder="上 tick" value={upper} onChange={event => setUpper(event.target.value)} />
-      <button disabled={importBusy} onClick={() => void importPosition()}>{importBusy ? '核对中…' : '导入'}</button>
-    </div>
-    {importError && <div className="red mono-sm">{importError}</div>}
+    <details className="card" style={{ marginTop: 10 }}>
+      <summary className="card-title" style={{ cursor: 'pointer' }}>手动导入 Fables 区间（池 ID、下 tick、上 tick）</summary>
+      <div className="row gap-sm" style={{ marginTop: 10 }}>
+        <input aria-label="Fables 池 ID" placeholder="0x… PoolId" value={poolId} onChange={event => setPoolId(event.target.value.trim())} />
+        <input aria-label="下 tick" placeholder="下 tick" value={lower} onChange={event => setLower(event.target.value)} />
+        <input aria-label="上 tick" placeholder="上 tick" value={upper} onChange={event => setUpper(event.target.value)} />
+        <button disabled={importBusy} onClick={() => void importPosition()}>{importBusy ? '核对中…' : '导入'}</button>
+      </div>
+      {importError && <div className="red mono-sm">{importError}</div>}
+    </details>
   </section>
 }
