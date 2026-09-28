@@ -10,7 +10,7 @@ import { quoteFablesExit } from '../src/lib/fablesExitQuote'
 import { prepareFablesClaimCall, prepareFablesDepositCall, prepareFablesExitCall } from '../src/lib/fablesWrite'
 import { planBalanceSwap } from '../shared/strategy/rebalance'
 import { fablesRangeId } from '../src/lib/fables'
-import { quoteKyber, gatedKyberTx } from './kyber'
+import { quoteKyber, quoteNativeExecutable, gatedKyberTx } from './kyber'
 import { publicClient, readAllowance, readTokenBalances } from './chain'
 import { EXECUTOR } from './config'
 import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, cycleSpendableAmounts, fablesSwapImpactBps, freshFablesRange, mintedFablesShares, type FablesAmounts } from './fablesCycle'
@@ -27,10 +27,12 @@ import { walletBusy, withWalletLock } from './wallet-lock'
 
 const lower = (address: string) => address.toLowerCase()
 const routeCurrency = (address: Address) => lower(address) === lower(zeroAddress) ? ADDR.WNATIVE : address
-async function quoteFablesRoute(tokenIn: Address, tokenOut: Address, amountIn: bigint) {
-  const route = await quoteKyber(routeCurrency(tokenIn), routeCurrency(tokenOut), amountIn)
-  if ((lower(tokenIn) === lower(zeroAddress) || lower(tokenOut) === lower(zeroAddress))
-    && !['up33_cl', 'univ3'].includes(route.routeSummary.executorSource ?? ''))
+async function quoteFablesRoute(tokenIn: Address, tokenOut: Address, amountIn: bigint, maxLagBps: number) {
+  const native = lower(tokenIn) === lower(zeroAddress) || lower(tokenOut) === lower(zeroAddress)
+  const route = native
+    ? await quoteNativeExecutable(routeCurrency(tokenIn), routeCurrency(tokenOut), amountIn, maxLagBps)
+    : await quoteKyber(routeCurrency(tokenIn), routeCurrency(tokenOut), amountIn)
+  if (native && !['up33_cl', 'univ3'].includes(route.routeSummary.executorSource ?? ''))
     throw new Error('E_FABLES_NATIVE_ROUTE')
   return route
 }
@@ -113,7 +115,8 @@ async function precheck(job: FablesJob): Promise<void> {
   if (spendable0 === 0n || spendable1 === 0n) {
     const tokenIn = spendable0 > 0n ? position.pool.key.currency0 : position.pool.key.currency1
     const tokenOut = spendable0 > 0n ? position.pool.key.currency1 : position.pool.key.currency0
-    await quoteFablesRoute(tokenIn, tokenOut, (spendable0 > 0n ? spendable0 : spendable1) / 4n || 1n)
+    await quoteFablesRoute(tokenIn, tokenOut, (spendable0 > 0n ? spendable0 : spendable1) / 4n || 1n,
+      job.config.safeguards.maxSlippageBps)
   }
   if (completedFablesCyclesSince(job.strategyId, Math.floor(Date.now() / 1000) - 86_400)
     >= job.config.safeguards.maxRebalancesPerDay) throw new Error('E_FABLES_DAILY_COUNT')
@@ -254,7 +257,7 @@ async function balanceAndPlan(job: FablesJob): Promise<void> {
     const feeRisk = riskIs0 ? held.amount0 : held.amount1
     if (feeRisk > 0n) {
       const route = await quoteFablesRoute(job.config.riskToken,
-        job.config.quoteToken, feeRisk)
+        job.config.quoteToken, feeRisk, job.config.safeguards.maxSlippageBps)
       const impact = fablesSwapImpactBps({ amountIn: feeRisk,
         quotedOut: BigInt(route.routeSummary.amountOut), tokenIn: job.config.riskToken,
         currency0: key.currency0, sqrtPriceX96: position.sqrtPriceX96 })
@@ -273,7 +276,8 @@ async function balanceAndPlan(job: FablesJob): Promise<void> {
     balance0: lp.amount0, balance1: lp.amount1,
     units: range.units,
     quote: async (tokenIn, tokenOut, amountIn) => {
-      const result = await quoteFablesRoute(tokenIn, tokenOut, amountIn)
+      const result = await quoteFablesRoute(tokenIn, tokenOut, amountIn,
+        job.config.safeguards.maxSlippageBps)
       return { amountOut: BigInt(result.routeSummary.amountOut), route: result.routeSummary }
     },
   })
@@ -336,7 +340,8 @@ async function prepareSwapRoute(job: FablesJob, swap: StoredSwap) {
   const amountIn = BigInt(swap.amountIn)
   const tokenIn = routeCurrency(swap.tokenIn)
   const tokenOut = routeCurrency(swap.tokenOut)
-  const route = await quoteFablesRoute(swap.tokenIn, swap.tokenOut, amountIn)
+  const route = await quoteFablesRoute(swap.tokenIn, swap.tokenOut, amountIn,
+    job.config.safeguards.maxSlippageBps)
   const isNative = lower(swap.tokenIn) === lower(zeroAddress)
     || lower(swap.tokenOut) === lower(zeroAddress)
   let gated
