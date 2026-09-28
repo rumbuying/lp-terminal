@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatUnits, parseUnits, zeroAddress, type Address } from 'viem'
+import { fmtNum } from '../../lib/format'
 import type { FablesStrategyConfig } from '../../../shared/strategy/types'
 import { robinhoodConfig } from '../../config/chains/robinhood'
 import { FABLES_AUTO_POOL_IDS } from '../../config/fables'
@@ -153,6 +154,22 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
       const jobRows = jobs.filter(job => job.strategyId === row.config.id)
       const feeClaims = row.recentLedger?.filter(entry => entry.kind === 'fees_claimed').slice(0, 4) ?? []
       const quote = row.config.quoteToken
+      // 同一套累计口径（最近 100 条账本 / 最近 50 个作业），换币与 gas 均按币种分开计
+      const ledger = row.recentLedger ?? []
+      const sumFor = (kind: string, native: boolean) => ledger
+        .filter(entry => entry.kind === kind
+          && (native ? (entry.token?.toLowerCase() ?? zeroAddress) === zeroAddress
+            : !!entry.token && entry.token.toLowerCase() !== zeroAddress))
+        .reduce((sum, entry) => sum + BigInt(entry.amount ?? '0'), 0n)
+      const feeEth = sumFor('fees_claimed', true)
+      const feeToken = sumFor('fees_claimed', false)
+      const gasEth = sumFor('gas', true)
+      const netEth = feeEth - gasEth
+      const fmt18 = (value: bigint) => fmtNum(Number(formatUnits(value, 18)), 6)
+      const completed = jobRows.filter(job => job.state === 'completed').length
+      const livePosition = positions.data?.positions.find(position =>
+        position.pool.id.toLowerCase() === ref.poolId.toLowerCase()
+        && position.rangeId.toString() === ref.rangeId)
       return <div className="card" key={row.config.id}>
         <div className="card-head">
           <span className="card-title">{row.config.name}</span>
@@ -162,6 +179,30 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
           <Badge tone="dim">±{row.config.range.lowerPct}/{row.config.range.upperPct}%</Badge>
           <div className="card-actions">
             <Btn busy={busy} disabled={!accessToken} onClick={() => void preview(row.config.id)}>只读执行预览</Btn>
+          </div>
+        </div>
+        <div className="performance-grid">
+          <div className="performance-metric">
+            <span>累计重开</span>
+            <strong>{completed}</strong>
+            <small>已完成的再平衡周期</small>
+          </div>
+          <div className="performance-metric">
+            <span>累计手续费</span>
+            <strong className="green">{fmt18(feeEth)} ETH</strong>
+            <small>+ {fmt18(feeToken)} PONS</small>
+          </div>
+          <div className="performance-metric">
+            <span>累计 gas</span>
+            <strong>{fmt18(gasEth)} ETH</strong>
+            <small>净手续费 ≈ <span className={netEth >= 0n ? 'green' : 'red'}>{fmt18(netEth)} ETH</span> + {fmt18(feeToken)} PONS</small>
+          </div>
+          <div className="performance-metric">
+            <span>当前仓位</span>
+            <strong>{livePosition ? fmtNum(Number(formatUnits(livePosition.shares, 18)), 5) : '—'}</strong>
+            <small>{livePosition
+              ? `本金 ${fmt18(livePosition.amount0)} ETH + ${fmt18(livePosition.amount1)} PONS`
+              : '与链上区间核对中'}</small>
           </div>
         </div>
         <div className="kv mono-sm">
