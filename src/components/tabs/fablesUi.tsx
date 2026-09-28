@@ -1,7 +1,22 @@
 import type { ReactNode } from 'react'
+import { zeroAddress } from 'viem'
 import { EXPLORER } from '../../config/addresses'
 import type { FablesToken } from '../../hooks/useFablesPositions'
+import type { TokenInfo } from '../../types'
 import { fmtAmount, shortAddr } from '../../lib/format'
+
+/** A Fables pool currency as the TokenInfo the USD-price hooks expect. Native
+ *  value spells as the zero address in a v4 pool key and is flagged native so
+ *  the price lookup goes through WNATIVE. */
+export function asTokenInfo(token: FablesToken | undefined): TokenInfo {
+  const address = token?.address ?? zeroAddress
+  return {
+    address,
+    symbol: token?.symbol ?? shortAddr(address),
+    decimals: token?.decimals ?? 18,
+    native: address.toLowerCase() === zeroAddress,
+  }
+}
 
 /** Same cell vocabulary as the position cards' PCell — label over value with
  *  dim sub-lines, so a Fables card reads exactly like every other card. */

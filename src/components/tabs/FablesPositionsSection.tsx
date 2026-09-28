@@ -13,17 +13,7 @@ import { useFablesManualRefs } from '../../hooks/useFablesManualRefs'
 import { fablesRangeId, readFablesPools, readFablesPosition, type FablesPosition } from '../../lib/fables'
 import { fmtAmount, fmtUsd, shortAddr } from '../../lib/format'
 import { publicRpcClient } from '../../lib/publicRpcClient'
-import { PCell, priceAtTick, quantity, shortRangeId } from './fablesUi'
-
-function asTokenInfo(token: FablesToken | undefined): TokenInfo {
-  const address = token?.address ?? zeroAddress
-  return {
-    address,
-    symbol: token?.symbol ?? shortAddr(address),
-    decimals: token?.decimals ?? 18,
-    native: address.toLowerCase() === zeroAddress,
-  }
-}
+import { PCell, asTokenInfo, priceAtTick, quantity, shortRangeId } from './fablesUi'
 
 function FablesPositionCard({ position, tokens }: {
   position: FablesPosition

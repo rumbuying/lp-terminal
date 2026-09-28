@@ -11,10 +11,11 @@ import { executorFablesJobs, executorFablesStrategies, executorWallets,
   planExecutorFablesStrategy, rebroadcastExecutorFablesTx, resumeExecutorFablesJob, saveExecutorFablesStrategy,
   type ExecutorFablesJob, type ExecutorFablesPlan, type ExecutorFablesStrategy,
   type ExecutorWallet } from '../../lib/executorClient'
-import { shortAddr } from '../../lib/format'
+import { shortAddr, fmtUsd } from '../../lib/format'
 import { Badge, Btn } from '../ui'
-import { assetLocationLabel, feeHandlingLabel, fablesStrategyState, jobStateLabel,
+import { asTokenInfo, assetLocationLabel, feeHandlingLabel, fablesStrategyState, jobStateLabel,
   PCell, TxLink, shortRangeId } from './fablesUi'
+import { useTokenUsd } from '../../hooks/useTokenUsd'
 
 const preferredQuoteToken = (currency0: Address, currency1: Address): Address => {
   const stable = robinhoodConfig.addr.STABLE.toLowerCase()
@@ -63,6 +64,18 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
     const timer = setInterval(() => void refresh(), 15_000)
     return () => clearInterval(timer)
   }, [accessToken])
+
+  // USD anchor for the position metrics — the same dexscreener prices the
+  // position tab values with, keyed off the pool currencies of any live read.
+  const firstRead = positions.data?.positions[0]
+  const riskMeta = firstRead ? positions.data?.tokens[firstRead.pool.key.currency1.toLowerCase()] : undefined
+  const usdNative = useTokenUsd(asTokenInfo(firstRead
+    ? { address: firstRead.pool.key.currency0, symbol: 'ETH', decimals: 18 } : undefined)).data
+  const usdRisk = useTokenUsd(asTokenInfo(firstRead
+    ? { address: firstRead.pool.key.currency1,
+        symbol: riskMeta?.symbol ?? '',
+        decimals: riskMeta?.decimals ?? 18 }
+    : undefined)).data
 
   const save = async (position: NonNullable<typeof positions.data>['positions'][number]) => {
     if (!accessToken || !canManage) return
@@ -207,6 +220,13 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
             <small>{livePosition
               ? `本金 ${fmt18(livePosition.amount0)} ETH + ${fmt18(livePosition.amount1)} PONS`
               : '与链上区间核对中'}</small>
+            {livePosition && usdNative != null && usdRisk != null && (() => {
+              const posUsd = Number(formatUnits(livePosition.amount0, 18)) * usdNative
+                + Number(formatUnits(livePosition.amount1, 18)) * usdRisk
+              return Number.isFinite(posUsd) && posUsd > 0
+                ? <small>≈ <b>{fmtUsd(posUsd)}</b></small>
+                : null
+            })()}
           </div>
         </div>
         <div className="kv mono-sm">

@@ -3,6 +3,8 @@ import type { Address, Hex } from 'viem'
 
 export type FablesManualRef = { poolId: Hex; tickLower: number; tickUpper: number }
 const changed = 'fables-manual-refs-changed'
+// A key no real wallet can produce, so a connecting session simply reads empty.
+const zeroAddressLike = '0x0000000000000000000000000000000000000000'
 const keyFor = (owner: Address) => `fables-imports:4663:${owner.toLowerCase()}`
 
 function read(key: string): FablesManualRef[] {
@@ -17,9 +19,11 @@ function read(key: string): FablesManualRef[] {
   } catch { return [] }
 }
 
-/** The position and strategy tabs share the same wallet-scoped manual imports. */
-export function useFablesManualRefs(owner: Address) {
-  const key = keyFor(owner)
+/** The position and strategy tabs share the same wallet-scoped manual imports.
+ *  `owner` may be undefined while the wallet is still connecting — the refs
+ *  then read from an impossible key and stay empty. */
+export function useFablesManualRefs(owner: Address | undefined) {
+  const key = keyFor(owner ?? zeroAddressLike)
   const [state, setState] = useState(() => ({ key, refs: read(key) }))
   useEffect(() => {
     const sync = () => setState({ key, refs: read(key) })
