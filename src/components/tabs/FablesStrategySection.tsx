@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatUnits, parseUnits, zeroAddress, type Address } from 'viem'
+import { EXPLORER } from '../../config/addresses'
 import { fmtNum } from '../../lib/format'
 import type { FablesStrategyConfig } from '../../../shared/strategy/types'
 import { robinhoodConfig } from '../../config/chains/robinhood'
@@ -167,6 +168,9 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
       const netEth = feeEth - gasEth
       const fmt18 = (value: bigint) => fmtNum(Number(formatUnits(value, 18)), 6)
       const completed = jobRows.filter(job => job.state === 'completed').length
+      // UP33 卡只展示最近一次执行；未完成的作业优先且最多两条，避免把恢复中的事藏起来
+      const openJobs = jobRows.filter(job => ['recovery', 'running', 'planned'].includes(job.state))
+      const displayJobs = openJobs.length > 0 ? openJobs.slice(0, 2) : jobRows.slice(0, 1)
       const livePosition = positions.data?.positions.find(position =>
         position.pool.id.toLowerCase() === ref.poolId.toLowerCase()
         && position.rangeId.toString() === ref.rangeId)
@@ -215,14 +219,21 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
               {row.monitor.outSide ? `（${row.monitor.outSide === 'lower' ? '低于' : '高于'}区间）` : '（区间内）'}
             </span>
           )}
-          <span>越界确认 {row.config.trigger.confirmationSeconds}s · 冷却 {row.config.trigger.cooldownMinutes}min · 轮询 {row.config.trigger.pollSeconds}s</span>
-          {row.config.execution.maxDailyTurnoverQuote
-            && <span>日换币上限 {row.config.execution.maxDailyTurnoverQuote} {tokenLabel(quote)}</span>}
-          <span>已领手续费 {feeHandlingLabel[row.config.fees.handling] ?? row.config.fees.handling}</span>
         </div>
         <div className={row.monitor?.error ? 'red mono-sm' : 'green mono-sm'}>
           {row.monitor?.error
             ?? `监控正常${row.monitor?.lastBlock ? ` · 区块 ${row.monitor.lastBlock}` : ''}`}
+        </div>
+        <div className="strategy-performance">
+          <div className="performance-foot mono-sm">
+            <span>区间宽度 ±{row.config.range.lowerPct}/{row.config.range.upperPct}%</span>
+            <span>越界确认 {row.config.trigger.confirmationSeconds}s</span>
+            <span>冷却 {row.config.trigger.cooldownMinutes}min</span>
+            <span>轮询 {row.config.trigger.pollSeconds}s</span>
+            {row.config.execution.maxDailyTurnoverQuote
+              && <span>日换币上限 {row.config.execution.maxDailyTurnoverQuote} {tokenLabel(quote)}</span>}
+            <span>已领手续费 {feeHandlingLabel[row.config.fees.handling] ?? row.config.fees.handling}</span>
+          </div>
         </div>
         {feeClaims.length > 0 && (() => {
           const claimText = (entry: NonNullable<ExecutorFablesStrategy['recentLedger']>[number]) => {
@@ -236,30 +247,39 @@ export function FablesStrategySection({ owner, accessToken, canManage }: {
                 {claimText(entry)}{entry.txHash ? ' · ' : ''}
                 {entry.txHash && <TxLink hash={entry.txHash} />}
               </span>)} />
-            <div className="pcell">
-              <span className="k">最近领取</span>
-              {feeClaims.map((entry, index) => <span key={`${entry.jobId}:${entry.txHash}:${index}`} className="sub">
-                {entry.txHash ? <TxLink hash={entry.txHash} /> : '—'}
-                {entry.blockNumber ? ` · 区块 ${entry.blockNumber}` : ''}
-              </span>)}
-            </div>
           </div>
         })()}
-        {jobRows.slice(0, 2).map(job =>
+        {displayJobs.map(job =>
           <div className="mono-sm" key={job.id} style={{ marginTop: 8 }}>
             <div>
               作业 {jobStateLabel[job.state] ?? job.state} · {job.stage} · 资产位置 {assetLocationLabel[job.assetLocation] ?? job.assetLocation}
               {job.errorCode && job.state !== 'cancelled' && <span className="red"> · {job.errorCode}</span>}
             </div>
-            {job.transactions.map(tx => <div className="dim mono-sm" key={tx.hash}>
-              {tx.stage} {tx.state} · <TxLink hash={tx.hash} />
-              {tx.blockNumber ? ` · 区块 ${tx.blockNumber}` : ''}
-              {canManage && job.state === 'recovery' && tx.canRebroadcast
-                && <button disabled={busy} onClick={() => void rebroadcast(job.id, tx.ordinal)}> · 重播同一笔已签名交易</button>}
-            </div>)}
-            {canManage && job.state === 'recovery'
-              && job.transactions.every(tx => tx.state !== 'sending' && tx.state !== 'sent')
-              && <button disabled={busy} onClick={() => void resume(job.id)}>核对链上状态后重试</button>}
+            {job.transactions.length > 0 && (
+              <details className="strategy-tx-history mono-sm" open={job.state === 'recovery'}>
+                <summary>查看最近一次执行的 {job.transactions.length} 笔交易</summary>
+                <div className="kv">
+                  {job.transactions.map(tx => (
+                    <a key={tx.hash} href={`${EXPLORER}/tx/${tx.hash}`} target="_blank" rel="noreferrer"
+                      title={tx.hash}>
+                      {tx.stage} {tx.state} ↗
+                      {tx.blockNumber ? ` · 区块 ${tx.blockNumber}` : ''}
+                    </a>
+                  ))}
+                </div>
+                {canManage && job.state === 'recovery' && (
+                  <div className="row gap-sm">
+                    {job.transactions.filter(tx => tx.canRebroadcast).map(tx => (
+                      <button key={tx.ordinal} disabled={busy} onClick={() => void rebroadcast(job.id, tx.ordinal)}>
+                        重播同一笔已签名交易（{tx.stage}）
+                      </button>
+                    ))}
+                    {job.transactions.every(tx => tx.state !== 'sending' && tx.state !== 'sent')
+                      && <button disabled={busy} onClick={() => void resume(job.id)}>核对链上状态后重试</button>}
+                  </div>
+                )}
+              </details>
+            )}
           </div>)}
         {plan && plan.strategyId === row.config.id && <div className="card inset-card mono-sm">
           <b>执行预览 · 区块 {plan.observedBlock}</b>
