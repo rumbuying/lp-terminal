@@ -327,7 +327,12 @@ async function approveToken(job: FablesJob, privateKey: Hex, stage: FablesJobSta
   const allowance = await readAllowance(token, job.config.owner, spender)
   if (allowance >= amount) return false
   const attempts = fablesJobTransactions(job.id).filter(tx => tx.stage === stage && tx.state === 'confirmed').length
-  if (attempts >= (stage === 'deposit_approval' ? 6 : 3)) throw new Error('E_FABLES_APPROVAL_CHURN')
+  // Six confirmed approvals per stage: the zero-first dance plus one amount
+  // re-plan already costs two, and a route flip changes the spender. Three
+  // wedged a live cycle in recovery (production 2026-09-28: approvals for
+  // 42.19 PONS, a re-plan to 44.56 PONS, and the zero-reset consumed the
+  // budget before the covering approval could land).
+  if (attempts >= 6) throw new Error('E_FABLES_APPROVAL_CHURN')
   // Zero first for ERC-20 tokens that reject a nonzero-to-nonzero approval.
   const approval = allowance === 0n ? amount : 0n
   const tx: FablesSafeTx = { to: token, value: 0n,
