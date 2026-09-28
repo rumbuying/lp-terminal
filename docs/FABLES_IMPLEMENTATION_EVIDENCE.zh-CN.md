@@ -1,6 +1,20 @@
 # Fables 接入验证记录
 
-> 2026-09-27。此文件记录 A～C 阶段的验证及 D 阶段的当前进度；只读功能已发布，完整自动循环、真实小额资金和生产自动签名发布尚未通过。
+> 2026-09-28。此文件记录 A～C 阶段的验证及 D/E 阶段的进度；只读功能已发布，**首轮真实资金自动再平衡已于 2026-09-28 在主网完成**（见下），生产自动签名仅对已审阅的 ETH/PONS 池开启。
+
+## 2026-09-28 首轮真实资金自动再平衡（E 阶段实盘）
+
+按用户决定跳过 Anvil fork 闭环，直接以真实资金线上试运行；完整 fork 仍受 archive RPC 限制，未再尝试。
+
+- 放行与配置：executor 环境新增 `LP_FABLES_AUTO_POOL_IDS=0xb59001413cb070e28433826f927b7265a0813213ba21f454d86896cee3cce674`（仅该池），随后经管理员 API 创建实盘策略 `fables-ethpons-live-01`：`executor_auto`、非 dryRun、区间宽度 ±2%、越界确认 120 秒、手续费 `hold_tokens`、滑点 100 bps、换币冲击 150 bps、每日 6 次、日换币上限 0.1 ETH、gas 储备 0.01 ETH、领取费率上限 1000 bps、`allowLegacyUnboundedFeeExit=false`。创建前确认两链 executor 无未完成作业、数据库已冷备、服务重启后四服务 active、`/health` 各项 ready 且未暂停。
+- 首轮循环（同一 job `fables-job-1cd6cf7b-…`，UTC 06:50 完成）：主网交易 `exit` 块 `74552743`（`withdrawAndClaim`，同时领费）→ 8 笔 `swap_approval` + 1 笔 `swap` 块 `74595495`（41.37 PONS→ETH）→ 2 笔 `deposit_approval` + 1 笔 `deposit` 块 `74595631`，共 13 笔确认交易、24 条账本记录。旧区间 `83760–84000` 份额与待领费用均归零；新区间 `84960–85440` 份额 `48426174650526553838`，当时 tick `85184` 位于区间内。策略 atomically 更新为新 `rangeId`（`53370676604848428787364039486517520069032644452864046556913453223866150458132`）并回到 `monitoring`；钱包余 `46.72 PONS` 与 `0.229 ETH`。gas 价约 0.02 gwei，整轮 gas 成本可忽略。
+- 实盘过程中发现并修复三个生产缺陷（均已发布并回归）：
+  1. `E_FABLES_NATIVE_ROUTE`：原生 ETH 腿只接受聚合器最优报价，而聚合器的多跳路由不可直接构造；当时 univ3 3000 ppm 直连池仅落后 12 bps，此前使用的 500 ppm 池流动性已恶化 2240 bps，导致策略被边际改善卡死。新增 `quoteNativeExecutable`：在最优可直连路由与整体最优报价相差不超过策略滑点上限时采用直连路由，超出仍报错。
+  2. `E_FABLES_APPROVAL_CHURN`：路由在两个已审阅 router（`0xC062…` 与 `0xCaf6…`）之间翻转，加上金额上调的「先归零再授权」两次消耗，6 次预算在仓位已退出后被耗尽。授权额度现带 5% 余量，单阶段预算提高到 8 次（仍有界）。
+  3. **空 revert 根因**：v4/池键用零地址表示原生币，而 `buildDirectTransaction` 只认 `0xEeee…` 哨兵；runner 直接传入零地址使结算调用变成 `sweepToken(0x0, …)`，对零地址 `balanceOf` 返回空数据、解码失败即无数据 revert，且 `QuoterV2` 式报价在该错误下仍能给出数值，掩盖了问题。新增 `directBuildCurrency` 映射并加回归测试断言原生腿必须生成 `unwrapWETH9`。此前 `E_FABLES_NATIVE_ROUTE` 与 churn 的排查因此被误导，实际首个真正阻断循环的是这一条。
+- 发布记录：executor 依次发布 `20260928T053031Z`（直连路由）、`20260928T055301Z`（授权预算）、`20260928T062856Z`（授权余量）、`20260928T064914Z`（原生币映射）。每次发布前双链全量测试与类型检查通过、新 release 隔离导入冒烟通过、切换前停服并冷备 `state.db`/`vaults`/Master Key、切换后五公网入口 200 且两链 executor `vaultReady/signerReady/apiAuthReady` 为 true。
+- 轮询频率：策略 `trigger.pollSeconds` 由 4 改为 60。注意 executor 侧 `LP_EXECUTOR_MONITOR_MIN_SECONDS=10` 是下限，实际间隔取 `max(pollSeconds, 10)`，改动前有效间隔为 10 秒，改动后为 60 秒。
+- 尚未验证：同一仓位连续第二轮自动再平衡、执行器在 swap/deposit 中途重启的实盘恢复、以及真实资金规模的故障注入；archive RPC 的 `eth_getProof` 限制仍未解决。
 
 ## 2026-09-27 用户仓位与生产只读发布
 
