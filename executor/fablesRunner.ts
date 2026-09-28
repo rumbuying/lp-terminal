@@ -19,7 +19,7 @@ import { completedFablesCyclesSince, activeFablesJobs, appendFablesLedger, cance
   reserveFablesTurnover, setFablesJobProgress,
   type FablesCycleFact, type FablesJob, type FablesJobStage } from './fablesJobs'
 import { fablesTokenDecimals } from './fablesPlan'
-import { FABLES_APPROVAL_LIMIT, fablesApprovalAmount } from './fablesLimits'
+import { FABLES_APPROVAL_LIMIT, fablesApprovalAmount, directBuildCurrency } from './fablesLimits'
 import { fablesRecoveryRequiresReview, reconcileFablesTransactions } from './fablesRecovery'
 import { sendFablesTracked, type FablesSafeTx } from './fablesSigner'
 import { audit, executorPaused } from './store'
@@ -364,8 +364,8 @@ async function prepareSwapRoute(job: FablesJob, swap: StoredSwap) {
         feePpm: Number(route.routeSummary.feePpm) }
     } else throw new Error('E_FABLES_NATIVE_ROUTE')
     const minOut = applySlippage(BigInt(route.routeSummary.amountOut), job.config.safeguards.maxSlippageBps)
-    const direct = buildDirectTransaction({ tokenIn: swap.tokenIn,
-      tokenOut: swap.tokenOut, amountIn, minimumAmountOut: minOut,
+    const direct = buildDirectTransaction({ tokenIn: directBuildCurrency(swap.tokenIn),
+      tokenOut: directBuildCurrency(swap.tokenOut), amountIn, minimumAmountOut: minOut,
       recipient: job.config.owner,
       deadline: BigInt(Math.floor(Date.now() / 1000) + job.config.safeguards.maxPlanAgeSeconds),
       route: directRoute, fee: { bps: 0, receiver: job.config.owner } })

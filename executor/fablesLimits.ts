@@ -1,4 +1,24 @@
-import { parseUnits } from 'viem'
+import { parseUnits, type Address } from 'viem'
+import { NATIVE } from '../src/config/addresses'
+
+/** The native currency of a Uniswap v4 / Fables pool key. */
+export const V4_NATIVE = '0x0000000000000000000000000000000000000000' as Address
+
+/**
+ * Map a pool currency onto the address the direct-swap builder expects.
+ *
+ * v4 pool keys spell native value as the zero address, while
+ * `buildDirectTransaction` recognises its own `0xEeee…` sentinel: `isNative`
+ * and `erc20Of` drive both the WNATIVE wrap/unwrap and the settlement call.
+ * Handing the builder the zero address made it emit `sweepToken(0x0, …)`,
+ * which calls `balanceOf` on address zero, fails to decode the empty
+ * returndata and reverts with no data — every live Fables native leg failed
+ * this way after the position had already been exited (production
+ * 2026-09-28).
+ */
+export function directBuildCurrency(address: Address): Address {
+  return address.toLowerCase() === V4_NATIVE ? NATIVE : address
+}
 
 /** Reject limits that the quote token cannot represent before a live job starts. */
 export function validateFablesDailyTurnover(value: string, decimals: number): bigint {
