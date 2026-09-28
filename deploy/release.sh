@@ -164,7 +164,7 @@ if [[ $target == web || $target == both ]]; then
 
   log "upload web release $ts"
   r "sudo mkdir -p $WEB_ROOT/releases/$ts"
-  tar -C dist -cf - . | ssh "${SSH_OPTS[@]}" "$HOST" "sudo tar -x -C $WEB_ROOT/releases/$ts"
+  COPYFILE_DISABLE=1 tar -C dist -cf - . | ssh "${SSH_OPTS[@]}" "$HOST" "sudo tar -x -C $WEB_ROOT/releases/$ts"
   log "switch web current → $ts (was ${prev_web##*/})"
   r "sudo ln -sfn $WEB_ROOT/releases/$ts $WEB_ROOT/current.next && sudo mv -Tf $WEB_ROOT/current.next $WEB_ROOT/current"
 

@@ -94,11 +94,20 @@ import { LiquidityRange } from "../LiquidityRange";
 import { RangeBar } from "../RangeBar";
 import { ZapPanel } from "../ZapPanel";
 import { FundSwitch } from "./PoolsTab";
+import { FablesPositionsSection } from "./FablesPositionsSection";
 import { activateOnKey, AmountRow, Badge, Btn, Stat } from "../ui";
 
 const SLIP_BPS = 100; // 1% mins on liquidity ops
 
 export function PositionsTab() {
+  const { address: user } = useAccount();
+  return <>
+    <LegacyPositionsSection />
+    {CHAIN.id === 4663 && user && <FablesPositionsSection key={user.toLowerCase()} owner={user} />}
+  </>;
+}
+
+function LegacyPositionsSection() {
   const { t } = useTranslation();
   const { address: user } = useAccount();
   const pools = usePools();

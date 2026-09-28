@@ -50,6 +50,7 @@ import { refreshRecommendationSnapshotInBackground, startApi } from './api';
 import { backfillV4, ensureV4TokenMeta, refreshV4FeaturedStats, tailV4 } from './v4Subgraph';
 import { backfillV4Rpc, tailV4Rpc } from './v4Rpc';
 import { tailV4Positions } from './v4Positions';
+import { tailFablesPositions } from './fablesPositions';
 import { syncUp33Cl } from './up33';
 import { emergingObserveEnabled, runEmergingDiscoverySweep } from './emerging';
 import { runEmergingScanSweep } from './emergingScan';
@@ -205,6 +206,13 @@ function recordV4PositionsTailError(error: string | null): void {
   tx(() => {
     kvSet('v4_positions_tail_error', error ?? '');
     kvSet('v4_positions_tail_error_at', error === null ? '' : String(now()));
+  });
+}
+
+function recordFablesPositionsTailError(error: string | null): void {
+  tx(() => {
+    kvSet('fables_positions_tail_error', error ?? '');
+    kvSet('fables_positions_tail_error_at', error === null ? '' : String(now()));
   });
 }
 
@@ -452,6 +460,17 @@ function startLoops(): void {
         recordV4PositionsTailError(null);
       } catch (error) {
         recordV4PositionsTailError(safeError(error));
+        throw error;
+      }
+    }, false);
+  if (CHAIN.id === 4663)
+    loop('fables-positions', TUNE.v4TailMs, async () => {
+      try {
+        const indexed = await tailFablesPositions();
+        if (indexed) log(`[tail] ${indexed} Fables range events indexed`);
+        recordFablesPositionsTailError(null);
+      } catch (error) {
+        recordFablesPositionsTailError(safeError(error));
         throw error;
       }
     }, false);

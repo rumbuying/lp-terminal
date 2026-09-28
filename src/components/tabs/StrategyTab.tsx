@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAccount } from 'wagmi'
-import { formatUnits, type Address } from 'viem'
+import { formatUnits, zeroAddress, type Address } from 'viem'
 import { originalStrategyDraft, recommendedSafeguards } from '../../../shared/strategy/schema'
 import { simulateStrategy } from '../../../shared/strategy/simulator'
 import { makeRebalancePlan } from '../../../shared/strategy/planner'
@@ -17,6 +17,12 @@ import { useExecutorWalletAuth } from '../../hooks/useExecutorWalletAuth'
 import { usePnlUnit } from '../../hooks/usePnlUnit'
 import { tokenUsdMapOf, useTokenPrices } from '../../hooks/useTokenPrices'
 import { PoolVolumeMini } from './PoolVolumeMini'
+import { FablesStrategySection } from './FablesStrategySection'
+import { useFablesExecutorStrategies } from '../../hooks/useFablesExecutor'
+import { useFablesManualRefs } from '../../hooks/useFablesManualRefs'
+import { useFablesPositions } from '../../hooks/useFablesPositions'
+import { useTokenUsd } from '../../hooks/useTokenUsd'
+import { asTokenInfo, fablesStrategyState } from './fablesUi'
 import { loadStrategies, removeStrategy, syncStrategyArchiveState, upsertStrategy } from '../../lib/strategyStore'
 import { snapshotFromPosition } from '../../lib/strategyPlanner'
 import { strategyDisplayValue, strategyStableValue } from '../../lib/strategyValuation'
@@ -121,6 +127,10 @@ export function StrategyTab() {
   const [authRole, setAuthRole] = useState<'none' | 'wallet' | 'admin'>('none')
   const walletAuth = useExecutorWalletAuth(user, authRole === 'wallet' || (authRole === 'none' && !adminToken.trim()))
   const accessToken = authRole === 'admin' ? adminToken.trim() : walletAuth.token
+  // Fables 策略走独立的执行器接口，与 UP33 卡共用同一份 15s 轮询。
+  const fablesExecutorQuery = useFablesExecutorStrategies(accessToken || undefined)
+  const fablesManual = useFablesManualRefs(user ?? undefined)
+  const fablesPositionsQuery = useFablesPositions(user ?? undefined, fablesManual.manualRefs)
   const [privateKey, setPrivateKey] = useState('')
   const [accountLabel, setAccountLabel] = useState('')
   const [executorOnline, setExecutorOnline] = useState(false)
@@ -889,6 +899,54 @@ export function StrategyTab() {
       : { raw: summary.pnlWithRetentionQuoteRaw ?? null, text: quoteAmount(summary.pnlWithRetentionQuoteRaw ?? null, performance, true), pct: summary.pnlWithRetentionQuotePct ?? null }
   }
 
+  // Fables 策略并入总览：净值/手续费/gas 按现价折成 USDG（≈USD）。
+  // 累计口径为净手续费（领费 − gas），未含市价变动——Fables 没有逐周期
+  // 快照，全口径盈亏需要 executor 侧先落盘，缺失的不硬造。
+  const fablesStrategy = fablesExecutorQuery.data?.strategies.find(row => row.config.enabled)
+    ?? fablesExecutorQuery.data?.strategies[0] ?? null
+  const fablesPosition = fablesStrategy && fablesPositionsQuery.data
+    ? fablesPositionsQuery.data.positions.find(position =>
+        position.pool.id.toLowerCase() === fablesStrategy.config.positionRef.poolId.toLowerCase()
+        && position.rangeId.toString() === fablesStrategy.config.positionRef.rangeId) ?? null
+    : null
+  const fablesToken0 = fablesPosition ? fablesPositionsQuery.data?.tokens[fablesPosition.pool.key.currency0.toLowerCase()] : undefined
+  const fablesToken1 = fablesPosition ? fablesPositionsQuery.data?.tokens[fablesPosition.pool.key.currency1.toLowerCase()] : undefined
+  const fablesUsd0 = useTokenUsd(asTokenInfo(fablesToken0)).data
+  const fablesUsd1 = useTokenUsd(asTokenInfo(fablesToken1)).data
+  const fablesUsdReady = fablesUsd0 != null && fablesUsd1 != null
+  const fablesLedger = fablesStrategy?.recentLedger ?? []
+  const fablesToday = shanghaiDay(Math.floor(Date.now() / 1000))
+  const fablesSumUsd = (kind: string, onlyToday: boolean) => {
+    if (!fablesUsdReady) return null
+    let sum = 0
+    let seen = false
+    for (const entry of fablesLedger) {
+      if (entry.kind !== kind) continue
+      if (onlyToday && shanghaiDay(entry.ts) !== fablesToday) continue
+      const token = entry.token?.toLowerCase() ?? zeroAddress
+      const price = token === zeroAddress ? fablesUsd0 : fablesUsd1
+      const decimals = token === zeroAddress ? 18 : fablesToken1?.decimals ?? 18
+      if (price == null) continue
+      seen = true
+      sum += Number(formatUnits(BigInt(entry.amount ?? '0'), decimals)) * price
+    }
+    return seen ? sum : null
+  }
+  const fablesNetFeesUsdg = fablesUsdReady
+    ? (fablesSumUsd('fees_claimed', false) ?? 0) - (fablesSumUsd('gas', false) ?? 0)
+    : null
+  const fablesTodayFeesUsdg = fablesSumUsd('fees_claimed', true)
+  const fablesTodayGasUsdg = fablesSumUsd('gas', true)
+  const fablesTodayNetUsdg = fablesTodayFeesUsdg != null && fablesTodayGasUsdg != null
+    ? fablesTodayFeesUsdg - fablesTodayGasUsdg : null
+  const fablesClaimableUsdg = fablesPosition && fablesUsd0 != null && fablesUsd1 != null
+    ? Number(formatUnits(fablesPosition.claimable0, 18)) * fablesUsd0
+      + Number(formatUnits(fablesPosition.claimable1, 18)) * fablesUsd1
+    : null
+  const fablesNetValueUsdg = fablesPosition && fablesUsd0 != null && fablesUsd1 != null
+    ? Number(formatUnits(fablesPosition.amount0, 18)) * fablesUsd0
+      + Number(formatUnits(fablesPosition.amount1, 18)) * fablesUsd1
+    : null
   const runningStrategies = executorStrategyList
     .filter((remote) => !!user && remote.config.owner.toLowerCase() === user.toLowerCase() && ACTIVE_EXECUTOR_STATES.has(remote.state) && !remote.config.execution.dryRun)
     .map((remote) => ({
@@ -907,7 +965,11 @@ export function StrategyTab() {
     pnlRaw: performance?.summary && performance.quote ? performancePnl(performance).raw : null,
   })))
   const dashboardPnl = pnlUnit === 'stable'
-    ? (dashboardPnlKnown.length ? dashboardPnlKnown.reduce((sum, row) => sum + Number(formatUnits(BigInt(row.metric.raw!), 6)), 0) : null)
+    ? (() => {
+        const parts = dashboardPnlKnown.map(row => Number(formatUnits(BigInt(row.metric.raw!), 6)))
+        if (fablesNetFeesUsdg != null) parts.push(fablesNetFeesUsdg)
+        return parts.length ? parts.reduce((sum, value) => sum + value, 0) : null
+      })()
     : null
   const dashboardQuoteAddress = new Set(dashboardPnlKnown.map((row) => row.performance.quote!.address.toLowerCase()))
   const dashboardQuoteRaw = pnlUnit === 'quote' && dashboardPnlKnown.length && dashboardQuoteAddress.size === 1
@@ -919,16 +981,22 @@ export function StrategyTab() {
   const dashboardPnlPositive = pnlUnit === 'stable'
     ? dashboardPnl == null ? null : dashboardPnl >= 0
     : dashboardQuoteRaw === null ? null : BigInt(dashboardQuoteRaw) >= 0n
-  const dashboardAssets = dashboardAssetValues.length ? dashboardAssetValues.reduce((sum, value) => sum + value, 0) : null
+  const dashboardAssets = (() => {
+    const parts = [...dashboardAssetValues, ...(pnlUnit === 'stable' && fablesNetValueUsdg != null ? [fablesNetValueUsdg] : [])]
+    return parts.length ? parts.reduce((sum, value) => sum + value, 0) : null
+  })()
   const runningStrategyIds = new Set(runningStrategies.map(({ remote }) => remote.config.id))
   const performanceByStrategy = new Map(runningStrategies.flatMap(({ remote, performance }) => performance
     ? [[remote.config.id, performance] as const]
     : []))
   const dashboardTodayRows = executorCalendarRows.filter((row) => runningStrategyIds.has(row.strategyId))
   const dashboardTodayKnown = dashboardTodayRows.filter((row) => selectedDailyPnlRaw(row, pnlUnit) !== null)
-  const dashboardTodayStableRaw = pnlUnit === 'stable' && dashboardTodayKnown.length
-    ? dashboardTodayKnown.reduce((sum, row) => sum + BigInt(row.pnlUsdgRaw!), 0n).toString()
-    : null
+  const dashboardTodayStableRaw = (() => {
+    if (pnlUnit !== 'stable') return null
+    const parts = dashboardTodayKnown.map(row => Number(formatUnits(BigInt(row.pnlUsdgRaw!), 6)))
+    if (fablesTodayNetUsdg != null) parts.push(fablesTodayNetUsdg)
+    return parts.length ? (parts.reduce((sum, value) => sum + value, 0) * 1e6).toFixed(0) : null
+  })()
   const dashboardTodayQuoteAddresses = new Set(pnlUnit === 'quote'
     ? dashboardTodayKnown.map((row) => row.quote.address.toLowerCase())
     : [])
@@ -980,7 +1048,15 @@ export function StrategyTab() {
   const dashboardCycleRows = runningStrategies.flatMap(({ performance }) => performance?.summary && performance.quote && performance.cycles
     ? [{ performance, ...dailyCycleTotals(performance.cycles, shanghaiDay, today) }]
     : [])
-  const dashboardTodayCollectedFees = dashboardMetricText(dashboardCycleRows.map(({ performance, grossFeesRaw }) => ({ performance, raw: grossFeesRaw })))
+  const dashboardTodayCollectedFees = pnlUnit === 'stable'
+    ? (() => {
+        const parts = [...dashboardCycleRows
+          .map(({ performance, grossFeesRaw }) => stableValue(grossFeesRaw, performance))
+          .filter((value): value is number => value !== null)]
+        if (fablesTodayFeesUsdg != null) parts.push(fablesTodayFeesUsdg)
+        return parts.length ? stableTotal(parts.reduce((sum, value) => sum + value, 0)) : '—'
+      })()
+    : dashboardMetricText(dashboardCycleRows.map(({ performance, grossFeesRaw }) => ({ performance, raw: grossFeesRaw })))
   const dashboardTodayIncomeTax = dashboardMetricText(dashboardCycleRows.map(({ performance, incomeTaxRaw }) => ({ performance, raw: incomeTaxRaw })))
   // Stable mode prices each strategy's uncollected LP fees token-by-token
   // (same basis as the positions page); quote mode keeps the quote aggregate.
@@ -989,14 +1065,24 @@ export function StrategyTab() {
         const values = runningStrategies
           .map(({ performance }) => performance?.summary && performance.quote ? strategyUncollectedLpFeeUsdg(performance) : null)
           .filter((value): value is number => value !== null)
+        if (fablesClaimableUsdg != null) values.push(fablesClaimableUsdg)
         return values.length ? stableTotal(values.reduce((sum, value) => sum + value, 0)) : '—'
       })()
     : dashboardMetric('currentUncollectedFeesQuoteRaw')
   const dashboardWithdrawableProfit = dashboardMetric('profitReserveQuoteRaw')
-  const dashboardTodayGas = dashboardMetricText(dashboardTodayRows.flatMap((row) => {
-    const performance = performanceByStrategy.get(row.strategyId)
-    return performance ? [{ performance, raw: row.gasRaw }] : []
-  }))
+  const dashboardTodayGas = pnlUnit === 'stable'
+    ? (() => {
+        const parts = dashboardTodayRows.flatMap(row => {
+          const performance = performanceByStrategy.get(row.strategyId)
+          return performance ? [stableValue(row.gasRaw, performance)] : []
+        }).filter((value): value is number => value !== null)
+        if (fablesTodayGasUsdg != null) parts.push(fablesTodayGasUsdg)
+        return parts.length ? stableTotal(parts.reduce((sum, value) => sum + value, 0)) : '—'
+      })()
+    : dashboardMetricText(dashboardTodayRows.flatMap((row) => {
+        const performance = performanceByStrategy.get(row.strategyId)
+        return performance ? [{ performance, raw: row.gasRaw }] : []
+      }))
   const withdrawableStrategies = runningStrategies.filter(({ remote, performance }) => {
     const available = performance?.summary?.profitReserveQuoteRaw
     return available && BigInt(available) > 0n && !['planned', 'executing', 'recovery', 'recovery_quarantined'].includes(remote.state)
@@ -1055,8 +1141,8 @@ export function StrategyTab() {
           </div>
           <div className="strategy-overview-controls">
             <PnlUnitToggle />
-            <Badge tone={executorPaused ? 'red' : runningStrategies.length ? 'green' : 'dim'}>
-              {t('strategy.overviewRunning', { n: runningStrategies.length })}
+            <Badge tone={executorPaused ? 'red' : runningStrategies.length || fablesStrategy?.config.enabled ? 'green' : 'dim'}>
+              {t('strategy.overviewRunning', { n: runningStrategies.length + (fablesStrategy?.config.enabled ? 1 : 0) })}
             </Badge>
           </div>
         </div>
@@ -1164,10 +1250,38 @@ export function StrategyTab() {
                 </article>
               )
             })}
+            {fablesStrategy && (() => {
+              const state = fablesStrategyState(fablesStrategy.state)
+              const feeEth = fablesSumUsd('fees_claimed', true)
+              const feePons = fablesSumUsd('fees_claimed', false)
+              const gasEth = fablesSumUsd('gas', true)
+              return (
+                <article className="strategy-overview-card" key={fablesStrategy.config.id}>
+                  <div className="strategy-overview-card-head">
+                    <strong title={fablesStrategy.config.name}>{fablesStrategy.config.name}</strong>
+                    <Badge tone={state.tone}>{state.label}</Badge>
+                    <Badge tone="cyan">Fables</Badge>
+                  </div>
+                  <div className="strategy-overview-pnl">
+                    <span>累计盈亏（净手续费）</span>
+                    <strong className={fablesNetFeesUsdg == null ? 'dim' : fablesNetFeesUsdg >= 0 ? 'green' : 'red'}>
+                      {fablesNetFeesUsdg == null ? '—' : `${fablesNetFeesUsdg >= 0 ? '+' : ''}${fablesNetFeesUsdg.toFixed(2)} USDG`}
+                    </strong>
+                    <small>领费 − gas，按现价折算 · 未含市价变动</small>
+                  </div>
+                  <div className="strategy-overview-meta">
+                    <span><i>当前净值</i>{fablesNetValueUsdg != null ? `≈ ${fablesNetValueUsdg.toFixed(2)} USDG` : '—'}</span>
+                    <span><i>累计手续费</i>{feeEth == null ? '—' : `${feeEth.toFixed(6)} ETH + ${(feePons ?? 0).toFixed(6)} PONS`}</span>
+                    <span><i>当前仓位</i>{fablesPosition ? `${fmtNum(Number(formatUnits(fablesPosition.shares, 18)), 4)} 份额` : '—'}</span>
+                  </div>
+                </article>
+              )
+            })()}
           </div>
         )}
         <div className="strategy-overview-foot mono-sm">
           <span>{t('strategy.overviewRefresh')}</span>
+          {fablesStrategy ? <span>Fables 的盈亏按净手续费（领费 − gas）口径计入，未含市价变动；其净值已计入策略总资产。</span> : null}
           {dashboardPnlAvailability.pending > 0 ? <span className="amber">{t('strategy.overviewPartial', { n: dashboardPnlAvailability.pending })}</span> : null}
           {dashboardPnlAvailability.unavailable > 0 ? <span className="amber">{t('strategy.overviewUnavailable', { n: dashboardPnlAvailability.unavailable })}</span> : null}
           {dashboardTodayKnown.length < runningStrategies.length && runningStrategies.length > 0 ? <span className="amber">{t('strategy.overviewDailyPartial', { n: runningStrategies.length - dashboardTodayKnown.length })}</span> : null}
@@ -1591,6 +1705,8 @@ export function StrategyTab() {
           })}
         </>
       )}
+
+      {CHAIN.id === 4663 && user && <FablesStrategySection owner={user} accessToken={accessToken} canManage={canManage} />}
 
       <details className="card" style={{ marginTop: 18 }}>
         <summary className="card-title" style={{ cursor: 'pointer' }}>{t('strategy.simpleAdvanced')}</summary>

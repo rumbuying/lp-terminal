@@ -128,6 +128,19 @@ async function quoteKyberOnly(tokenIn: Address, tokenOut: Address, amountIn: big
   throw new Error('E_KYBER_QUOTE')
 }
 
+async function quoteCandidates(tokenIn: Address, tokenOut: Address, amountIn: bigint,
+  routes: NativeRoute[], includeSolver: boolean): Promise<KyberRoute[]> {
+  const hasNative = tokenIn.toLowerCase() === NATIVE.toLowerCase() || tokenOut.toLowerCase() === NATIVE.toLowerCase()
+  const candidates = await Promise.allSettled([
+    quoteKyberOnly(tokenIn, tokenOut, amountIn),
+    ...(includeSolver && !hasNative ? [quoteSolver(tokenIn, tokenOut, amountIn).then((routeSummary) => ({ routeSummary, routerAddress: zeroAddress }))] : []),
+    ...routes.map((route) => route.protocol === 'up33'
+      ? quoteUp33Cl(tokenIn, tokenOut, amountIn, route.tickSpacing)
+      : quoteV3(tokenIn, tokenOut, amountIn, route.feePpm, route.protocol)),
+  ])
+  return candidates.flatMap((candidate) => candidate.status === 'fulfilled' ? [candidate.value as KyberRoute] : [])
+}
+
 export async function quoteKyber(tokenIn: Address, tokenOut: Address, amountIn: bigint, fallback?: { protocol: StrategyLpProtocol; tickSpacing: number; feePpm?: number }): Promise<KyberRoute> {
   if (amountIn <= 0n) throw new Error('E_KYBER_QUOTE')
   const routes = await nativeRoutes(tokenIn, tokenOut).catch(() => [] as NativeRoute[])
@@ -135,21 +148,46 @@ export async function quoteKyber(tokenIn: Address, tokenOut: Address, amountIn: 
     routes.push({ protocol: 'up33', tickSpacing: fallback.tickSpacing })
   if (fallback?.protocol !== 'up33' && fallback?.protocol !== 'univ4' && fallback?.feePpm !== undefined && !routes.some((route) => route.protocol !== 'up33' && route.protocol === fallback.protocol && route.feePpm === fallback.feePpm))
     routes.push({ protocol: fallback.protocol, feePpm: fallback.feePpm })
-  const hasNative = tokenIn.toLowerCase() === NATIVE.toLowerCase() || tokenOut.toLowerCase() === NATIVE.toLowerCase()
-  const candidates = await Promise.allSettled([
-    quoteKyberOnly(tokenIn, tokenOut, amountIn),
-    ...(hasNative ? [] : [quoteSolver(tokenIn, tokenOut, amountIn).then((routeSummary) => ({ routeSummary, routerAddress: zeroAddress }))]),
-    ...routes.map((route) => route.protocol === 'up33'
-      ? quoteUp33Cl(tokenIn, tokenOut, amountIn, route.tickSpacing)
-      : quoteV3(tokenIn, tokenOut, amountIn, route.feePpm, route.protocol)),
-  ])
+  const fulfilled = await quoteCandidates(tokenIn, tokenOut, amountIn, routes, true)
   let best: KyberRoute | undefined
-  for (const candidate of candidates) {
-    if (candidate.status !== 'fulfilled') continue
-    const value = candidate.value as KyberRoute
+  for (const value of fulfilled) {
     if (!best || BigInt(value.routeSummary.amountOut) > BigInt(best.routeSummary.amountOut)) best = value
   }
   if (!best) throw new Error('E_KYBER_QUOTE')
+  return best
+}
+
+/** Route sources the executor can build a direct native-ETH transaction from. */
+const NATIVE_DIRECT_SOURCES: readonly string[] = ['up33_cl', 'univ3']
+
+/**
+ * Best native-leg quote the executor can actually sign.
+ *
+ * quoteKyber returns the single best route across the aggregator and direct
+ * pools, but a native-ETH swap must be built as a direct pool transaction, so
+ * a marginally better non-direct aggregator route used to wedge the whole LP
+ * cycle behind E_FABLES_NATIVE_ROUTE (production 2026-09-28: the univ3
+ * 3000 ppm pool lagged the aggregator by 12 bps while the previously used
+ * 500 ppm pool had thinned by 2240 bps). Prefer the best buildable direct
+ * route while it stays within maxLagBps of the overall best output; beyond
+ * that lag, price integrity still wins and the caller sees a non-direct
+ * source and must fail. Solver routes never apply to native legs.
+ */
+export async function quoteNativeExecutable(tokenIn: Address, tokenOut: Address, amountIn: bigint, maxLagBps: number): Promise<KyberRoute> {
+  if (amountIn <= 0n) throw new Error('E_KYBER_QUOTE')
+  const routes = await nativeRoutes(tokenIn, tokenOut).catch(() => [] as NativeRoute[])
+  const fulfilled = await quoteCandidates(tokenIn, tokenOut, amountIn, routes, false)
+  let best: KyberRoute | undefined
+  let bestDirect: KyberRoute | undefined
+  for (const value of fulfilled) {
+    if (!best || BigInt(value.routeSummary.amountOut) > BigInt(best.routeSummary.amountOut)) best = value
+    if (NATIVE_DIRECT_SOURCES.includes(value.routeSummary.executorSource ?? '')
+      && (!bestDirect || BigInt(value.routeSummary.amountOut) > BigInt(bestDirect.routeSummary.amountOut))) bestDirect = value
+  }
+  if (!best) throw new Error('E_KYBER_QUOTE')
+  const lagBps = BigInt(Math.max(0, Math.min(10_000, Math.floor(maxLagBps))))
+  if (bestDirect && BigInt(bestDirect.routeSummary.amountOut) * 10_000n
+    >= BigInt(best.routeSummary.amountOut) * (10_000n - lagBps)) return bestDirect
   return best
 }
 

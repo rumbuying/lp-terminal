@@ -11,6 +11,7 @@ import { safeError } from './rpc';
 import {
   db,
   enqueueHydrationDemand,
+  fablesCandidatesByOwner,
   hasCompleteV4SnapshotRows,
   hydrationDemandCount,
   kvGet,
@@ -3722,6 +3723,34 @@ export function getV4Positions(params: Params): {
   };
 }
 
+/** Event-derived range IDs only. The browser must re-read each candidate on-chain. */
+export function getFablesPositions(params: Params): {
+  schemaVersion: number
+  chainId: number
+  ready: boolean
+  cursor: number | null
+  scannedAt: number | null
+  error: string | null
+  candidates: Array<{ hook: string; rangeId: string; seenBlock: number }>
+} {
+  if (CHAIN.id !== 4663) throw new ApiConflictError('Fables is only available on Robinhood Chain')
+  const rawOwner = singleParam(params, 'owner')
+  if (rawOwner === null || !HEX40.test(rawOwner.toLowerCase()))
+    throw new ApiInputError('Fables positions requires a valid owner')
+  const cursor = Number(kvGet('fables_position_cursor'))
+  const scannedAt = Number(kvGet('fables_positions_scanned_at'))
+  const error = kvGet('fables_positions_tail_error') || null
+  const ready = kvGet('fables_positions_backfilled') === '1' && !error
+    && Number.isSafeInteger(scannedAt) && scannedAt > 0 && now() - scannedAt <= 600
+  return {
+    schemaVersion: 1, chainId: CHAIN.id, ready,
+    cursor: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : null,
+    scannedAt: Number.isSafeInteger(scannedAt) && scannedAt > 0 ? scannedAt : null,
+    error,
+    candidates: fablesCandidatesByOwner(rawOwner),
+  }
+}
+
 /**
  * The complete UP33 home CL registry, for the POOLS tab's browser scan.
  *
@@ -3876,6 +3905,9 @@ export function createApiServer(): Server {
         cache = 'public, max-age=300';
       } else if (url.pathname === '/api/v4/positions') {
         body = getV4Positions(url.searchParams);
+        cache = NO_STORE;
+      } else if (url.pathname === '/api/fables/positions') {
+        body = getFablesPositions(url.searchParams);
         cache = NO_STORE;
       }
       else if (url.pathname === '/api/tokens') body = getTokens(url.searchParams);

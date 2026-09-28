@@ -139,6 +139,80 @@ export type StrategyConfig = {
   updatedAt: number
 }
 
+/** Version 2 uses a share-range reference; version 1 NFT records stay intact. */
+export type FablesPositionRef = {
+  kind: 'fables_range'
+  poolId: Hex
+  hook: Address
+  rangeId: string
+  tickLower: number
+  tickUpper: number
+}
+
+export type FablesStrategyConfig = {
+  version: 2
+  id: string
+  name: string
+  enabled: boolean
+  chainId: 4663
+  protocol: 'fables'
+  owner: Address
+  poolManager: Address
+  positionRef: FablesPositionRef
+  riskToken: Address
+  quoteToken: Address
+  range: { lowerPct: number; upperPct: number }
+  trigger: { pollSeconds: number; confirmationSeconds: number; cooldownMinutes: number }
+  fees: { handling: FeeHandling }
+  safeguards: {
+    maxSlippageBps: number
+    maxSwapImpactBps: number
+    maxRebalancesPerDay: number
+    maxPlanAgeSeconds: number
+    maxClaimFeeBps: number
+    allowLegacyUnboundedFeeExit: boolean
+    minNativeGasReserveWei: string
+  }
+  execution: {
+    mode: 'notify_only' | 'executor_auto'
+    walletId?: string
+    signerAddress?: Address
+    dryRun: boolean
+    maxGasPriceWei?: string
+    maxDailyTurnoverQuote?: string
+  }
+  revision: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type FablesPositionSnapshot = {
+  kind: 'fables_range'
+  chainId: 4663
+  owner: Address
+  poolManager: Address
+  positionRef: FablesPositionRef
+  currency0: Address
+  currency1: Address
+  currency0Decimals: number
+  currency1Decimals: number
+  tickSpacing: number
+  observedBlock: string
+  observedAt: number
+  tick: number
+  sqrtPriceX96: string
+  shares: string
+  /** The owner's underlying v4 liquidity is distinct from ERC-6909 shares. */
+  effectiveLiquidity: string
+  principal0: string
+  principal1: string
+  claimable0: string
+  claimable1: string
+  staked: string
+  claimFeeBps: number
+  claimPaused: boolean
+}
+
 export type TriggerSide = 'lower' | 'upper' | 'manual' | 'adaptive_contraction'
 
 export type TriggerDecision =

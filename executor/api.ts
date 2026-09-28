@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { parseStrategyConfig } from '../shared/strategy/schema'
+import { parseFablesStrategyConfig } from '../shared/strategy/fablesSchema'
 import { buildGuardReport, type GuardReport } from '../shared/strategy/guard-report'
 import type { StrategyConfig } from '../shared/strategy/types'
 import { EXECUTOR } from './config'
@@ -23,6 +24,12 @@ import { isTransientRecoveryFailure } from './recovery-policy'
 import { withdrawRetainedProfit } from './profit-withdrawal'
 import { getAddress } from 'viem'
 import { publicStatusRange, publicStrategyStatus } from './public-status'
+import { fablesMonitorState, fablesStrategyById, listFablesStrategies, upsertFablesStrategy } from './fablesStore'
+import { readFablesPosition } from '../src/lib/fables'
+import { fablesTokenDecimals, planFablesRebalance } from './fablesPlan'
+import { validateFablesDailyTurnover } from './fablesLimits'
+import { fablesJobById, fablesJobTransactions, recentFablesJobs, recentFablesLedger, resumeFablesJob } from './fablesJobs'
+import { rebroadcastFablesTransaction } from './fablesRecovery'
 
 const JSONH = {
   'content-type': 'application/json; charset=utf-8',
@@ -316,6 +323,111 @@ export function startApi() {
         updateWalletLabel(walletId, label)
         audit('api', 'wallet_label_updated', 'wallet', walletId, { label })
         json(res, 200, { wallet: listWallets().find((wallet) => wallet.id === walletId) })
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/fables/strategies') {
+        json(res, 200, { strategies: EXECUTOR.chainId === 4663
+          ? listFablesStrategies(auth.role === 'wallet' ? auth.address : undefined)
+            .map(row => ({ ...row, monitor: fablesMonitorState(row.config.id),
+              recentLedger: recentFablesLedger(row.config.id) }))
+          : [] })
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/fables/jobs') {
+        const jobs = recentFablesJobs(auth.role === 'wallet' ? getAddress(auth.address) : undefined)
+        json(res, 200, { jobs: jobs.map(job => ({
+          id: job.id, strategyId: job.strategyId, state: job.state, stage: job.stage,
+          errorCode: job.errorCode, createdAt: job.createdAt, updatedAt: job.updatedAt,
+          assetLocation: job.stage === 'precheck' || job.stage === 'exit' ? 'old_lp_or_wallet'
+            : job.stage === 'verify' ? 'new_lp_pending_verification' : 'wallet_and_possible_old_fees',
+          oldRangeId: job.config.positionRef.rangeId,
+          newRangeId: (job.context.newRef as { rangeId?: string } | undefined)?.rangeId,
+          transactions: fablesJobTransactions(job.id).map(tx => ({ stage: tx.stage,
+            ordinal: tx.ordinal, state: tx.state, hash: tx.hash, nonce: tx.nonce.toString(),
+            canRebroadcast: Boolean(tx.signedTx) && (tx.state === 'sending' || tx.state === 'sent'),
+            blockNumber: tx.blockNumber?.toString(), errorCode: tx.errorCode })),
+        })) })
+        return
+      }
+      if (req.method === 'POST' && /^\/v1\/fables\/jobs\/[^/]+\/transactions\/\d+\/rebroadcast$/.test(url.pathname)) {
+        if (!requireAdmin(auth, res)) return
+        const match = /^\/v1\/fables\/jobs\/([^/]+)\/transactions\/(\d+)\/rebroadcast$/.exec(url.pathname)!
+        const id = decodeURIComponent(match[1])
+        const current = fablesJobById(id)
+        if (!current || !ownedBy(auth, current.config.owner)) return json(res, 404, { error: 'Fables job not found' })
+        const ordinal = Number(match[2])
+        if (!Number.isSafeInteger(ordinal)) throw new Error('E_FABLES_TX_ORDINAL')
+        const hash = await rebroadcastFablesTransaction(id, ordinal)
+        audit('api', 'fables_tx_rebroadcast', 'job', id, { ordinal, hash })
+        json(res, 200, { id, ordinal, hash })
+        return
+      }
+      if (req.method === 'POST' && /^\/v1\/fables\/jobs\/[^/]+\/resume$/.test(url.pathname)) {
+        if (!requireAdmin(auth, res)) return
+        const id = decodeURIComponent(url.pathname.slice('/v1/fables/jobs/'.length, -'/resume'.length))
+        const current = fablesJobById(id)
+        if (!current || !ownedBy(auth, current.config.owner)) return json(res, 404, { error: 'Fables job not found' })
+        const job = resumeFablesJob(id)
+        audit('api', 'fables_job_resumed', 'job', id, { strategyId: job.strategyId, stage: job.stage })
+        json(res, 200, { id: job.id, state: job.state, stage: job.stage })
+        return
+      }
+      if (req.method === 'GET' && /^\/v1\/fables\/strategies\/[^/]+$/.test(url.pathname)) {
+        const id = decodeURIComponent(url.pathname.slice('/v1/fables/strategies/'.length))
+        const row = fablesStrategyById(id)
+        if (!row || !ownedBy(auth, row.config.owner)) return json(res, 404, { error: 'Fables strategy not found' })
+        json(res, 200, { ...row, monitor: fablesMonitorState(id) })
+        return
+      }
+      if (req.method === 'GET' && /^\/v1\/fables\/strategies\/[^/]+\/plan$/.test(url.pathname)) {
+        const id = decodeURIComponent(url.pathname.slice('/v1/fables/strategies/'.length, -'/plan'.length))
+        const row = fablesStrategyById(id)
+        if (!row || !ownedBy(auth, row.config.owner)) return json(res, 404, { error: 'Fables strategy not found' })
+        json(res, 200, { plan: await planFablesRebalance(row.config) })
+        return
+      }
+      if (req.method === 'PUT' && /^\/v1\/fables\/strategies\/[^/]+$/.test(url.pathname)) {
+        if (!requireAdmin(auth, res)) return
+        if (EXECUTOR.chainId !== 4663) return json(res, 400, { error: 'Fables requires Robinhood Chain' })
+        const id = decodeURIComponent(url.pathname.slice('/v1/fables/strategies/'.length))
+        const config = parseFablesStrategyConfig(await readJson(req))
+        if (config.id !== id) return json(res, 400, { error: 'strategy id mismatch' })
+        const current = fablesStrategyById(id)
+        if (current && config.revision !== current.config.revision + 1)
+          return json(res, 409, { error: 'strategy revision conflict' })
+        if (config.execution.walletId) {
+          const wallet = walletById(config.execution.walletId)
+          if (!wallet || wallet.address.toLowerCase() !== config.owner.toLowerCase())
+            return json(res, 400, { error: 'wallet and share owner mismatch' })
+        }
+        if (config.enabled) {
+          const position = await readFablesPosition(publicClient, {
+            owner: config.owner, hook: config.positionRef.hook, rangeId: BigInt(config.positionRef.rangeId),
+          })
+          if (position.pool.id.toLowerCase() !== config.positionRef.poolId.toLowerCase()
+            || position.tickLower !== config.positionRef.tickLower || position.tickUpper !== config.positionRef.tickUpper)
+            return json(res, 400, { error: 'Fables position identity mismatch' })
+          if (position.shares === 0n || position.staked !== 0n)
+            return json(res, 400, { error: 'Fables strategy requires unstaked owner shares' })
+          const currencies = [position.pool.key.currency0.toLowerCase(), position.pool.key.currency1.toLowerCase()]
+          if (!currencies.includes(config.riskToken.toLowerCase()) || !currencies.includes(config.quoteToken.toLowerCase()))
+            return json(res, 400, { error: 'risk/quote token mismatch with Fables pool' })
+          if (config.execution.mode === 'executor_auto') {
+            const unlocked = unlockPrivateKey(config.execution.walletId!)
+            if (unlocked.address.toLowerCase() !== config.owner.toLowerCase())
+              return json(res, 400, { error: 'vault signer and share owner mismatch' })
+            if (!config.execution.dryRun && !config.execution.maxDailyTurnoverQuote)
+              return json(res, 400, { error: 'live automation requires maxDailyTurnoverQuote' })
+            if (config.execution.maxDailyTurnoverQuote) {
+              const decimals = await fablesTokenDecimals(config.quoteToken, position.observedBlock)
+              try { validateFablesDailyTurnover(config.execution.maxDailyTurnoverQuote, decimals) }
+              catch { return json(res, 400, { error: 'Fables daily turnover exceeds quote-token precision' }) }
+            }
+          }
+        }
+        upsertFablesStrategy(config)
+        audit('api', 'fables_strategy_upserted', 'strategy', id, { revision: config.revision, mode: config.execution.mode })
+        json(res, 200, { strategy: { id, revision: config.revision } })
         return
       }
       if (req.method === 'GET' && url.pathname === '/v1/strategies') {

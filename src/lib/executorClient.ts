@@ -1,4 +1,4 @@
-import type { StrategyConfig } from '../../shared/strategy/types'
+import type { FablesStrategyConfig, StrategyConfig } from '../../shared/strategy/types'
 import type { RecommendationMode, RecommendationResponse, RecommendationRisk } from '../../shared/recommendation/types'
 import { ACTIVE_IS_BUILD, CHAIN, CHAIN_GATEWAY } from '../config/chains'
 import { executorApiPath } from '../config/chains/routes'
@@ -42,6 +42,33 @@ export type GuardReport = {
   checkedAt: number
 }
 export type ExecutorStrategy = { config: StrategyConfig; state: string; updatedAt: number; latestJob?: LatestJobSummary; guard?: GuardReport }
+export type ExecutorFablesStrategy = {
+  config: FablesStrategyConfig
+  state: string
+  updatedAt: number
+  monitor?: { revision: number; outSide?: 'lower' | 'upper'; outSince?: number; lastTick?: number; lastBlock?: string; error?: string }
+  recentLedger?: { jobId: string; ts: number; blockNumber?: string; txHash?: `0x${string}`;
+    kind: string; token?: `0x${string}`; amount?: string }[]
+}
+export type ExecutorFablesJob = {
+  id: string; strategyId: string; state: string; stage: string
+  errorCode?: string; createdAt: number; updatedAt: number; assetLocation: string
+  oldRangeId: string; newRangeId?: string
+  transactions: { ordinal: number; stage: string; state: string; hash: `0x${string}`; nonce: string;
+    canRebroadcast: boolean; blockNumber?: string; errorCode?: string }[]
+}
+export type ExecutorFablesPlan = {
+  strategyId: string; observedBlock: string
+  old: { poolId: string; hook: string; rangeId: string; tickLower: number; tickUpper: number; shares: string }
+  exit: { method: 'withdraw' | 'withdrawAndClaim'; principal0: string; principal1: string; amount0Min: string; amount1Min: string; claimable0: string; claimable1: string; claimFeeBps: number }
+  indicativeRecenter: { currentTick: number; tickLower: number; tickUpper: number;
+    currency0: `0x${string}`; currency1: `0x${string}`;
+    unit0: string; unit1: string; targetValueBps0: number; targetValueBps1: number }
+  constraints: { quoteToken: `0x${string}`; maxSlippageBps: number; maxSwapImpactBps: number; maxClaimFeeBps: number;
+    maxPlanAgeSeconds: number; minNativeGasReserveWei: string;
+    maxDailyTurnoverQuote?: string; maxGasPriceWei?: string; allowLegacyUnboundedFeeExit: boolean }
+  note: 'recalculate_after_exit_and_swap'
+}
 export type RecoveryJob = {
   id: string; strategyId: string; state: string; createdAt: number; updatedAt: number
   recoveryAttempts: number; recoveryErrorStreak: number; recoveryLastError?: string; recoveryNextAt?: number; recoveryQuarantinedAt?: number
@@ -246,6 +273,18 @@ export const executorWalletVerify = (challengeId: string, address: string, signa
 export const executorHealth = () => request<{ ok: boolean; service: string; vaultReady: boolean; signerReady?: boolean; rpcSource?: 'env' | 'file' | 'default'; apiAuthReady: boolean; paused: boolean }>('/health')
 export const executorWallets = (token: string) => request<{ wallets: ExecutorWallet[] }>('/v1/wallets', token)
 export const executorStrategies = (token: string) => request<{ strategies: ExecutorStrategy[]; archivedStrategyIds?: string[] }>('/v1/strategies', token)
+export const executorFablesStrategies = (token: string) => request<{ strategies: ExecutorFablesStrategy[] }>('/v1/fables/strategies', token)
+export const executorFablesJobs = (token: string) => request<{ jobs: ExecutorFablesJob[] }>('/v1/fables/jobs', token)
+export const resumeExecutorFablesJob = (token: string, id: string) =>
+  request<{ id: string; state: string; stage: string }>(`/v1/fables/jobs/${encodeURIComponent(id)}/resume`, token, { method: 'POST' })
+export const rebroadcastExecutorFablesTx = (token: string, id: string, ordinal: number) =>
+  request<{ id: string; ordinal: number; hash: `0x${string}` }>(
+    `/v1/fables/jobs/${encodeURIComponent(id)}/transactions/${ordinal}/rebroadcast`, token, { method: 'POST' })
+export const saveExecutorFablesStrategy = (token: string, config: FablesStrategyConfig) =>
+  request<{ strategy: { id: string; revision: number } }>(`/v1/fables/strategies/${encodeURIComponent(config.id)}`,
+    token, { method: 'PUT', body: JSON.stringify(config) })
+export const planExecutorFablesStrategy = (token: string, id: string) =>
+  request<{ plan: ExecutorFablesPlan }>(`/v1/fables/strategies/${encodeURIComponent(id)}/plan`, token)
 export const executorPerformance = (token: string) => request<{ strategies: ExecutorPerformance[] }>('/v1/performance', token)
 export const executorHistory = (token: string) => request<{ strategies: ExecutorHistoryStrategy[] }>('/v1/history', token)
 export const executorPnlCalendar = (token: string, from?: number, to?: number) => request<{ timezone: 'Asia/Shanghai'; rows: ExecutorCalendarRow[] }>(

@@ -14,6 +14,7 @@
     "test:strategy": "node --experimental-test-module-mocks --import=tsx --test executor/*.test.ts shared/recommendation/*.test.ts shared/strategy/*.test.ts",
     "test:chain-check": "node --import=tsx --test scripts/chain-check-policy.test.ts",
     "check:bsc": "npm run test:chain-check && CHAIN=bsc tsx scripts/chain-check.ts",
+    "check:fables": "CHAIN=robinhood tsx scripts/fables-chain-check.ts",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:bridge": "tsx scripts/bridge-smoke.ts",
     "smoke:uni": "tsx scripts/uni-browse-smoke.ts",

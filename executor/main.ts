@@ -7,6 +7,9 @@ import { configuredFileSigner } from './vault'
 import { superviseOnce } from './supervisor'
 import { captureDailyPerformance } from './calendar'
 import { recordVolumeTrendAlerts } from './volumeAlert'
+import { monitorFablesOnce } from './fablesMonitor'
+import { runFablesOnce } from './fablesRunner'
+import { quarantineInterruptedFablesJobs } from './fablesJobs'
 
 const fileSigner = configuredFileSigner()
 if (fileSigner) {
@@ -25,13 +28,17 @@ if (fileSigner) {
 
 const interrupted = quarantineInterruptedJobs()
 if (interrupted) audit('startup', 'interrupted_jobs_quarantined', 'executor', undefined, { count: interrupted })
+const interruptedFables = quarantineInterruptedFablesJobs()
+if (interruptedFables) audit('startup', 'fables_jobs_quarantined', 'executor', undefined, { count: interruptedFables })
 const server = startApi()
 const stop = () => server.close(() => process.exit(0))
 process.once('SIGTERM', stop)
 process.once('SIGINT', stop)
 console.log(`[executor] RPC configured: ${new URL(EXECUTOR.rpcUrl).host} (${EXECUTOR.rpcSource}); signer: ${fileSigner ? 'private-key-file' : EXECUTOR.masterSecret ? 'encrypted-vault' : 'locked'}`)
 void monitorOnce()
+void monitorFablesOnce()
 void runOnce()
+void runFablesOnce()
 void superviseOnce()
 void captureDailyPerformance()
 void recordVolumeTrendAlerts()
@@ -39,6 +46,8 @@ setInterval(() => void captureDailyPerformance(), 5 * 60_000)
 setInterval(() => {
   void superviseOnce()
   void monitorOnce()
+  void monitorFablesOnce()
   void runOnce()
+  void runFablesOnce()
   void recordVolumeTrendAlerts()
 }, EXECUTOR.pollMs)
