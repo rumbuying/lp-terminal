@@ -65,6 +65,23 @@ export async function fetchDexscreener(
   return { stats, wethUsd }
 }
 
+/** USD prices for a batch of tokens — one dexscreener call per request (the
+ *  tokens endpoint accepts comma-separated addresses), each token priced off
+ *  its most-liquid pair via pickDsTokenUsd. Missing keys = no fresh anchor. */
+export async function fetchDsTokenUsdMap(tokens: string[], signal?: AbortSignal): Promise<Record<string, number>> {
+  const unique = [...new Set(tokens.map(t => t.toLowerCase()))].slice(0, 30)
+  const map: Record<string, number> = {}
+  if (!unique.length) return map
+  const r = await fetch(`${DS_ROOT}/latest/dex/tokens/${unique.join(',')}`, { signal })
+  if (!r.ok) throw new Error(`dexscreener ${r.status}`)
+  const j = (await r.json()) as { pairs?: DsPair[] }
+  for (const token of unique) {
+    const price = pickDsTokenUsd(j?.pairs ?? [], token)
+    if (price !== null) map[token] = price
+  }
+  return map
+}
+
 /** venue USD price of a token — its most-liquid pair on dexscreener
  *  (see tokenPrice.ts for why aggregator unit-quotes are not used) */
 export async function fetchDsTokenUsd(token: string, signal?: AbortSignal): Promise<number> {

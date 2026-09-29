@@ -1,19 +1,18 @@
 import { useState } from 'react'
-import { formatUnits, zeroAddress, type Address, type Hex } from 'viem'
+import { formatUnits, type Address, type Hex } from 'viem'
 import { EXPLORER } from '../../config/addresses'
 import { CHAIN } from '../../config/chains'
 import { robinhoodConfig } from '../../config/chains/robinhood'
 import { PairAddrs } from '../PairAddrs'
 import { RangeBar } from '../RangeBar'
 import { Badge } from '../ui'
-import type { TokenInfo } from '../../types'
-import { useTokenUsd } from '../../hooks/useTokenUsd'
+import { tokenUsdOf, useTokenUsdMap } from '../../hooks/useTokenUsd'
 import { useFablesPositions, type FablesManualRef, type FablesToken } from '../../hooks/useFablesPositions'
 import { useFablesManualRefs } from '../../hooks/useFablesManualRefs'
 import { fablesRangeId, readFablesPools, readFablesPosition, type FablesPosition } from '../../lib/fables'
 import { fmtAmount, fmtUsd, shortAddr } from '../../lib/format'
 import { publicRpcClient } from '../../lib/publicRpcClient'
-import { PCell, asTokenInfo, priceAtTick, quantity, shortRangeId } from './fablesUi'
+import { PCell, priceAtTick, quantity, shortRangeId } from './fablesUi'
 
 function FablesPositionCard({ position, tokens }: {
   position: FablesPosition
@@ -26,9 +25,11 @@ function FablesPositionCard({ position, tokens }: {
   const dec0 = token0?.decimals ?? 18
   const dec1 = token1?.decimals ?? 18
   // Same USD anchor the other position cards use: dexscreener's most-liquid
-  // pair per token, with the pool's own price as the cross for the second leg.
-  const usd0 = useTokenUsd(asTokenInfo(token0)).data
-  const usd1 = useTokenUsd(asTokenInfo(token1)).data
+  // pair per token — batched for this card's pool currencies, so any reviewed
+  // Fables pool values correctly without per-token hooks.
+  const usdMap = useTokenUsdMap([position.pool.key.currency0, position.pool.key.currency1]).data ?? {}
+  const usd0 = tokenUsdOf(usdMap, position.pool.key.currency0)
+  const usd1 = tokenUsdOf(usdMap, position.pool.key.currency1)
   const unit0 = Number(formatUnits(position.amount0, dec0))
   const unit1 = Number(formatUnits(position.amount1, dec1))
   const fee0 = Number(formatUnits(position.claimable0, dec0))

@@ -24,12 +24,16 @@ NODE_BIN="${RELEASE_NODE_BIN:-/opt/node-v22/bin}"
 FEE_RECEIVER="${RELEASE_FEE_RECEIVER:-0x2bb53df69efa1b967660f2780ddcf6f76f90ae78}"
 # Build env per doc §6: no private RPC baked in, gateway host enables the
 # same-origin two-chain routing, kyber as a same-origin proxied path.
+# VITE_FABLES_AUTO_POOL_IDS allowlists every reviewed Fables pool in the web
+# form; the executor keeps its own runtime copy in its env file.
+FABLES_AUTO_POOLS="$(node -e 'const s=require("fs").readFileSync("src/config/fables.ts","utf8");const b=s.match(/FABLES_KNOWN_POOL_IDS = new Set<string>\(\[([\s\S]*?)\]\)/)[1];process.stdout.write([...b.matchAll(/(0x[0-9a-f]{64})/g)].map(m=>m[1]).join(","))')"
 BUILD_ENV=(
   "RPC="
   "CHAIN=bsc"
   "VITE_CHAIN_GATEWAY_HOST=$DOMAIN"
   "KYBERSWAP_AGGREGATOR_API_BASE_URL=/kyber"
   "KYBERSWAP_FEE_RECEIVER=$FEE_RECEIVER"
+  "VITE_FABLES_AUTO_POOL_IDS=$FABLES_AUTO_POOLS"
 )
 
 # ── ssh plumbing ────────────────────────────────────────────────────────────

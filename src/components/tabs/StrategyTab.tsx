@@ -21,7 +21,7 @@ import { FablesStrategySection } from './FablesStrategySection'
 import { useFablesExecutorStrategies } from '../../hooks/useFablesExecutor'
 import { useFablesManualRefs } from '../../hooks/useFablesManualRefs'
 import { useFablesPositions } from '../../hooks/useFablesPositions'
-import { useTokenUsd } from '../../hooks/useTokenUsd'
+import { useTokenUsd, tokenUsdMapKey, tokenUsdOf, useTokenUsdMap } from '../../hooks/useTokenUsd'
 import { asTokenInfo, fablesStrategyState } from './fablesUi'
 import { loadStrategies, removeStrategy, syncStrategyArchiveState, upsertStrategy } from '../../lib/strategyStore'
 import { snapshotFromPosition } from '../../lib/strategyPlanner'
@@ -903,26 +903,25 @@ export function StrategyTab() {
   // Fables 策略并入总览：净值/手续费/gas 按现价折成 USDG（≈USD）。
   // 累计口径为净手续费（领费 − gas），未含市价变动——Fables 没有逐周期
   // 快照，全口径盈亏需要 executor 侧先落盘，缺失的不硬造。
-  // 支持多个启用中的 Fables 策略（不同钱包/区间各自一张卡，合计进总览）；
-  // 锚价取第一个启用策略的池币种，其余策略按同池同币对折算。
+  // 支持多个启用中的 Fables 策略、任意已审阅池：每个策略用自己池的币种
+  // 现价折算（批量 dexscreener 查询），合计为各策略之和。
   const fablesStrategiesAll = (fablesExecutorQuery.data?.strategies ?? []).filter(row => row.config.enabled)
-  const fablesAnchor = fablesStrategiesAll[0] ?? null
   const fablesMatch = (poolId: string, rangeId: string) => fablesPositionsQuery.data?.positions.find(position =>
     position.pool.id.toLowerCase() === poolId.toLowerCase()
     && position.rangeId.toString() === rangeId) ?? null
-  const fablesAnchorPosition = fablesAnchor
-    ? fablesMatch(fablesAnchor.config.positionRef.poolId, fablesAnchor.config.positionRef.rangeId)
-    : null
-  const fablesTokens = fablesPositionsQuery.data?.tokens
-  const fablesToken0 = fablesAnchorPosition ? fablesTokens?.[fablesAnchorPosition.pool.key.currency0.toLowerCase()] : undefined
-  const fablesToken1 = fablesAnchorPosition ? fablesTokens?.[fablesAnchorPosition.pool.key.currency1.toLowerCase()] : undefined
-  const fablesUsd0 = useTokenUsd(asTokenInfo(fablesToken0)).data
-  const fablesUsd1 = useTokenUsd(asTokenInfo(fablesToken1)).data
-  const fablesUsdReady = fablesUsd0 != null && fablesUsd1 != null
+  const fablesCurrencies = [...new Set((fablesPositionsQuery.data?.positions ?? []).flatMap(position =>
+    [position.pool.key.currency0, position.pool.key.currency1]))]
+  const fablesUsdMap = useTokenUsdMap(fablesCurrencies).data ?? {}
+  const fablesTokenUsd = (address: Address | undefined): number | null => {
+    if (!address) return null
+    const price = fablesUsdMap[tokenUsdMapKey(address)]
+    return Number.isFinite(price) ? price : null
+  }
   const fablesToday = shanghaiDay(Math.floor(Date.now() / 1000))
   type FablesOverviewEntry = {
     row: ExecutorFablesStrategy
     position: import('../../lib/fables').FablesPosition | null
+    usd0: number | null; usd1: number | null
     feeEth: bigint; feeTok: bigint; gasEth: bigint
     todayFeeEth: bigint; todayFeeTok: bigint; todayGasEth: bigint
   }
@@ -935,9 +934,12 @@ export function StrategyTab() {
     .reduce((sum, entry) => sum + BigInt(entry.amount ?? '0'), 0n)
   const fablesEntries: FablesOverviewEntry[] = fablesStrategiesAll.map(row => {
     const ledger = row.recentLedger ?? []
+    const position = fablesMatch(row.config.positionRef.poolId, row.config.positionRef.rangeId)
     return {
       row,
-      position: fablesMatch(row.config.positionRef.poolId, row.config.positionRef.rangeId),
+      position,
+      usd0: fablesTokenUsd(position?.pool.key.currency0),
+      usd1: fablesTokenUsd(position?.pool.key.currency1),
       feeEth: fablesSumRaw(ledger, 'fees_claimed', true, false),
       feeTok: fablesSumRaw(ledger, 'fees_claimed', false, false),
       gasEth: fablesSumRaw(ledger, 'gas', true, false),
@@ -948,29 +950,34 @@ export function StrategyTab() {
   })
   const sumEth = (pick: (entry: (typeof fablesEntries)[number]) => bigint) =>
     fablesEntries.reduce((sum, entry) => sum + pick(entry), 0n)
-  const fablesNetFeesUsdg = fablesUsdReady && fablesEntries.length
-    ? Number(formatUnits(sumEth(entry => entry.feeEth - entry.gasEth), 18)) * fablesUsd0
-      + Number(formatUnits(sumEth(entry => entry.feeTok), 18)) * fablesUsd1
+  // 只累计两侧都有美元锚的策略；没有锚的（价格源缺失）不硬造成 0。
+  const fablesPriced = fablesEntries.filter(entry => entry.usd0 != null && entry.usd1 != null)
+  const fablesNetFeesUsdg = fablesPriced.length
+    ? fablesPriced.reduce((sum, entry) => sum
+      + Number(formatUnits(entry.feeEth - entry.gasEth, 18)) * (entry.usd0 as number)
+      + Number(formatUnits(entry.feeTok, 18)) * (entry.usd1 as number), 0)
     : null
-  const fablesTodayFeesUsdg = fablesUsdReady && fablesEntries.length
-    ? Number(formatUnits(sumEth(entry => entry.todayFeeEth), 18)) * fablesUsd0
-      + Number(formatUnits(sumEth(entry => entry.todayFeeTok), 18)) * fablesUsd1
+  const fablesTodayFeesUsdg = fablesPriced.length
+    ? fablesPriced.reduce((sum, entry) => sum
+      + Number(formatUnits(entry.todayFeeEth, 18)) * (entry.usd0 as number)
+      + Number(formatUnits(entry.todayFeeTok, 18)) * (entry.usd1 as number), 0)
     : null
-  const fablesTodayGasUsdg = fablesUsdReady && fablesEntries.length
-    ? Number(formatUnits(sumEth(entry => entry.todayGasEth), 18)) * fablesUsd0
+  const fablesTodayGasUsdg = fablesPriced.length
+    ? fablesPriced.reduce((sum, entry) => sum
+      + Number(formatUnits(entry.todayGasEth, 18)) * (entry.usd0 as number), 0)
     : null
   const fablesTodayNetUsdg = fablesTodayFeesUsdg != null && fablesTodayGasUsdg != null
     ? fablesTodayFeesUsdg - fablesTodayGasUsdg : null
-  const fablesClaimableUsdg = fablesUsdReady && fablesEntries.some(entry => entry.position)
-    ? fablesEntries.reduce((sum, entry) => sum + (entry.position
-      ? Number(formatUnits(entry.position.claimable0, 18)) * fablesUsd0!
-        + Number(formatUnits(entry.position.claimable1, 18)) * fablesUsd1!
+  const fablesClaimableUsdg = fablesPriced.length
+    ? fablesPriced.reduce((sum, entry) => sum + (entry.position
+      ? Number(formatUnits(entry.position.claimable0, 18)) * (entry.usd0 as number)
+        + Number(formatUnits(entry.position.claimable1, 18)) * (entry.usd1 as number)
       : 0), 0)
     : null
-  const fablesNetValueUsdg = fablesUsdReady && fablesEntries.some(entry => entry.position)
-    ? fablesEntries.reduce((sum, entry) => sum + (entry.position
-      ? Number(formatUnits(entry.position.amount0, 18)) * fablesUsd0!
-        + Number(formatUnits(entry.position.amount1, 18)) * fablesUsd1!
+  const fablesNetValueUsdg = fablesPriced.length
+    ? fablesPriced.reduce((sum, entry) => sum + (entry.position
+      ? Number(formatUnits(entry.position.amount0, 18)) * (entry.usd0 as number)
+        + Number(formatUnits(entry.position.amount1, 18)) * (entry.usd1 as number)
       : 0), 0)
     : null
   const runningStrategies = executorStrategyList
@@ -1276,14 +1283,14 @@ export function StrategyTab() {
                 </article>
               )
             })}
-            {fablesEntries.map(({ row: fablesStrategy, position: fablesPosition, feeEth, feeTok, gasEth }) => {
+            {fablesEntries.map(({ row: fablesStrategy, position: fablesPosition, usd0, usd1, feeEth, feeTok, gasEth }) => {
               const state = fablesStrategyState(fablesStrategy.state)
               const netFeesEth = feeEth - gasEth
-              const netFeesUsdg = fablesUsdReady
-                ? Number(formatUnits(netFeesEth, 18)) * fablesUsd0 + Number(formatUnits(feeTok, 18)) * fablesUsd1
+              const netFeesUsdg = usd0 != null && usd1 != null
+                ? Number(formatUnits(netFeesEth, 18)) * usd0 + Number(formatUnits(feeTok, 18)) * usd1
                 : null
-              const netValueUsdg = fablesUsdReady && fablesPosition
-                ? Number(formatUnits(fablesPosition.amount0, 18)) * fablesUsd0 + Number(formatUnits(fablesPosition.amount1, 18)) * fablesUsd1
+              const netValueUsdg = usd0 != null && usd1 != null && fablesPosition
+                ? Number(formatUnits(fablesPosition.amount0, 18)) * usd0 + Number(formatUnits(fablesPosition.amount1, 18)) * usd1
                 : null
               return (
                 <article className="strategy-overview-card" key={fablesStrategy.config.id}>
