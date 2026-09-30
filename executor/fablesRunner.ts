@@ -61,9 +61,9 @@ async function walletAmounts(owner: Address, currency0: Address, currency1: Addr
 }
 
 async function spendableCycleAmounts(job: FablesJob, currencies: { currency0: Address; currency1: Address },
-  baseline: FablesAmounts, current: FablesAmounts): Promise<FablesAmounts> {
+  current: FablesAmounts): Promise<FablesAmounts> {
   const { reserve } = await nativeCycleGasBudget(job)
-  return cycleSpendableAmounts({ ...currencies, baseline, current, nativeGasReserve: reserve })
+  return cycleSpendableAmounts({ ...currencies, current, nativeGasReserve: reserve })
 }
 
 async function receiptFor(job: FablesJob, stage: FablesJobStage): Promise<TransactionReceipt | undefined> {
@@ -223,7 +223,7 @@ async function balanceAndPlan(job: FablesJob): Promise<void> {
   if (dec0 < 0 || dec0 > 36 || dec1 < 0 || dec1 > 36)
     throw new Error('E_FABLES_TOKEN_DECIMALS')
   const baseline = savedAmounts(job.context.baseline, 'BASELINE')
-  const funds = await spendableCycleAmounts(job, key, baseline, current)
+  const funds = await spendableCycleAmounts(job, key, current)
   const fees = savedAmounts(job.context.fees, 'FEES')
   const realized = job.context.feeConversionDone
     ? savedAmounts(job.context.realized, 'REALIZED')
@@ -409,9 +409,8 @@ async function executeSwap(job: FablesJob, privateKey: Hex, purpose: SwapPurpose
         return
       }
     }
-    const baseline = savedAmounts(job.context.baseline, 'BASELINE')
     const before = await walletAmounts(job.config.owner, key.currency0, key.currency1)
-    const cycle = await spendableCycleAmounts(job, key, baseline, before)
+    const cycle = await spendableCycleAmounts(job, key, before)
     const held = savedAmounts(job.context.heldFees, 'HELD_FEES')
     const available = purpose === 'fee' ? held : {
       amount0: cycle.amount0 > held.amount0 ? cycle.amount0 - held.amount0 : 0n,
@@ -487,9 +486,8 @@ async function freshDeposit(job: FablesJob) {
   if (position.shares !== 0n || position.claimable0 !== 0n || position.claimable1 !== 0n)
     throw new Error('E_FABLES_OLD_RANGE_NOT_SETTLED')
   const key = position.pool.key
-  const baseline = savedAmounts(job.context.baseline, 'BASELINE')
   const wallet = await walletAmounts(job.config.owner, key.currency0, key.currency1)
-  const cycle = await spendableCycleAmounts(job, key, baseline, wallet)
+  const cycle = await spendableCycleAmounts(job, key, wallet)
   const held = savedAmounts(job.context.heldFees, 'HELD_FEES')
   const funds = {
     amount0: cycle.amount0 > held.amount0 ? cycle.amount0 - held.amount0 : 0n,
@@ -584,8 +582,18 @@ async function verifyAndComplete(job: FablesJob): Promise<void> {
   const principal = savedAmounts(job.context.principal, 'PRINCIPAL')
   const fees = savedAmounts(job.context.fees, 'FEES')
   const baseline = savedAmounts(job.context.baseline, 'BASELINE')
+  // The idle sweep may legitimately take the wallet below its pre-cycle
+  // balance — everything above the protected floor belongs to the LP now.
+  // What remains is the wallet's own idle, which the next cycle sweeps again.
+  const { reserve } = await nativeCycleGasBudget(job)
+  const floorBaseline = {
+    amount0: lower(old.pool.key.currency0) === lower(zeroAddress)
+      ? (baseline.amount0 < reserve ? baseline.amount0 : reserve) : 0n,
+    amount1: lower(old.pool.key.currency1) === lower(zeroAddress)
+      ? (baseline.amount1 < reserve ? baseline.amount1 : reserve) : 0n,
+  }
   const remainder = cycleOwnedAmounts({ currency0: old.pool.key.currency0,
-    currency1: old.pool.key.currency1, baseline, current: after })
+    currency1: old.pool.key.currency1, baseline: floorBaseline, current: after })
   const plannedHeld = savedAmounts(job.context.heldFees, 'HELD_FEES')
   const held = { amount0: plannedHeld.amount0 < remainder.amount0 ? plannedHeld.amount0 : remainder.amount0,
     amount1: plannedHeld.amount1 < remainder.amount1 ? plannedHeld.amount1 : remainder.amount1 }

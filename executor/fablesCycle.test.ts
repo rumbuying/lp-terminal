@@ -21,20 +21,17 @@ test('cycle spending excludes preexisting wallet assets and native gas loss', ()
     current: { amount0: 900n, amount1: 8_900n } }), /BALANCE_FELL/)
 })
 
-test('native cycle proceeds are usable when existing wallet ETH already covers gas', () => {
+test('cycle spending sweeps all idle above the native gas reserve', () => {
   const currencies = { currency0: zeroAddress, currency1: token }
   assert.deepEqual(cycleSpendableAmounts({ ...currencies,
-    baseline: { amount0: 229n, amount1: 200n },
     current: { amount0: 244n, amount1: 240n }, nativeGasReserve: 10n,
-  }), { amount0: 15n, amount1: 40n })
+  }), { amount0: 234n, amount1: 240n })
   assert.deepEqual(cycleSpendableAmounts({ ...currencies,
-    baseline: { amount0: 8n, amount1: 200n },
-    current: { amount0: 15n, amount1: 240n }, nativeGasReserve: 10n,
-  }), { amount0: 5n, amount1: 40n })
-  assert.deepEqual(cycleSpendableAmounts({ ...currencies,
-    baseline: { amount0: 8n, amount1: 200n },
     current: { amount0: 9n, amount1: 240n }, nativeGasReserve: 10n,
-  }), { amount0: 0n, amount1: 40n })
+  }), { amount0: 0n, amount1: 240n })
+  assert.deepEqual(cycleSpendableAmounts({ ...currencies,
+    current: { amount0: 10n, amount1: 0n }, nativeGasReserve: 10n,
+  }), { amount0: 0n, amount1: 0n })
 })
 
 test('fee handling allocates only actual cycle-owned balances', () => {
