@@ -13,7 +13,7 @@ import { fablesRangeId } from '../src/lib/fables'
 import { quoteKyber, quoteNativeExecutable, gatedKyberTx } from './kyber'
 import { publicClient, readAllowance, readTokenBalances } from './chain'
 import { EXECUTOR } from './config'
-import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, cycleSpendableAmounts, fablesSwapImpactBps, freshFablesRange, mintedFablesShares, type FablesAmounts } from './fablesCycle'
+import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, cycleSpendableAmounts, fablesSweepFloor, fablesSwapImpactBps, freshFablesRange, mintedFablesShares, type FablesAmounts } from './fablesCycle'
 import { completedFablesCyclesSince, activeFablesJobs, appendFablesLedger, cancelFablesJobBackInRange, completeFablesJob,
   failFablesJobBeforeMutation, fablesJobById, fablesJobTransactions, markFablesTurnover,
   reserveFablesTurnover, setFablesJobProgress,
@@ -62,8 +62,9 @@ async function walletAmounts(owner: Address, currency0: Address, currency1: Addr
 
 async function spendableCycleAmounts(job: FablesJob, currencies: { currency0: Address; currency1: Address },
   current: FablesAmounts): Promise<FablesAmounts> {
-  const { reserve } = await nativeCycleGasBudget(job)
-  return cycleSpendableAmounts({ ...currencies, current, nativeGasReserve: reserve })
+  const { estimatedGas, reserve } = await nativeCycleGasBudget(job)
+  return cycleSpendableAmounts({ ...currencies, current,
+    nativeGasReserve: fablesSweepFloor(reserve, estimatedGas) })
 }
 
 async function receiptFor(job: FablesJob, stage: FablesJobStage): Promise<TransactionReceipt | undefined> {
@@ -585,12 +586,13 @@ async function verifyAndComplete(job: FablesJob): Promise<void> {
   // The idle sweep may legitimately take the wallet below its pre-cycle
   // balance — everything above the protected floor belongs to the LP now.
   // What remains is the wallet's own idle, which the next cycle sweeps again.
-  const { reserve } = await nativeCycleGasBudget(job)
+  const { estimatedGas, reserve } = await nativeCycleGasBudget(job)
+  const floor = fablesSweepFloor(reserve, estimatedGas)
   const floorBaseline = {
     amount0: lower(old.pool.key.currency0) === lower(zeroAddress)
-      ? (baseline.amount0 < reserve ? baseline.amount0 : reserve) : 0n,
+      ? (baseline.amount0 < floor ? baseline.amount0 : floor) : 0n,
     amount1: lower(old.pool.key.currency1) === lower(zeroAddress)
-      ? (baseline.amount1 < reserve ? baseline.amount1 : reserve) : 0n,
+      ? (baseline.amount1 < floor ? baseline.amount1 : floor) : 0n,
   }
   const remainder = cycleOwnedAmounts({ currency0: old.pool.key.currency0,
     currency1: old.pool.key.currency1, baseline: floorBaseline, current: after })

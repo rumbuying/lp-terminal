@@ -5,7 +5,7 @@ import { fablesHookAbi } from '../src/abi/fables'
 import { getSqrtRatioAtTick } from '../src/lib/clmath'
 import { fablesRangeId, type FablesPosition } from '../src/lib/fables'
 import type { FablesStrategyConfig } from '../shared/strategy/types'
-import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, cycleSpendableAmounts, fablesSwapImpactBps, fablesTargetValueBps,
+import { allocateFablesFees, claimedFablesFees, cycleOwnedAmounts, cycleSpendableAmounts, fablesSweepFloor, fablesSwapImpactBps, fablesTargetValueBps,
   freshFablesRange, mintedFablesShares } from './fablesCycle'
 
 const hook = '0x06a889870c8f83640d6816319f72e2aa579b6080' as const
@@ -32,6 +32,21 @@ test('cycle spending sweeps all idle above the native gas reserve', () => {
   assert.deepEqual(cycleSpendableAmounts({ ...currencies,
     current: { amount0: 10n, amount1: 0n }, nativeGasReserve: 10n,
   }), { amount0: 0n, amount1: 0n })
+})
+
+test('sweep floor covers the deposit tx gas and a gas-price drift margin', () => {
+  // The signer demands wallet ≥ max0 + gas + reserve with max0 up to budget:
+  // a floor of reserve alone leaves the deposit's own gas unfunded.
+  assert.equal(fablesSweepFloor(10n, 0n), 10n)
+  assert.equal(fablesSweepFloor(10n, 2n), 16n)
+  assert.throws(() => fablesSweepFloor(-1n, 1n), /GAS_RESERVE/)
+  // A swept wallet sits at the floor; the next precheck needs reserve +
+  // estimatedGas at the then-current price — 3× drift margin keeps it passing.
+  const reserve = 100n
+  const estimatedGas = 5n
+  const floor = fablesSweepFloor(reserve, estimatedGas)
+  assert.ok(floor >= reserve + estimatedGas)
+  assert.ok(floor >= fablesSweepFloor(reserve, estimatedGas))
 })
 
 test('fee handling allocates only actual cycle-owned balances', () => {

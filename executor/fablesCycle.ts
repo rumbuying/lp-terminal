@@ -43,12 +43,12 @@ export function cycleOwnedAmounts(args: {
 }
 
 /**
- * Deployable funds for a rebalance cycle: the wallet balance above the native
- * gas reserve. Sweeping the whole surplus — not just the post-exit delta —
- * matters because deposit remainders and retained fees otherwise strand in
- * the wallet forever (2026-09-30 review: a third of a live strategy's capital
- * sat idle while the position kept shrinking). The native gas reserve and the
- * current cycle's retained fees (subtracted by the callers) stay untouched.
+ * Deployable funds for a rebalance cycle: the wallet balance above the sweep
+ * floor. Sweeping the whole surplus — not just the post-exit delta — matters
+ * because deposit remainders and retained fees otherwise strand in the wallet
+ * forever (2026-09-30 review: a third of a live strategy's capital sat idle
+ * while the position kept shrinking). The current cycle's retained fees are
+ * subtracted by the callers; see fablesSweepFloor for the native floor.
  */
 export function cycleSpendableAmounts(args: {
   currency0: Address; currency1: Address
@@ -63,6 +63,19 @@ export function cycleSpendableAmounts(args: {
     amount1: args.currency1.toLowerCase() === zeroAddress
       ? aboveReserve(args.current.amount1) : args.current.amount1,
   }
+}
+
+/**
+ * Native floor beneath which the sweep never reaches. The signer requires
+ * `wallet ≥ tx.value + gas + reserve` and the deposit's tx.value can span the
+ * whole budget (fablesDepositCaps caps max0 at budget), so the budget must
+ * stop at `reserve + the tx's own gas`. The ×3 also absorbs gas-price drift
+ * between cycles: the next precheck demands `reserve + estimatedGas` at the
+ * then-current price, and a swept wallet sits exactly at this floor.
+ */
+export function fablesSweepFloor(minNativeGasReserveWei: bigint, estimatedGas: bigint): bigint {
+  if (minNativeGasReserveWei < 0n || estimatedGas < 0n) throw new Error('E_FABLES_GAS_RESERVE')
+  return minNativeGasReserveWei + estimatedGas * 3n
 }
 
 /** Fee event amounts are net tokens paid to the wallet, never a future swap-fee prediction. */
