@@ -88,8 +88,9 @@ export async function readFablesPosition(
   if (fablesRangeId(poolId, Number(tickLower), Number(tickUpper)) !== args.rangeId)
     throw new Error('E_FABLES_RANGE_IDENTITY')
   const pool = pools.find(item => item.id.toLowerCase() === poolId.toLowerCase())
-  if (!pool || !pool.active || !pool.reviewed || JSON.stringify(pool.key).toLowerCase() !== JSON.stringify(key).toLowerCase())
+  if (!pool || !pool.active || JSON.stringify(pool.key).toLowerCase() !== JSON.stringify(key).toLowerCase())
     throw new Error('E_FABLES_POOL_IDENTITY')
+  if (!pool.reviewed) throw new Error('E_FABLES_POOL_UNREVIEWED')
   const row = view[0][0]
   if (!row || !row.keyVerified || row.rangeId !== args.rangeId || row.shares !== shares
     || row.tickLower !== tickLower || row.tickUpper !== tickUpper

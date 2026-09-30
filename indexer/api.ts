@@ -3731,6 +3731,8 @@ export function getFablesPositions(params: Params): {
   cursor: number | null
   scannedAt: number | null
   error: string | null
+  unreviewedPools: string[]
+  unreviewedSince: number | null
   candidates: Array<{ hook: string; rangeId: string; seenBlock: number }>
 } {
   if (CHAIN.id !== 4663) throw new ApiConflictError('Fables is only available on Robinhood Chain')
@@ -3742,11 +3744,18 @@ export function getFablesPositions(params: Params): {
   const error = kvGet('fables_positions_tail_error') || null
   const ready = kvGet('fables_positions_backfilled') === '1' && !error
     && Number.isSafeInteger(scannedAt) && scannedAt > 0 && now() - scannedAt <= 600
+  // Active registered pools outside the reviewed snapshot (the indexer warns
+  // but keeps running on them) — surfaced so clients can degrade gracefully.
+  const unreviewedPools = (kvGet('fables_unreviewed_pool_ids') ?? '')
+    .split(',').filter(id => /^0x[0-9a-f]{64}$/.test(id))
+  const unreviewedSince = Number(kvGet('fables_unreviewed_pool_ids_at'))
   return {
     schemaVersion: 1, chainId: CHAIN.id, ready,
     cursor: Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : null,
     scannedAt: Number.isSafeInteger(scannedAt) && scannedAt > 0 ? scannedAt : null,
     error,
+    unreviewedPools,
+    unreviewedSince: Number.isSafeInteger(unreviewedSince) && unreviewedSince > 0 ? unreviewedSince : null,
     candidates: fablesCandidatesByOwner(rawOwner),
   }
 }

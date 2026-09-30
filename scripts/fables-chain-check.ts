@@ -39,6 +39,7 @@ async function main() {
   })
   const seen = new Set<string>()
   const hooks = new Set<Address>()
+  const newPools: string[] = []
   for (const row of rows) {
     const key = row.key
     const id = v4PoolId({
@@ -49,7 +50,7 @@ async function main() {
     if (seen.has(id)) throw new Error(`duplicate PoolId: ${id}`)
     seen.add(id)
     if (!row.active) continue
-    if (!FABLES_KNOWN_POOL_IDS.has(id)) throw new Error(`new active pool requires review: ${id}`)
+    if (!FABLES_KNOWN_POOL_IDS.has(id)) { newPools.push(id); continue }
     const reviewedHook = fablesHook(key.hooks)
     if (!reviewedHook) throw new Error(`unreviewed hook: ${key.hooks}`)
     if (key.fee !== 0x800000) throw new Error(`unexpected Fables fee marker: ${id}`)
@@ -60,6 +61,10 @@ async function main() {
     })
     if (slot0[0] <= 0n) throw new Error(`pool not initialized: ${id}`)
   }
+  // Collect every new pool in one pass — the review pass needs the full list,
+  // not one failure at a time.
+  if (newPools.length)
+    throw new Error(`${newPools.length} new active pool(s) require review: ${newPools.join(',')}`)
   for (const hook of hooks) await assertCodeHash(hook, fablesHook(hook)!.codeHash)
   if (hooks.size !== Object.keys(FABLES_HOOKS).length)
     throw new Error(`reviewed hook set drift: ${hooks.size} active, ${Object.keys(FABLES_HOOKS).length} pinned`)

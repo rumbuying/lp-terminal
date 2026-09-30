@@ -16,6 +16,7 @@ const candidates = new Set<string>()
 let head = 100
 let logs: Array<{ address: Hex; topics: Hex[]; blockNumber: Hex }> = []
 let reviewed = true
+let poolsOverride: Array<{ id: Hex; key: { hooks: Hex }; active: boolean; reviewed: boolean }> | null = null
 let windows: Array<[number, number]> = []
 
 mock.module('./config', { namedExports: {
@@ -42,7 +43,7 @@ mock.module('./store', { namedExports: {
   },
 } })
 mock.module('../src/lib/fables', { namedExports: {
-  readFablesPools: async () => hooks.map((hook, i) => ({
+  readFablesPools: async () => poolsOverride ?? hooks.map((hook, i) => ({
     id: numberToHex(i, { size: 32 }), key: { hooks: hook }, active: true, reviewed: reviewed || i !== 0,
   })),
 } })
@@ -51,6 +52,7 @@ const { fablesCandidatesFromLog, tailFablesPositions } = await import('./fablesP
 
 beforeEach(() => {
   kv.clear(); candidates.clear(); logs = []; windows = []; reviewed = true; head = 100
+  poolsOverride = null
 })
 
 test('deposit, withdrawal and share transfer all preserve owner/range candidates', async () => {
@@ -74,9 +76,44 @@ test('a resume scans only blocks after the durable cursor', async () => {
   assert.equal(kv.get('fables_position_cursor'), '100')
 })
 
-test('unreviewed active pool blocks replay before advancing the cursor', async () => {
+test('new pools on reviewed hooks only warn — the index keeps running', async () => {
+  logs = [
+    { address: hooks[0], topics: [deposited, word(owner), id], blockNumber: numberToHex(10) },
+  ]
   reviewed = false
-  await assert.rejects(() => tailFablesPositions(), /requires review/)
+  assert.equal(await tailFablesPositions(), 1)
+  assert.equal(kv.get('fables_position_cursor'), '100')
+  assert.equal(kv.get('fables_positions_backfilled'), '1')
+  assert.equal(kv.get('fables_unreviewed_pool_ids'), numberToHex(0, { size: 32 }))
+  assert.equal(kv.get('fables_unreviewed_pool_ids_at'), '1000')
+})
+
+test('the unreviewed-pool warning clears once the snapshot covers the registry again', async () => {
+  reviewed = false
+  await tailFablesPositions()
+  assert.notEqual(kv.get('fables_unreviewed_pool_ids'), '')
+  reviewed = true
+  await tailFablesPositions()
+  assert.equal(kv.get('fables_unreviewed_pool_ids'), '')
+})
+
+test('an unreviewed hook going active stops the index before the cursor moves', async () => {
+  poolsOverride = [
+    ...hooks.map((hook, i) => ({
+      id: numberToHex(i, { size: 32 }), key: { hooks: hook }, active: true, reviewed: true,
+    })),
+    { id: numberToHex(99, { size: 32 }), key: { hooks: '0x0000000000000000000000000000000000000001' as Hex },
+      active: true, reviewed: false },
+  ]
+  await assert.rejects(() => tailFablesPositions(), /hook set changed[\s\S]*new unreviewed hooks/)
+  assert.equal(kv.get('fables_position_cursor'), undefined)
+})
+
+test('a configured hook losing every active pool stops the index', async () => {
+  poolsOverride = hooks.slice(1).map((hook, i) => ({
+    id: numberToHex(i, { size: 32 }), key: { hooks: hook }, active: true, reviewed: true,
+  }))
+  await assert.rejects(() => tailFablesPositions(), /hooks without active pools/)
   assert.equal(kv.get('fables_position_cursor'), undefined)
 })
 

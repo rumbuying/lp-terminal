@@ -60,10 +60,30 @@ export async function tailFablesPositions(): Promise<number> {
   if (!Number.isSafeInteger(head) || head < 0) throw new Error('invalid Fables finalized head')
   const pools = await readFablesPools(pc, BigInt(head))
   const active = pools.filter(pool => pool.active)
-  if (active.some(pool => !pool.reviewed)) throw new Error('active Fables pool requires review')
+  // Hook-set drift stays fatal: the log scan only covers the reviewed hooks,
+  // so an unreviewed hook going active (or a reviewed hook losing every pool)
+  // means the index would be silently incomplete for positions users hold.
   const activeHooks = new Set(active.map(pool => pool.key.hooks.toLowerCase()))
-  if (activeHooks.size !== HOOKS.length || HOOKS.some(hook => !activeHooks.has(hook)))
-    throw new Error('Fables registry hook set changed')
+  const unknownHooks = [...activeHooks].filter(hook => !HOOKS.includes(hook as Hex))
+  const starvedHooks = HOOKS.filter(hook => !activeHooks.has(hook.toLowerCase()))
+  if (unknownHooks.length || starvedHooks.length)
+    throw new Error(`Fables registry hook set changed`
+      + (unknownHooks.length ? `; new unreviewed hooks: ${unknownHooks.join(',')}` : '')
+      + (starvedHooks.length ? `; hooks without active pools: ${starvedHooks.join(',')}` : ''))
+  // New pools on already-reviewed hooks only warn: their events flow through
+  // the same reviewed hook addresses the scan already covers, and every
+  // downstream read re-verifies pool review independently. Stopping the whole
+  // index for them left live positions undiscoverable for days (2026-09-30).
+  const unreviewed = active.filter(pool => !pool.reviewed).map(pool => pool.id.toLowerCase()).sort()
+  const signature = unreviewed.join(',')
+  if (signature !== (kvGet('fables_unreviewed_pool_ids') ?? '')) {
+    if (signature) log(`[fables] ${unreviewed.length} active pool(s) not in the reviewed snapshot; indexing continues — ${signature}`)
+    else log('[fables] registry matches the reviewed snapshot again')
+    tx(() => {
+      kvSet('fables_unreviewed_pool_ids', signature)
+      kvSet('fables_unreviewed_pool_ids_at', String(now()))
+    })
+  }
 
   const saved = kvGet('fables_position_cursor')
   const cursor = saved === null || saved === undefined || saved === '' ? -1 : Number(saved)

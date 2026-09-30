@@ -117,6 +117,7 @@ export function FablesPositionsSection({ owner }: { owner: Address }) {
     {query.isPending && <div className="dim">正在核对 Fables 份额和区间…</div>}
     {query.isError && <div className="red">Fables 仓位读取失败：{String(query.error)}</div>}
     {query.data?.indexError && <div className="amber">事件索引暂不可用；仅显示已手动导入的仓位。{query.data.indexError}</div>}
+    {query.data?.indexWarning && <div className="amber">{query.data.indexWarning}</div>}
     {query.data?.positions.length === 0 && <div className="dim">未发现 Fables 份额仓位。</div>}
     {query.data?.positions.map(position =>
       <FablesPositionCard key={`${position.pool.id}:${position.rangeId}`}

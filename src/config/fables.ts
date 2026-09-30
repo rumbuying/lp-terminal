@@ -1,7 +1,10 @@
-/** Fables Robinhood Chain deployment verified from activePools at block 73198674.
+/** Fables Robinhood Chain deployment verified from activePools at block 76165916.
  * Runtime hashes were read with eth_getCode; ABI capability was checked against
- * Sourcify matched source for every currently registered hook (2026-09-26).
- * A newly registered or changed hook must fail closed until reviewed. */
+ * Sourcify matched source for every currently registered hook (2026-09-26,
+ * re-verified 2026-09-30 — all pinned hooks, registry and lens unchanged).
+ * A newly registered or changed hook must fail closed until reviewed. New
+ * pools on reviewed hooks warn in the indexer but do not stop it; they stay
+ * unreviewed here until this snapshot is refreshed by hand. */
 export const FABLES_REGISTRY = '0x159a113e012593d9b3cc63ad45e30f0467e13ef3' as const
 export const FABLES_LENS = '0xE44c0BAb43BdD47e7Ab40236bC183dCc77A9ED6c' as const
 export const FABLES_REGISTRY_CODE_HASH = '0x766fbad3b8b636c92f3bcba04abc3e83b4dd77e30ae81fe9ae1a89f19aaa151d' as const
@@ -26,7 +29,9 @@ export const FABLES_HOOKS = {
 export type FablesHook = keyof typeof FABLES_HOOKS
 export const fablesHook = (address: string) => FABLES_HOOKS[address.toLowerCase() as FablesHook] ?? null
 
-/** PoolIds observed in the reviewed registry snapshot. New rows require review. */
+/** PoolIds observed in the reviewed registry snapshot. New rows require review:
+ * until they land here the indexer only warns about them, and they are
+ * invisible to positions, manual refs and auto-execution. */
 export const FABLES_KNOWN_POOL_IDS = new Set<string>([
   '0x7990aad9e8fb048f49a155a7df5603db0366f0657035b78eb4196395cccb3dcd',
   '0x8674c1c5544f3c9563565b5d4bd5916701d90b3559b072acf7cef5b4fc5b8dcd',
@@ -66,6 +71,28 @@ export const FABLES_KNOWN_POOL_IDS = new Set<string>([
   '0xc761f7de760d2b73cc3e3cc3d729916a4ed2f7fc6b0aa3872e2ced4258961e92',
   '0x29bb26f93fe1bbbf81ee62671cc2a66fbf318f20e6b0757607a2fe3713651fdf',
   '0xa1f381b8938b5a9dfb601e692958bc5eff9898f4468ab5e398a52a0d53575093',
+  // 2026-09-30 refresh: 19 pools registered since the 2026-09-26 snapshot,
+  // all on already-pinned hooks with unchanged runtime code (verified
+  // on-chain) and registry ids recomputed from their pool keys.
+  '0x0bae6c92e5af1240e8728b77ff86139a5d90e6f63b14d67d606671b0fd9abaf5',
+  '0x0f4d4d8a40ce635f1317f18b9fdf41fb5492bec9763abdacf3ea59a2c3bf5758',
+  '0x3078bf0a7a6b5a2eb4bc367516854ae93a9aae334e0067f2a2be5cb616bfec6f',
+  '0x3428910987af3506702305be9869f3320b55d7f280af90804bf376786f6082fe',
+  '0x4030f646babe7643c33ee0b9a5123e04ee97a8820a26d0d9dec8b0265f31170d',
+  '0x46c24538a851e105a217d2b9b23e2f7f1cb47fbc136572c92d023e36bebd98fe',
+  '0x5e4c353496e4c82a406a38ca1eaad6d2d4cdb8d405d422faff84bcb6f548d97e',
+  '0x6c330014af1c9e8fd0c6b5e3407439af7bce820c53c72cff168c1b92d9f96ca2',
+  '0x76d4e09a330a2f1b110a7ffba2c52804c8d4b64615254590e06822575ee9097e',
+  '0x7e42e835239ea7f2707b77b7672e4358aa2b799746274ab1254d8a576b5f56fb',
+  '0x8138ea2894ce8f825d830569df6faf33e55344290954ce22432ca4f11913bacc',
+  '0x9fc86429019dc022aa8981fc0bf2710a05fb21787e30b1f3b714d243e9fb26d9',
+  '0xaf30b4c0110121efe3702cbead77d943d0765eb772fea5341d37b73364066ff9',
+  '0xb4f01c156256c361e938e1391421d1297db290f9a055c1ad4a33dd42e6a76b5e',
+  '0xbe1a90db81cf52603ea9059a6fde2e5fa893a8750647ff189ee7618c61b4c4f9',
+  '0xcb69f1b3d627d84795f6ba157faa1051f6160919d7f3cd0e510ff6afcbe03961',
+  '0xcf0bd6587434f9f6b6e7745230f137a4a0e3910e42b60448e151e09d9361394e',
+  '0xd98f0f503d64cfe5e28db27054318c28cc7bf3d03b66932c41fb46e4ffba3107',
+  '0xdc844c8cc27ad9a1d122c03adeadc8b3652d29008d88344823ad9d52555b926b',
 ])
 
 /** An explicit deployment choice, restricted to the reviewed registry above. */

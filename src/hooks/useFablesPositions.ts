@@ -17,12 +17,14 @@ export async function fetchFablesPositions(owner: Address, manualRefs: readonly 
   positions: FablesPosition[]
   tokens: Record<string, FablesToken>
   indexError: string | null
+  indexWarning: string | null
 }> {
   if (CHAIN.id !== 4663) throw new Error('Fables requires Robinhood Chain')
   const pools = await readFablesPools(publicRpcClient)
   const path = indexerApiPath('fables/positions', CHAIN.key, ENV.chainGateway, ACTIVE_IS_BUILD)
   let candidates: Candidate[] = []
   let indexError: string | null = null
+  let unreviewedPools: string[] = []
   try {
     if (!path) throw new Error('Fables position index is unavailable on this host')
     const url = new URL(path, location.origin)
@@ -30,7 +32,7 @@ export async function fetchFablesPositions(owner: Address, manualRefs: readonly 
     const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(15_000) })
     if (!response.ok) throw new Error(`Fables position index HTTP ${response.status}`)
     const body = await response.json() as {
-      chainId?: unknown; ready?: unknown; error?: unknown; candidates?: unknown
+      chainId?: unknown; ready?: unknown; error?: unknown; unreviewedPools?: unknown; candidates?: unknown
     }
     if (body.chainId !== 4663 || !Array.isArray(body.candidates))
       throw new Error('Fables position index returned an invalid chain or shape')
@@ -38,6 +40,12 @@ export async function fetchFablesPositions(owner: Address, manualRefs: readonly 
       throw new Error(`Fables position index is not ready${body.error ? `: ${String(body.error)}` : ''}`)
     if (body.candidates.length > 500) throw new Error('Fables position index has too many candidates for this wallet')
     candidates = body.candidates as Candidate[]
+    // Registered pools that postdate the reviewed snapshot: the index scans
+    // them, but reads skip them until the snapshot is refreshed by hand.
+    unreviewedPools = Array.isArray(body.unreviewedPools)
+      ? body.unreviewedPools.filter((row): row is string =>
+          typeof row === 'string' && /^0x[0-9a-f]{64}$/.test(row)).slice(0, 50)
+      : []
   } catch (error) {
     indexError = String(error)
     if (manualRefs.length === 0) throw error
@@ -56,6 +64,7 @@ export async function fetchFablesPositions(owner: Address, manualRefs: readonly 
   }
   candidates = [...new Map(candidates.map(row => [`${row.hook.toLowerCase()}:${row.rangeId}`, row])).values()]
   const positions: FablesPosition[] = []
+  let skippedUnreviewed = 0
   // Bounded parallel reads; range IDs are hints, and every retained result is
   // independently checked against hook balances, registry and Lens.
   for (let i = 0; i < candidates.length; i += 8) {
@@ -66,6 +75,10 @@ export async function fetchFablesPositions(owner: Address, manualRefs: readonly 
         })
       } catch (error) {
         if (error instanceof Error && error.message === 'E_FABLES_POSITION_EMPTY') return null
+        if (error instanceof Error && error.message === 'E_FABLES_POOL_UNREVIEWED') {
+          skippedUnreviewed++
+          return null
+        }
         throw error
       }
     }))
@@ -92,7 +105,12 @@ export async function fetchFablesPositions(owner: Address, manualRefs: readonly 
         ? Number(decimals.value) : null,
     }
   }))
-  return { positions, tokens, indexError }
+  const parts: string[] = []
+  if (unreviewedPools.length)
+    parts.push(`事件索引正常,但 ${unreviewedPools.length} 个新池尚未收录审查快照,相关池的仓位暂不展示`
+      + `（${unreviewedPools.slice(0, 3).map(id => `${id.slice(0, 10)}…`).join(' ')}${unreviewedPools.length > 3 ? ' 等' : ''}）`)
+  if (skippedUnreviewed) parts.push(`已跳过 ${skippedUnreviewed} 个属于未审查池的候选读取`)
+  return { positions, tokens, indexError, indexWarning: parts.length ? parts.join(';') : null }
 }
 
 export function useFablesPositions(owner: Address | undefined, manualRefs: readonly FablesManualRef[] = []) {
