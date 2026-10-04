@@ -1,4 +1,5 @@
 import { createPublicClient, defineChain, fallback, http, type PublicClient } from 'viem'
+import { recordRpcRequest } from './rpc-metrics'
 import {
   BSC_PUBLIC_INDEXER_RPCS,
   CHAIN,
@@ -29,7 +30,7 @@ export const usingPrivateRpc = urls.some((url) => !knownPublicRpcs.has(url))
 export const pc: PublicClient = createPublicClient({
   chain: indexerChain,
   transport: fallback(
-    urls.map((url) => http(url, { timeout: 10_000 })),
+    urls.map((url) => http(url, { timeout: 10_000, onFetchRequest: recordRpcRequest() })),
     { retryCount: 2, retryDelay: 400 },
   ),
 })
@@ -63,7 +64,7 @@ export function createRpcRequestRotator<TClient>(
 const directClients: PublicClient[] = urls.map((url) =>
   createPublicClient({
     chain: indexerChain,
-    transport: http(url, { timeout: 10_000 }),
+    transport: http(url, { timeout: 10_000, onFetchRequest: recordRpcRequest() }),
   }),
 )
 
@@ -97,7 +98,9 @@ export function assertConfiguredRpcChainIds(actualChainIds: readonly number[]): 
 export async function verifyRpcChain(): Promise<number> {
   const actualChainIds = await Promise.all(
     urls.map((url) =>
-      createPublicClient({ transport: http(url, { timeout: 10_000 }) }).getChainId(),
+      createPublicClient({
+        transport: http(url, { timeout: 10_000, onFetchRequest: recordRpcRequest() }),
+      }).getChainId(),
     ),
   )
   assertConfiguredRpcChainIds(actualChainIds)

@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { isMainThread, parentPort, workerData, Worker } from 'node:worker_threads';
 import { ADDR, CHAIN, INDEX_V2, PORT, TUNE, UNI, V4, log, now } from './config';
 import { safeError } from './rpc';
+import { rpcMetrics } from './rpc-metrics';
 import {
   db,
   enqueueHydrationDemand,
@@ -3926,6 +3927,10 @@ export function createApiServer(): Server {
       }
       else if (url.pathname === '/api/health') {
         body = getHealth();
+        cache = NO_STORE;
+      }
+      else if (url.pathname === '/api/rpc-metrics') {
+        body = rpcMetrics();
         cache = NO_STORE;
       } else {
         res.writeHead(404, { ...JSONH, 'cache-control': NO_STORE });
