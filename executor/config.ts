@@ -129,7 +129,9 @@ export const EXECUTOR = {
   // The main loop stays responsive for jobs/recovery, while ordinary price
   // monitoring is independently rate-limited below. Existing strategies that
   // persisted the old 4-second default automatically inherit this floor.
-  monitorMinSeconds: boundedInteger('LP_EXECUTOR_MONITOR_MIN_SECONDS', 10, 2, 300),
+  // Production runs at 60s (2026-10-04): RPC cost review put the monitor's
+  // eth_call share at ~135k calls/day across both executors.
+  monitorMinSeconds: boundedInteger('LP_EXECUTOR_MONITOR_MIN_SECONDS', 60, 2, 300),
   monitorIdentityTtlSeconds: boundedInteger('LP_EXECUTOR_MONITOR_IDENTITY_TTL_SECONDS', 300, 30, 3600),
   confirmations: boundedInteger('LP_EXECUTOR_CONFIRMATIONS', 2, 1, 12),
   maxBodyBytes: 16 * 1024,
